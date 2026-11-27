@@ -115,17 +115,7 @@ struct JoinOnExit {
     }
 };
 
-// Polls `done` for up to `timeout`; true as soon as it holds.
-bool eventually(const std::function<bool()>& done, std::chrono::milliseconds timeout = std::chrono::seconds(4)) {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (done()) {
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-    return done();
-}
+using alpacacore::test::wait_until;
 
 } // namespace
 
@@ -524,7 +514,7 @@ TEST_CASE("QHY Camera Driver - a disconnect inside a telemetry start does not st
     sdk.set_param("fake-qhy-0", CURTEMP, 12.5);
     // Until the new worker's first poll lands the getter raises InvalidOperation
     // instead of answering a placeholder, so a throw counts as "not yet".
-    CHECK(eventually([&]() {
+    CHECK(wait_until([&]() {
         try {
             return std::abs(driver->get_ccd_temperature() - 12.5) < 1e-3;
         } catch (const alpacacore::AlpacaException&) {
@@ -563,7 +553,7 @@ TEST_CASE("QHY Camera Driver - a disconnect inside a temperature-worker start do
     // the setpoint (0.0) on every call; nothing else writes it. A live worker
     // moves the planted value within a second or so.
     sdk.set_param("fake-qhy-0", CURTEMP, 10.0);
-    CHECK(eventually([&]() { return sdk.get_param("fake-qhy-0", CURTEMP) < 10.0; }));
+    CHECK(wait_until([&]() { return sdk.get_param("fake-qhy-0", CURTEMP) < 10.0; }));
 
     driver->set_connected(false);
 }
@@ -592,7 +582,7 @@ TEST_CASE("QHY Camera Driver - a stale telemetry start released after a reconnec
     reconnector.join();
     REQUIRE(driver->get_connected());
     sdk.set_param("fake-qhy-0", CURTEMP, 12.5);
-    CHECK(eventually([&]() {
+    CHECK(wait_until([&]() {
         try {
             return std::abs(driver->get_ccd_temperature() - 12.5) < 1e-3;
         } catch (const alpacacore::AlpacaException&) {
@@ -622,7 +612,7 @@ TEST_CASE("QHY Camera Driver - BinX write during an exposure fails at once", "[q
 
     armed = true;
     driver->start_exposure(1.0, true);
-    REQUIRE(eventually([&]() { return in_frame.load(); }));
+    REQUIRE(wait_until([&]() { return in_frame.load(); }));
 
     std::atomic<int> bin_code{-2};  // -2 = still blocked
     std::thread binner([&] {
@@ -638,8 +628,8 @@ TEST_CASE("QHY Camera Driver - BinX write during an exposure fails at once", "[q
         (void)driver->get_camera_state();
         state_done = true;
     });
-    const bool state_ok = eventually([&]() { return state_done.load(); });
-    const bool bin_done = eventually([&]() { return bin_code.load() != -2; });
+    const bool state_ok = wait_until([&]() { return state_done.load(); });
+    const bool bin_done = wait_until([&]() { return bin_code.load() != -2; });
     const int code = bin_code.load();
     release = true;
     binner.join();
@@ -657,13 +647,13 @@ TEST_CASE("QHY Camera Driver - a failed exposure is raised by ImageReady and Ima
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
     driver->set_connected(true);
     driver->start_exposure(0.1, true);
-    REQUIRE(eventually([&] { return error_code_of([&] { (void)driver->get_image_ready(); }) != 0; }));
+    REQUIRE(wait_until([&] { return error_code_of([&] { (void)driver->get_image_ready(); }) != 0; }));
     CHECK(error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException);
     CHECK(error_code_of([&] { (void)driver->get_image_array(); }) == alpacacore::AlpacaError::DriverException);
     // The next StartExposure clears the stored failure.
     fake.frame_ok = true;
     driver->start_exposure(0.05, true);
-    CHECK(eventually([&] { return error_code_of([&] { (void)driver->get_image_ready(); }) == 0; }));
+    CHECK(wait_until([&] { return error_code_of([&] { (void)driver->get_image_ready(); }) == 0; }));
     driver->set_connected(false);
 }
 
@@ -678,7 +668,7 @@ TEST_CASE("QHY Camera Driver - a throwing frame read fails the exposure instead 
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
     driver->set_connected(true);
     driver->start_exposure(0.1, true);
-    REQUIRE(eventually([&] { return error_code_of([&] { (void)driver->get_image_ready(); }) != 0; }));
+    REQUIRE(wait_until([&] { return error_code_of([&] { (void)driver->get_image_ready(); }) != 0; }));
     std::string what;
     try {
         (void)driver->get_image_ready();
@@ -690,7 +680,7 @@ TEST_CASE("QHY Camera Driver - a throwing frame read fails the exposure instead 
     // The next StartExposure clears the stored failure.
     fake.frame_throw.reset();
     driver->start_exposure(0.05, true);
-    CHECK(eventually([&] { return error_code_of([&] { (void)driver->get_image_ready(); }) == 0; }));
+    CHECK(wait_until([&] { return error_code_of([&] { (void)driver->get_image_ready(); }) == 0; }));
     driver->set_connected(false);
 }
 
@@ -706,17 +696,17 @@ TEST_CASE("QHY Camera Driver - LastExposure values follow successful images only
     SECTION("a failed first exposure publishes nothing") {
         fake.frame_ok = false;
         driver->start_exposure(0.01, true);
-        REQUIRE(eventually(failed));
+        REQUIRE(wait_until(failed));
         alpacacore::test::require_last_exposure_unset(*driver);
     }
     SECTION("a later failure keeps the earlier success") {
         driver->start_exposure(0.05, true);
-        REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+        REQUIRE(wait_until([&] { return driver->get_image_ready(); }));
         const auto start = driver->get_last_exposure_start_time();
         CHECK(driver->get_last_exposure_duration() == 0.05);
         fake.frame_ok = false;
         driver->start_exposure(0.07, true);
-        REQUIRE(eventually(failed));
+        REQUIRE(wait_until(failed));
         CHECK(driver->get_last_exposure_duration() == 0.05);
         CHECK(driver->get_last_exposure_start_time() == start);
     }
@@ -733,7 +723,7 @@ TEST_CASE("QHY Camera Driver - AbortExposure keeps a failure from a completed ex
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
     driver->set_connected(true);
     driver->start_exposure(0.1, true);
-    REQUIRE(eventually([&] { return error_code_of([&] { (void)driver->get_image_ready(); }) != 0; }));
+    REQUIRE(wait_until([&] { return error_code_of([&] { (void)driver->get_image_ready(); }) != 0; }));
 
     driver->abort_exposure();
     CHECK(error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException);
@@ -741,7 +731,7 @@ TEST_CASE("QHY Camera Driver - AbortExposure keeps a failure from a completed ex
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
     fake.frame_ok = true;
     driver->start_exposure(0.05, true);
-    CHECK(eventually([&] { return error_code_of([&] { (void)driver->get_image_ready(); }) == 0; }));
+    CHECK(wait_until([&] { return error_code_of([&] { (void)driver->get_image_ready(); }) == 0; }));
     driver->set_connected(false);
 }
 
@@ -754,7 +744,7 @@ TEST_CASE("QHY Camera Driver - malformed SDK frame never publishes ImageReady an
     driver->set_connected(true);
     driver->start_exposure(0.05, true);
 
-    REQUIRE(eventually([&] {
+    REQUIRE(wait_until([&] {
         return error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException;
     }));
     const int array_error = error_code_of([&] { (void)driver->get_image_array(); });
@@ -764,20 +754,20 @@ TEST_CASE("QHY Camera Driver - malformed SDK frame never publishes ImageReady an
     fake.frame_width.reset();
     fake.frame_bpp = 12;
     driver->start_exposure(0.05, true);
-    REQUIRE(eventually([&] {
+    REQUIRE(wait_until([&] {
         return error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException;
     }));
 
     fake.frame_bpp.reset();
     fake.mem_length_override = 1;
     driver->start_exposure(0.05, true);
-    REQUIRE(eventually([&] {
+    REQUIRE(wait_until([&] {
         return error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException;
     }));
 
     fake.mem_length_override.reset();
     driver->start_exposure(0.05, true);
-    REQUIRE(eventually([&] {
+    REQUIRE(wait_until([&] {
         try {
             return driver->get_image_ready();
         } catch (const alpacacore::AlpacaException&) {
@@ -800,7 +790,7 @@ TEST_CASE("QHY Camera Driver - malformed exposure failure clears on reconnect", 
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
     driver->set_connected(true);
     driver->start_exposure(0.05, true);
-    REQUIRE(eventually([&] {
+    REQUIRE(wait_until([&] {
         return error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException;
     }));
 
@@ -823,7 +813,7 @@ TEST_CASE("QHY Camera Driver - positive short SDK frame is zero-padded to reques
     driver->set_num_y(3);
     driver->start_exposure(0.05, true);
 
-    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    REQUIRE(wait_until([&] { return driver->get_image_ready(); }));
     const auto image = driver->get_image_array();
     CHECK(image.width == 4);
     CHECK(image.height == 3);
@@ -849,7 +839,7 @@ TEST_CASE("QHY Camera Driver - 16-bit samples are read little-endian (low byte f
     driver->set_num_x(2);
     driver->set_num_y(2);
     driver->start_exposure(0.05, true);
-    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    REQUIRE(wait_until([&] { return driver->get_image_ready(); }));
     const auto image = driver->get_image_array();
     CHECK(image.width == 2);
     CHECK(image.height == 2);
@@ -876,7 +866,7 @@ TEST_CASE("QHY Camera Driver - 3-channel 8-bit frames are BGR and come out as RG
     driver->set_num_x(2);
     driver->set_num_y(1);
     driver->start_exposure(0.05, true);
-    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    REQUIRE(wait_until([&] { return driver->get_image_ready(); }));
     const auto image = driver->get_image_array();
     CHECK(image.width == 2);
     CHECK(image.height == 1);
@@ -898,7 +888,7 @@ TEST_CASE("QHY Camera Driver - ImageArray keeps the completed frame's NumX after
     driver->set_num_x(4);
     driver->set_num_y(3);
     driver->start_exposure(0.05, true);
-    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    REQUIRE(wait_until([&] { return driver->get_image_ready(); }));
 
     driver->set_num_x(2);
     const auto image = driver->get_image_array();
@@ -930,7 +920,7 @@ TEST_CASE("QHY Camera Driver - a readout mode change keeps binning and sizes the
     CHECK(fake.call_count("set_bin_mode") == bin_mode_writes + 1);
 
     driver->start_exposure(0.001, true);
-    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    REQUIRE(wait_until([&] { return driver->get_image_ready(); }));
     driver->set_connected(false);
 }
 
@@ -946,7 +936,7 @@ TEST_CASE("QHY Camera Driver - ImageArray keeps the completed frame's NumY after
     driver->set_num_x(4);
     driver->set_num_y(3);
     driver->start_exposure(0.05, true);
-    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    REQUIRE(wait_until([&] { return driver->get_image_ready(); }));
 
     driver->set_num_y(1);
     const auto image = driver->get_image_array();
@@ -997,7 +987,7 @@ TEST_CASE("QHY Camera Driver - StopExposure is not supported and AbortExposure k
     CHECK(driver->get_can_abort_exposure());
     require_alpaca_error([&] { driver->stop_exposure(); }, alpacacore::AlpacaError::MethodNotImplemented);
     driver->start_exposure(0.05, true);
-    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    REQUIRE(wait_until([&] { return driver->get_image_ready(); }));
     driver->abort_exposure();
     CHECK(driver->get_image_ready());
     CHECK(error_code_of([&] { (void)driver->get_last_exposure_duration(); }) == 0);
@@ -1023,7 +1013,7 @@ TEST_CASE("QHY Camera Driver - HeatSinkTemperature, ElectronsPerADU and FullWell
     LockedQHYSDK sdk(fake);
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
     driver->set_connected(true);
-    REQUIRE(eventually([&] { return error_code_of([&] { (void)driver->get_ccd_temperature(); }) == 0; }));
+    REQUIRE(wait_until([&] { return error_code_of([&] { (void)driver->get_ccd_temperature(); }) == 0; }));
     require_alpaca_error([&] { (void)driver->get_heat_sink_temperature(); },
                          alpacacore::AlpacaError::PropertyNotImplemented);
     require_alpaca_error([&] { (void)driver->get_electrons_per_adu(); },
@@ -1056,7 +1046,7 @@ TEST_CASE("QHY Camera Driver - CCDTemperature is not invented", "[qhy][camera][u
         LockedQHYSDK sdk(fake);
         auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
         driver->set_connected(true);
-        CHECK(eventually([&] {
+        CHECK(wait_until([&] {
             return error_code_of([&] { (void)driver->get_ccd_temperature(); }) ==
                    alpacacore::AlpacaError::PropertyNotImplemented;
         }));
@@ -1074,9 +1064,9 @@ TEST_CASE("QHY Camera Driver - CCDTemperature is not invented", "[qhy][camera][u
         LockedQHYSDK sdk(fake);
         auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
         driver->set_connected(true);
-        REQUIRE(eventually([&] { return error_code_of([&] { (void)driver->get_ccd_temperature(); }) == 0; }));
+        REQUIRE(wait_until([&] { return error_code_of([&] { (void)driver->get_ccd_temperature(); }) == 0; }));
         fail_reads = true;
-        CHECK(eventually([&] {
+        CHECK(wait_until([&] {
             return error_code_of([&] { (void)driver->get_ccd_temperature(); }) ==
                    alpacacore::AlpacaError::InvalidOperation;
         }));
@@ -1111,7 +1101,7 @@ TEST_CASE("QHY Camera Driver - ImageArray during an exposure is InvalidOperation
     driver->set_connected(true);
     armed = true;
     driver->start_exposure(1.0, true);
-    REQUIRE(eventually([&] { return in_frame.load(); }));
+    REQUIRE(wait_until([&] { return in_frame.load(); }));
     const auto t0 = std::chrono::steady_clock::now();
     int code = 0;
     bool asked_too_early = false;
@@ -1428,7 +1418,7 @@ TEST_CASE("QHY Camera Driver - exposure limits fail fast during connect", "[qhy]
     auto driver = alpacacore::vendor::qhy::create_qhy_camera_by_index(0, 0, fake, clock);
     TeardownGuard teardown{clock, driver, &gate};
     driver->connect();
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     std::atomic<int> error{0};
     std::thread reader([&] {
         try {
@@ -1442,7 +1432,7 @@ TEST_CASE("QHY Camera Driver - exposure limits fail fast during connect", "[qhy]
         }
     });
     JoinPumped joiner{clock, reader, &gate};
-    CHECK(eventually([&] { return error.load() != 0; }, milliseconds(500)));
+    CHECK(wait_until([&] { return error.load() != 0; }, milliseconds(500)));
     CHECK(error.load() == AlpacaError::NotConnected);
 }
 
@@ -1470,7 +1460,7 @@ TEST_CASE("QHY Camera Driver - metadata is tied to worker arm not request or rea
     driver->set_connected(true);
     std::thread starter([&] { driver->start_exposure(0.012345, true); });
     JoinPumped joiner{clock, starter, &gate};
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     alpacacore::test::require_last_exposure_unset(*driver);
     clock.advance(milliseconds(500));
     CHECK(driver->get_percent_completed() == 0.0);
@@ -1483,7 +1473,7 @@ TEST_CASE("QHY Camera Driver - metadata is tied to worker arm not request or rea
     clock.advance(milliseconds(6));
     ALPACA_REQUIRE_APPROX(driver->get_percent_completed(), 100.0 * 0.006 / 0.012345);
     clock.advance(milliseconds(994));
-    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    REQUIRE(wait_until([&] { return driver->get_image_ready(); }));
     CHECK(driver->get_last_exposure_duration() == 0.012345);
     const auto start = driver->get_last_exposure_start_time();
     CHECK(start >= arm_lower);
@@ -1521,7 +1511,7 @@ TEST_CASE("QHY Camera Driver - pending cancelled and timed out frames cannot pub
     std::chrono::system_clock::time_point previous_start{};
     if (previous_success) {
         driver->start_exposure(0.02, true);
-        REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+        REQUIRE(wait_until([&] { return driver->get_image_ready(); }));
         REQUIRE_NOTHROW(previous_start = driver->get_last_exposure_start_time());
         driver->set_connected(true);  // redundant connect keeps the pair
     }
@@ -1535,7 +1525,7 @@ TEST_CASE("QHY Camera Driver - pending cancelled and timed out frames cannot pub
     };
     gate.armed = true;
     driver->start_exposure(2.0, true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     unchanged();
     CHECK_FALSE(driver->get_image_ready());
     CHECK(error_code_of([&] { driver->start_exposure(-1.0, true); }) == AlpacaError::InvalidValue);
@@ -1548,7 +1538,7 @@ TEST_CASE("QHY Camera Driver - pending cancelled and timed out frames cannot pub
             abort_done = true;
         });
         JoinPumped joiner{clock, aborter, &gate};
-        REQUIRE(eventually([&] { return cancelled.load(); }));
+        REQUIRE(wait_until([&] { return cancelled.load(); }));
         gate.release = true;
         // Step the clock until the aborter returns: AbortExposure joins the body once the cancel releases its frame
         // call.
@@ -1565,12 +1555,12 @@ TEST_CASE("QHY Camera Driver - pending cancelled and timed out frames cannot pub
     SECTION("download failure preserves the pair") {
         fake.frame_ok = false;
         gate.release = true;
-        REQUIRE(eventually(
+        REQUIRE(wait_until(
             [&] { return error_code_of([&] { (void)driver->get_image_ready(); }) == AlpacaError::DriverException; }));
     }
     SECTION("a new success replaces both values") {
         gate.release = true;
-        REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+        REQUIRE(wait_until([&] { return driver->get_image_ready(); }));
         CHECK(driver->get_last_exposure_duration() == 2.0);
         CHECK(driver->get_last_exposure_start_time() >= previous_start);
         CHECK(disconnect_stepping(clock, *driver) < seconds(2));
@@ -1696,7 +1686,7 @@ TEST_CASE("QHY Camera Driver - control getters finish while a download is blocke
     driver->set_connected(true);
     const int expected = read_cached_control(*driver, property);
     driver->start_exposure(0.02, true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     const auto reads =
         fake.call_count("get_param") + fake.call_count("get_param_range") + fake.call_count("is_control_available");
     int actual = -1;
@@ -1706,7 +1696,7 @@ TEST_CASE("QHY Camera Driver - control getters finish while a download is blocke
         done = true;
     });
     JoinPumped joiner{clock, reader, &gate};
-    CHECK(eventually([&] { return done.load(); }, milliseconds(500)));
+    CHECK(wait_until([&] { return done.load(); }, milliseconds(500)));
     CHECK_FALSE(gate.release.load());
     gate.release = true;
     reader.join();
@@ -1799,7 +1789,7 @@ void check_cached_getters_during_mode_change(const std::string& blocked_call) {
     TeardownGuard teardown{clock, driver, &gate};
     driver->set_connected(true);
     driver->start_exposure(0.02, true);
-    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    REQUIRE(wait_until([&] { return driver->get_image_ready(); }));
     const auto name = driver->get_name();
     const auto width = driver->get_camera_x_size();
     const auto height = driver->get_camera_y_size();
@@ -1813,7 +1803,7 @@ void check_cached_getters_during_mode_change(const std::string& blocked_call) {
     int mode_error = -1;
     std::thread changer([&] { mode_error = worker_code_of([&] { driver->set_readout_mode(1); }); });
     JoinPumped change_joiner{clock, changer, &gate};
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
 
     std::atomic<bool> done{false};
     bool matches = false;
@@ -1848,7 +1838,7 @@ void check_cached_getters_during_mode_change(const std::string& blocked_call) {
         done = true;
     });
     JoinPumped read_joiner{clock, reader, &gate};
-    const bool completed_while_blocked = eventually([&] { return done.load(); }, milliseconds(500));
+    const bool completed_while_blocked = wait_until([&] { return done.load(); }, milliseconds(500));
     CHECK_FALSE(gate.release.load());
     gate.release = true;
     reader.join();
@@ -1916,7 +1906,7 @@ void check_failed_qhy_mode_configuration(bool fail_reinitialization) {
     CHECK(driver->get_offset() == 20);
     CHECK(driver->get_max_bin_x() == 2);
     driver->start_exposure(1.0, true);
-    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    REQUIRE(wait_until([&] { return driver->get_image_ready(); }));
     CHECK(driver->get_last_exposure_duration() == 1.0);
     CHECK(disconnect_stepping(clock, *driver) < seconds(2));
 }
@@ -1962,7 +1952,7 @@ TEST_CASE("QHY Camera Driver - cached getters do not wait behind configuration w
         });
     });
     JoinPumped write_joiner{clock, writer, &gate};
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     std::atomic<bool> done{false};
     bool matches = false;
     int read_error = -1;
@@ -1974,7 +1964,7 @@ TEST_CASE("QHY Camera Driver - cached getters do not wait behind configuration w
         done = true;
     });
     JoinPumped read_joiner{clock, reader, &gate};
-    const bool completed_while_blocked = eventually([&] { return done.load(); }, milliseconds(500));
+    const bool completed_while_blocked = wait_until([&] { return done.load(); }, milliseconds(500));
     gate.release = true;
     reader.join();
     writer.join();
@@ -2000,7 +1990,7 @@ TEST_CASE("QHY Camera Driver - redundant connect does not wait behind configurat
     int write_error = -1;
     std::thread writer([&] { write_error = worker_code_of([&] { driver->set_gain(42); }); });
     JoinPumped write_joiner{clock, writer, &gate};
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     std::atomic<bool> done{false};
     int connect_error = -1;
     std::thread connector([&] {
@@ -2008,7 +1998,7 @@ TEST_CASE("QHY Camera Driver - redundant connect does not wait behind configurat
         done = true;
     });
     JoinPumped connect_joiner{clock, connector, &gate};
-    const bool completed_while_blocked = eventually([&] { return done.load(); }, milliseconds(500));
+    const bool completed_while_blocked = wait_until([&] { return done.load(); }, milliseconds(500));
     CHECK_FALSE(gate.release.load());
     gate.release = true;
     connector.join();
@@ -2032,7 +2022,7 @@ TEST_CASE("QHY Camera Driver - cached control reads do not extend disconnect pas
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
     TeardownGuard teardown{clock, driver, &gate};
     driver->set_connected(true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     std::atomic<bool> read_done{false};
     int read_error = -1;
     std::thread reader([&] {
@@ -2040,7 +2030,7 @@ TEST_CASE("QHY Camera Driver - cached control reads do not extend disconnect pas
         read_done = true;
     });
     JoinPumped read_joiner{clock, reader, &gate};
-    CHECK(eventually([&] { return read_done.load(); }));
+    CHECK(wait_until([&] { return read_done.load(); }));
     std::atomic<bool> done{false};
     int disconnect_error = -1;
     std::thread disconnector([&] {
@@ -2059,7 +2049,7 @@ TEST_CASE("QHY Camera Driver - cached control reads do not extend disconnect pas
         reader.join();
         disconnector.join();
     }
-    REQUIRE(eventually([&] { return sdk.temperature_returned.load(); }));
+    REQUIRE(wait_until([&] { return sdk.temperature_returned.load(); }));
     // Release the simulated last physical-handle reference only after the
     // calls finish; no fake bookkeeping is mutated underneath a blocked call.
     sdk.LockedQHYSDK::close_camera("fake-qhy-0");
@@ -2124,7 +2114,7 @@ TEST_CASE("QHY Camera Driver - disconnect clears state before waiting for config
         });
     });
     JoinPumped write_joiner{clock, writer, &gate};
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     std::atomic<bool> done{false};
     int disconnect_error = -1;
     std::thread disconnector([&] {
@@ -2132,7 +2122,7 @@ TEST_CASE("QHY Camera Driver - disconnect clears state before waiting for config
         done = true;
     });
     JoinPumped disconnect_joiner{clock, disconnector, &gate};
-    const bool disconnected_while_blocked = eventually([&] { return !driver->get_connected(); }, milliseconds(500));
+    const bool disconnected_while_blocked = wait_until([&] { return !driver->get_connected(); }, milliseconds(500));
     if (disconnected_while_blocked) {
         CHECK(error_code_of([&] { driver->set_readout_mode(0); }) == AlpacaError::NotConnected);
         CHECK(error_code_of([&] { (void)driver->get_camera_x_size(); }) == AlpacaError::NotConnected);
@@ -2162,7 +2152,7 @@ TEST_CASE("QHY Camera Driver - configuration publication refuses a pending disco
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
     TeardownGuard teardown{clock, driver, &pid_gate};
     driver->set_connected(true);
-    REQUIRE(eventually([&] { return pid_gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return pid_gate.entered.load(); }));
     REQUIRE(clock.wait_for_waiters(1, seconds(2)));
     write_gate.armed = true;
     int write_error = -1;
@@ -2177,7 +2167,7 @@ TEST_CASE("QHY Camera Driver - configuration publication refuses a pending disco
         });
     });
     JoinPumped write_joiner{clock, writer, &write_gate};
-    REQUIRE(eventually([&] { return write_gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return write_gate.entered.load(); }));
     const auto waits = clock.wait_count();
     std::thread disconnector([&] { driver->set_connected(false); });
     JoinPumped disconnect_joiner{clock, disconnector, &write_gate};
@@ -2229,7 +2219,7 @@ TEST_CASE("QHY Camera Driver - pulse guide returns while a readout mode transact
     int mode_error = -1;
     std::thread changer([&] { mode_error = worker_code_of([&] { driver->set_readout_mode(1); }); });
     JoinPumped change_joiner{clock, changer, &gate};
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
 
     std::atomic<bool> returned{false};
     int pulse_error = -1;
@@ -2255,7 +2245,7 @@ TEST_CASE("QHY Camera Driver - pulse guide returns while a readout mode transact
         }
     } drain{gate, guider, pulse_error, sdk.guide_finished};
 
-    const bool returned_while_blocked = eventually([&] { return returned.load(); }, milliseconds(500));
+    const bool returned_while_blocked = wait_until([&] { return returned.load(); }, milliseconds(500));
     CHECK_FALSE(gate.release.load());
     REQUIRE(returned_while_blocked);
     CHECK(pulse_error == 0);
@@ -2315,14 +2305,14 @@ TEST_CASE("QHY Camera Driver - mode transactions serialize exposure setup and re
     driver->set_connected(true);
     if (completed_exposure) {
         driver->start_exposure(0.02, true);
-        REQUIRE(eventually([&] { return !sdk.running->load(); }));
+        REQUIRE(wait_until([&] { return !sdk.running->load(); }));
         REQUIRE(driver->get_image_ready());
     }
     gate.armed = true;
     int mode_error = -1;
     std::thread changer([&] { mode_error = worker_code_of([&] { driver->set_readout_mode(1); }); });
     JoinPumped change_joiner{clock, changer, &gate};
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     std::atomic<bool> started{false};
     std::atomic<bool> done{false};
     int competing_error = -1;
@@ -2345,10 +2335,10 @@ TEST_CASE("QHY Camera Driver - mode transactions serialize exposure setup and re
         done = true;
     });
     JoinPumped competing_joiner{clock, competitor, &gate};
-    REQUIRE(eventually([&] { return started.load(); }));
+    REQUIRE(wait_until([&] { return started.load(); }));
     // Observe above the decorator lock: its serialization must not conceal a
     // driver transaction split into individually serialized SDK calls.
-    eventually([&] { return sdk.exposure_setup.load() || sdk.closed.load() || sdk.cancelled.load() || done.load(); },
+    wait_until([&] { return sdk.exposure_setup.load() || sdk.closed.load() || sdk.cancelled.load() || done.load(); },
                milliseconds(200));
     const bool finished_during_transition = done.load();
     gate.release = true;
@@ -2378,7 +2368,7 @@ TEST_CASE("QHY Camera Driver - mode transactions serialize exposure setup and re
             CHECK((competing_error == 0 || competing_error == AlpacaError::InvalidOperation));
         }
         CHECK(mode_error == 0);
-        if (competing_error == 0) REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+        if (competing_error == 0) REQUIRE(wait_until([&] { return driver->get_image_ready(); }));
     }
     CHECK(disconnect_stepping(clock, *driver) < seconds(2));
     CHECK(fake.physical_opens == fake.physical_closes);
@@ -2409,7 +2399,7 @@ TEST_CASE("QHY Camera Driver - configuration writes refuse a blocked download wi
     TeardownGuard teardown{clock, driver, &gate};
     driver->set_connected(true);
     driver->start_exposure(1.0, true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     std::atomic<bool> done{false};
     int write_error = -1;
     std::thread writer([&] {
@@ -2436,7 +2426,7 @@ TEST_CASE("QHY Camera Driver - configuration writes refuse a blocked download wi
         done = true;
     });
     JoinPumped write_joiner{clock, writer, &gate};
-    const bool refused_while_blocked = eventually([&] { return done.load(); }, milliseconds(500));
+    const bool refused_while_blocked = wait_until([&] { return done.load(); }, milliseconds(500));
     cancelled = false;
     std::atomic<bool> abort_done{false};
     int abort_error = -1;
@@ -2445,7 +2435,7 @@ TEST_CASE("QHY Camera Driver - configuration writes refuse a blocked download wi
         abort_done = true;
     });
     JoinPumped abort_joiner{clock, aborter, &gate};
-    const bool cancel_reached_download = eventually([&] { return cancelled.load(); }, milliseconds(500));
+    const bool cancel_reached_download = wait_until([&] { return cancelled.load(); }, milliseconds(500));
     gate.release = true;
     step_until(clock, [&] { return abort_done.load(); });
     aborter.join();
@@ -2524,7 +2514,7 @@ TEST_CASE("QHY Camera Driver - failed mode range refresh does not stop cooling o
     CHECK(driver->get_exposure_min() == 0.0001);
     CHECK(driver->get_exposure_max() == 3600.0);
     driver->start_exposure(0.02, true);
-    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    REQUIRE(wait_until([&] { return driver->get_image_ready(); }));
     CHECK(disconnect_stepping(clock, *driver) < seconds(2));
 }
 
@@ -2625,7 +2615,7 @@ TEST_CASE("QHY Camera Driver - above maximum exposure preserves the acquisition 
         require_alpaca_error([&] { driver->start_exposure(duration, true); }, AlpacaError::InvalidValue);
     }
     driver->start_exposure(2.0, true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     const int cancellations = fake.call_count("cancel_exposure");
     const int range_reads = fake.call_count("get_param_range");
     std::atomic<bool> done{false};
@@ -2635,14 +2625,14 @@ TEST_CASE("QHY Camera Driver - above maximum exposure preserves the acquisition 
         done = true;
     });
     JoinPumped joiner{clock, rejecter, &gate};
-    REQUIRE(eventually([&] { return done.load(); }));  // must not wait behind the held SDK download
+    REQUIRE(wait_until([&] { return done.load(); }));  // must not wait behind the held SDK download
     rejecter.join();
     CHECK(error == AlpacaError::InvalidValue);
     CHECK(fake.call_count("cancel_exposure") == cancellations);
     CHECK(fake.call_count("get_param_range") == range_reads);
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
     gate.release = true;
-    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    REQUIRE(wait_until([&] { return driver->get_image_ready(); }));
     CHECK(driver->get_last_exposure_duration() == 2.0);
     CHECK(disconnect_stepping(clock, *driver) < seconds(2));
 }
@@ -2666,7 +2656,7 @@ TEST_CASE("QHY Camera Driver - a failed exposure setup answers DriverException a
     std::chrono::system_clock::time_point previous_start{};
     if (previous_success) {
         driver->start_exposure(0.02, true);
-        REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+        REQUIRE(wait_until([&] { return driver->get_image_ready(); }));
         previous_start = driver->get_last_exposure_start_time();
     }
     const int arms = fake.call_count("start_single_frame");
@@ -2684,7 +2674,7 @@ TEST_CASE("QHY Camera Driver - a failed exposure setup answers DriverException a
         alpacacore::test::require_last_exposure_unset(*driver);
     }
     driver->start_exposure(1.0, true);
-    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    REQUIRE(wait_until([&] { return driver->get_image_ready(); }));
     CHECK(driver->get_last_exposure_duration() == 1.0);
 }
 
@@ -2713,16 +2703,16 @@ TEST_CASE("QHY Camera Driver - an unpolled deadline rejects a late successful fr
     std::chrono::system_clock::time_point previous_start{};
     if (previous_success) {
         driver->start_exposure(0.02, true);
-        REQUIRE(eventually([&] { return !sdk.running->load(); }));
+        REQUIRE(wait_until([&] { return !sdk.running->load(); }));
         REQUIRE(driver->get_image_ready());
         previous_start = driver->get_last_exposure_start_time();
     }
     gate.armed = true;
     driver->start_exposure(2.0, true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     clock.advance(seconds(63));  // exposure + default 60s margin, with no watchdog getter
     gate.release = true;
-    REQUIRE(eventually([&] { return !sdk.running->load(); }));
+    REQUIRE(wait_until([&] { return !sdk.running->load(); }));
     if (previous_success) {
         CHECK(driver->get_last_exposure_duration() == 0.02);
         CHECK(driver->get_last_exposure_start_time() == previous_start);
@@ -2748,7 +2738,7 @@ TEST_CASE("QHY Camera Driver - the exposure watchdog expires on the injected clo
     TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
     driver->start_exposure(2.0, true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
 
     // Deadline = 2 s exposure + 1 s margin on the fake clock.
     clock.advance(milliseconds(2999));
@@ -2781,7 +2771,7 @@ TEST_CASE("QHY Camera Driver - a watchdog timeout is raised by ImageReady and Im
     TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
     driver->start_exposure(0.05, true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     clock.advance(seconds(2));  // 0.05 s exposure + 1 s margin
     // Only the two image getters are polled: CameraState is never read.
     const auto code_of_ready = [&] { return error_code_of([&] { (void)driver->get_image_ready(); }); };
@@ -2791,7 +2781,7 @@ TEST_CASE("QHY Camera Driver - a watchdog timeout is raised by ImageReady and Im
     // The frame arrives late: the stored failure must stand, not turn into a
     // ready image without a new StartExposure.
     gate.release = true;
-    REQUIRE(eventually([&] { return !sdk.running->load(); }));
+    REQUIRE(wait_until([&] { return !sdk.running->load(); }));
     CHECK(code_of_ready() == alpacacore::AlpacaError::DriverException);
     CHECK(code_of_array() == alpacacore::AlpacaError::DriverException);
     CHECK(disconnect_stepping(clock, *driver) < seconds(2));
@@ -2826,7 +2816,7 @@ TEST_CASE("QHY Camera Driver - AbortExposure cancels the SDK exposure behind a w
     TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
     driver->start_exposure(0.05, true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     // The frame call stays blocked past the deadline: the watchdog marks the
     // exposure Failed while the worker still runs.
     clock.advance(seconds(2));
@@ -2842,7 +2832,7 @@ TEST_CASE("QHY Camera Driver - AbortExposure cancels the SDK exposure behind a w
     step_until(clock, [&] { return abort_done.load(); });
     REQUIRE(abort_done.load());
     CHECK(fake.call_count("cancel_exposure") == 1);
-    CHECK(eventually([&] { return !sdk.running->load(); }));
+    CHECK(wait_until([&] { return !sdk.running->load(); }));
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
     // Rule 3: the watchdog failure stays until the next StartExposure or a reconnect.
     CHECK(error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException);
@@ -2865,7 +2855,7 @@ TEST_CASE("QHY Camera Driver - a download in a slow readout mode extends the wat
     driver->set_connected(true);
     driver->set_readout_mode(1);
     driver->start_exposure(1.0, true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
 
     // Base deadline 1 s + 1 s margin = 2 s; extended = 1 s transfer + 15 s = 16 s.
     clock.advance(seconds(15));
@@ -2894,7 +2884,7 @@ TEST_CASE("QHY Camera Driver - the pre-download settle sleep waits on the inject
     clock.advance(milliseconds(999));
     CHECK(fake.call_count("get_single_frame") == 0);
     clock.advance(milliseconds(1));
-    CHECK(eventually([&] { return driver->get_image_ready(); }));
+    CHECK(wait_until([&] { return driver->get_image_ready(); }));
     CHECK(fake.call_count("get_single_frame") == 1);
 
     CHECK(disconnect_stepping(clock, *driver) < seconds(2));
@@ -2935,7 +2925,7 @@ TEST_CASE("QHY Camera Driver - a pulse guide ends on the injected clock", "[qhy]
     REQUIRE(driver->get_can_pulse_guide());
 
     driver->pulse_guide(0, 500);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     CHECK(driver->get_is_pulse_guiding());
     clock.advance(milliseconds(499));
     CHECK(driver->get_is_pulse_guiding());
@@ -2962,7 +2952,7 @@ TEST_CASE("QHY Camera Driver - a disconnect joins an exposure body that cancel_e
     TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
     driver->start_exposure(0.05, true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
 
     std::atomic<bool> done{false};
     std::thread t([&] {
@@ -2996,7 +2986,7 @@ TEST_CASE("QHY Camera Driver - AbortExposure stops the SDK exposure before it jo
     TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
     driver->start_exposure(0.05, true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     driver->abort_exposure();
     CHECK(cancels_while_held.load() == 1);
     CHECK_FALSE(sdk.running->load());
@@ -3019,7 +3009,7 @@ TEST_CASE("QHY Camera Driver - a disconnect during an exposure stops the SDK exp
     TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
     driver->start_exposure(0.05, true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     CHECK(disconnect_stepping(clock, *driver) < seconds(2));
     CHECK(cancels_while_held.load() == 1);
     CHECK_FALSE(sdk.running->load());
@@ -3054,7 +3044,7 @@ TEST_CASE("QHY Camera Driver - a Disconnect during a reserved StartExposure ends
     std::atomic<int> start_error{-1};
     std::thread starter([&] { start_error = worker_code_of([&] { driver->start_exposure(0.05, true); }); });
     JoinPumped start_joiner{clock, starter, &gate};
-    REQUIRE(eventually([&] { return gate.entered.load(); }));  // reserved, settings written, not yet Exposing
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));  // reserved, settings written, not yet Exposing
     REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
 
     std::atomic<bool> disconnected{false};
@@ -3071,7 +3061,7 @@ TEST_CASE("QHY Camera Driver - a Disconnect during a reserved StartExposure ends
     CHECK(start_error.load() == AlpacaError::NotConnected);
     CHECK(fake.call_count("start_single_frame") == 0);
     // Still inside the disconnect: no body ran, so no exposure is in flight and no failure was kept.
-    CHECK(eventually([&] { return driver->get_camera_state() == alpacacore::CameraState::Idle; }));
+    CHECK(wait_until([&] { return driver->get_camera_state() == alpacacore::CameraState::Idle; }));
     CHECK(error_code_of([&] { (void)driver->get_image_ready(); }) == 0);
 
     disconnect_parked.release();
@@ -3098,7 +3088,7 @@ TEST_CASE("QHY Camera Driver - destruction stops the SDK exposure and joins a bo
     TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
     driver->start_exposure(0.05, true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     std::atomic<bool> destroyed{false};
     std::thread destroyer([&] {
         driver.reset();
@@ -3127,7 +3117,7 @@ TEST_CASE("QHY Camera Driver - StartExposure stops a body the watchdog left in t
     TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
     driver->start_exposure(0.05, true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     clock.advance(seconds(2));  // 0.05 s exposure + 1 s margin: the watchdog fails it, the body stays in the SDK
     REQUIRE(error_code_of([&] { (void)driver->get_image_ready(); }) == AlpacaError::DriverException);
 
@@ -3142,7 +3132,7 @@ TEST_CASE("QHY Camera Driver - StartExposure stops a body the watchdog left in t
     REQUIRE(done.load());
     CHECK(code == 0);
     CHECK(cancels_while_held.load() == 1);
-    CHECK(eventually([&] {
+    CHECK(wait_until([&] {
         try {
             return driver->get_image_ready();
         } catch (const alpacacore::AlpacaException&) {
@@ -3164,7 +3154,7 @@ TEST_CASE("QHY Camera Driver - StartExposure is refused while a cancelled body s
     TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
     driver->start_exposure(0.05, true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     clock.advance(seconds(2));
     REQUIRE(error_code_of([&] { (void)driver->get_image_ready(); }) == AlpacaError::DriverException);
     const int writes = fake.call_count("set_param");
@@ -3183,9 +3173,9 @@ TEST_CASE("QHY Camera Driver - StartExposure is refused while a cancelled body s
     CHECK(fake.call_count("cancel_exposure") >= 1);
     CHECK(fake.call_count("set_param") == writes);  // no setup write queued behind the held call
     gate.release = true;
-    REQUIRE(eventually([&] { return !sdk.running->load(); }));
+    REQUIRE(wait_until([&] { return !sdk.running->load(); }));
     driver->start_exposure(0.05, true);
-    CHECK(eventually([&] {
+    CHECK(wait_until([&] {
         try {
             return driver->get_image_ready();
         } catch (const alpacacore::AlpacaException&) {
@@ -3233,7 +3223,7 @@ TEST_CASE("QHY Camera Driver - AbortExposure during a long exposure does not wai
     driver->set_connected(true);
     driver->start_exposure(3600.0, true);
     // The body is parked: inside the frame call, or in its wait on the task clock.
-    REQUIRE(eventually([&] { return gate.entered.load() || clock.waiter_count() > 0; }));
+    REQUIRE(wait_until([&] { return gate.entered.load() || clock.waiter_count() > 0; }));
     clock.advance(seconds(10));  // mid-exposure
 
     CHECK(stop_returns_while_frame_held(clock, gate, [&] { driver->abort_exposure(); }));
@@ -3257,7 +3247,7 @@ TEST_CASE("QHY Camera Driver - Disconnect during a long exposure does not wait f
     TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
     driver->start_exposure(3600.0, true);
-    REQUIRE(eventually([&] { return gate.entered.load() || clock.waiter_count() > 0; }));
+    REQUIRE(wait_until([&] { return gate.entered.load() || clock.waiter_count() > 0; }));
     clock.advance(seconds(10));  // mid-exposure
 
     CHECK(stop_returns_while_frame_held(clock, gate, [&] { driver->set_connected(false); }));
@@ -3279,11 +3269,11 @@ TEST_CASE("QHY Camera Driver - an exposure the SDK still reports running is read
     driver->set_connected(true);
     driver->start_exposure(2.0, true);
     // The body has armed and is polling, so the exposure end is fixed on the task clock.
-    REQUIRE(eventually([&] { return fake.call_count("get_exposure_remaining") > 0; }));
+    REQUIRE(wait_until([&] { return fake.call_count("get_exposure_remaining") > 0; }));
     CHECK(fake.call_count("get_single_frame") == 0);
     clock.advance(seconds(3));  // past the requested exposure, short of the watchdog
 
-    CHECK(eventually([&] { return driver->get_image_ready(); }, seconds(2)));
+    CHECK(wait_until([&] { return driver->get_image_ready(); }, seconds(2)));
     CHECK(fake.call_count("get_single_frame") == 1);
 }
 
@@ -3301,7 +3291,7 @@ TEST_CASE("QHY Camera Driver - a second StartExposure while one exposes is Inval
     TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
     driver->start_exposure(2.0, true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     const int writes = fake.call_count("set_param");
     const int arms = fake.call_count("start_single_frame");
     const int cancels = fake.call_count("cancel_exposure");
@@ -3312,7 +3302,7 @@ TEST_CASE("QHY Camera Driver - a second StartExposure while one exposes is Inval
         done = true;
     });
     JoinPumped joiner{clock, second, &gate};
-    REQUIRE(eventually([&] { return done.load(); }, milliseconds(500)));
+    REQUIRE(wait_until([&] { return done.load(); }, milliseconds(500)));
     second.join();
     CHECK(code == AlpacaError::InvalidOperation);
     CHECK(fake.call_count("set_param") == writes);
@@ -3320,7 +3310,7 @@ TEST_CASE("QHY Camera Driver - a second StartExposure while one exposes is Inval
     CHECK(fake.call_count("cancel_exposure") == cancels);
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
     gate.release = true;
-    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    REQUIRE(wait_until([&] { return driver->get_image_ready(); }));
     CHECK(driver->get_last_exposure_duration() == 2.0);
     CHECK(disconnect_stepping(clock, *driver) < seconds(2));
 }
@@ -3335,7 +3325,7 @@ TEST_CASE("QHY Camera Driver - cooler off accepted during disconnect stays off a
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
     TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     REQUIRE(clock.wait_for_waiters(1, seconds(2)));  // telemetry; PID is held outside the SDK lock
     REQUIRE(driver->get_cooler_on());
     const auto waits_before_disconnect = clock.wait_count();
@@ -3461,7 +3451,7 @@ TEST_CASE("QHY Camera Driver - repeated cooler off still writes physical PWM zer
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
     TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     REQUIRE(clock.wait_for_waiters(1, seconds(2)));
     const int pwm_before_off = sdk.pwm_off_writes.load();
 
@@ -3512,7 +3502,7 @@ TEST_CASE("QHY Camera Driver - off on off stops replacement regulation while PWM
     driver->set_cooler_on(false);
     CHECK_FALSE(driver->get_cooler_on());
     gate.release = true;
-    REQUIRE(eventually([&] { return !sdk.off_running->load(); }));
+    REQUIRE(wait_until([&] { return !sdk.off_running->load(); }));
     clock.advance(seconds(1));
     REQUIRE(clock.wait_for_woken_settled(seconds(2)));
     CHECK(sdk.pwm_off_writes.load() == 1);
@@ -3520,7 +3510,7 @@ TEST_CASE("QHY Camera Driver - off on off stops replacement regulation while PWM
     CHECK_FALSE(driver->get_cooler_on());
 
     cooler_on_stepping(clock, *driver);
-    REQUIRE(eventually([&] { return sdk.regulation_calls.load() > regulation_before_off; }));
+    REQUIRE(wait_until([&] { return sdk.regulation_calls.load() > regulation_before_off; }));
     CHECK(driver->get_cooler_on());
     disconnect_stepping(clock, *driver);
 }
@@ -3555,7 +3545,7 @@ TEST_CASE("QHY Camera Driver - cooler off during cancelled worker retirement sti
     JoinPumped joiner{clock, off, &release_gate};
     // Give the request a chance to land during retirement; a coordinated
     // implementation may wait until the retained action has been released.
-    (void)eventually([&] { return done.load(); }, milliseconds(200));
+    (void)wait_until([&] { return done.load(); }, milliseconds(200));
     release_gate.release = true;
     step_until(clock, [&] { return done.load(); });
     REQUIRE(done.load());
@@ -3640,13 +3630,13 @@ TEST_CASE("QHY Camera Driver - cooler handoffs respect existing reap bounds",
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
     TeardownGuard teardown{clock, driver, &gate, nullptr, &telemetry_gate};
     driver->set_connected(true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     REQUIRE(clock.wait_for_waiters(1, seconds(2)));
     if (stuck_telemetry) {
         // A real telemetry call can queue behind the PID's physical-handle lock.
         telemetry_gate.armed = true;
         clock.advance(seconds(1));
-        REQUIRE(eventually([&] { return telemetry_gate.entered.load(); }));
+        REQUIRE(wait_until([&] { return telemetry_gate.entered.load(); }));
     }
     if (operation == "early OFF disconnect") driver->set_cooler_on(false);
     const auto waits = clock.wait_count();
@@ -3773,7 +3763,7 @@ TEST_CASE("QHY Camera Driver - cooler off retains its handle and the destructor 
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
     TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     driver->set_cooler_on(false);
     REQUIRE(sdk.off_running);
     const auto elapsed = disconnect_stepping(clock, *driver);
@@ -3791,7 +3781,7 @@ TEST_CASE("QHY Camera Driver - cooler off retains its handle and the destructor 
         destroyed = true;
     });
     JoinPumped joiner{clock, destroyer, &gate};
-    CHECK_FALSE(eventually([&] { return destroyed.load(); }, milliseconds(300)));
+    CHECK_FALSE(wait_until([&] { return destroyed.load(); }, milliseconds(300)));
     CHECK(sdk.pwm_off_writes.load() == 0);
     gate.release = true;
     step_until(clock, [&] { return destroyed.load(); }, milliseconds(10));
@@ -3829,7 +3819,7 @@ TEST_CASE("QHY Camera Driver - a wedged cooler-off worker is reaped after 2 s of
     CHECK(spent >= milliseconds(2000));
     CHECK(spent < milliseconds(2500));
 
-    REQUIRE(eventually([&] { return !logs.find("SetQHYCCDParam(MANULPWM,0) returned OK after").empty(); }));
+    REQUIRE(wait_until([&] { return !logs.find("SetQHYCCDParam(MANULPWM,0) returned OK after").empty(); }));
     // The call began before the 2 s reap and returned after it, on virtual time.
     CHECK(logged_ms(logs.find("returned OK after")) >= 2000);
 }
@@ -3847,7 +3837,7 @@ TEST_CASE("QHY Camera Driver - a wedged temperature worker is reaped after 2 s o
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
     TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
 
     const auto spent =
         disconnect_reaping(clock, *driver, logs, gate, "temp-control thread still running at reap deadline");
@@ -3867,7 +3857,7 @@ TEST_CASE("QHY Camera Driver - CoolerOn true does not wait for a stopped regulat
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
     TeardownGuard teardown{clock, driver, &gate};
     driver->set_connected(true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     driver->set_cooler_on(false);
     std::atomic<bool> done{false};
     std::thread caller([&] {
@@ -3876,7 +3866,7 @@ TEST_CASE("QHY Camera Driver - CoolerOn true does not wait for a stopped regulat
     });
     JoinPumped joiner{clock, caller, &gate};
     // No clock advance: an ON that waits on the clock never returns here.
-    CHECK(eventually([&] { return done.load(); }, milliseconds(1000)));
+    CHECK(wait_until([&] { return done.load(); }, milliseconds(1000)));
     CHECK(driver->get_cooler_on());
     gate.release = true;
 }
@@ -3894,7 +3884,7 @@ TEST_CASE("QHY Camera Driver - destruction joins a regulation body still inside 
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
     TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     CHECK(disconnect_stepping(clock, *driver) <= milliseconds(2200));
     REQUIRE_FALSE(driver->get_connected());
 
@@ -3904,9 +3894,9 @@ TEST_CASE("QHY Camera Driver - destruction joins a regulation body still inside 
         destroyed = true;
     });
     JoinPumped joiner{clock, destroyer, &gate};
-    CHECK_FALSE(eventually([&] { return destroyed.load(); }, milliseconds(300)));
+    CHECK_FALSE(wait_until([&] { return destroyed.load(); }, milliseconds(300)));
     gate.release = true;
-    CHECK(eventually([&] { return destroyed.load(); }));
+    CHECK(wait_until([&] { return destroyed.load(); }));
     CHECK(sdk.temperature_returned.load());
     sdk.LockedQHYSDK::close_camera("fake-qhy-0");
 }
@@ -3930,13 +3920,13 @@ TEST_CASE("QHY Camera Driver - a finished older pulse does not clear a newer pul
     TeardownGuard guard{clock, driver, &first, nullptr, &second};
     driver->set_connected(true);
     driver->pulse_guide(0, 5000);
-    REQUIRE(eventually([&] { return first.entered.load(); }));
+    REQUIRE(wait_until([&] { return first.entered.load(); }));
     driver->pulse_guide(2, 5000);
     first.release = true;
-    REQUIRE(eventually([&] { return second.entered.load(); }));
-    CHECK_FALSE(eventually([&] { return !driver->get_is_pulse_guiding(); }, milliseconds(300)));
+    REQUIRE(wait_until([&] { return second.entered.load(); }));
+    CHECK_FALSE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, milliseconds(300)));
     second.release = true;
-    CHECK(eventually([&] { return !driver->get_is_pulse_guiding(); }));
+    CHECK(wait_until([&] { return !driver->get_is_pulse_guiding(); }));
     CHECK(disconnect_stepping(clock, *driver) < seconds(2));
 }
 
@@ -3958,13 +3948,13 @@ TEST_CASE("QHY Camera Driver - a refused regulation start leaves CoolerOn false"
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
     TeardownGuard teardown{clock, driver, &gate};
     driver->set_connected(true);
-    REQUIRE(eventually([&] { return sdk.regulation_calls.load() == 1; }));
+    REQUIRE(wait_until([&] { return sdk.regulation_calls.load() == 1; }));
     // Each reconnect replaces the stuck body with a new one that sticks too:
     // the current body plus three stale ones.
     for (int calls = 2; calls <= 4; ++calls) {
         disconnect_stepping(clock, *driver);
         driver->set_connected(true);
-        REQUIRE(eventually([&] { return sdk.regulation_calls.load() == calls; }));
+        REQUIRE(wait_until([&] { return sdk.regulation_calls.load() == calls; }));
     }
     std::atomic<bool> done{false};
     int error = -1;
@@ -4027,7 +4017,7 @@ TEST_CASE("QHY Camera Driver - a pulse refused behind three queued pulses keeps 
     for (int i = 0; i < 4; ++i) {
         driver->pulse_guide(0, 5000);
     }
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     // Two refused pulses at once, like a guider's RA and Dec pair.
     std::atomic<int> done{0};
     int error = -1;
@@ -4051,7 +4041,7 @@ TEST_CASE("QHY Camera Driver - a pulse refused behind three queued pulses keeps 
     // Once the older pulses finish, the newest of them clears the flag; the
     // refused 60 s pulse must not hold it (no clock advance here).
     gate.release = true;
-    CHECK(eventually([&] { return !driver->get_is_pulse_guiding(); }));
+    CHECK(wait_until([&] { return !driver->get_is_pulse_guiding(); }));
 }
 
 TEST_CASE("QHY Camera Driver - the polling workers wait a second on the injected clock",
@@ -4074,8 +4064,8 @@ TEST_CASE("QHY Camera Driver - the polling workers wait a second on the injected
     CHECK(fake.call_count("control_temp") == temp_polls);
     CHECK(fake.call_count("get_param") == telemetry_polls);
     clock.advance(milliseconds(1));
-    CHECK(eventually([&] { return fake.call_count("control_temp") > temp_polls; }));
-    CHECK(eventually([&] { return fake.call_count("get_param") > telemetry_polls; }));
+    CHECK(wait_until([&] { return fake.call_count("control_temp") > temp_polls; }));
+    CHECK(wait_until([&] { return fake.call_count("get_param") > telemetry_polls; }));
 
     CHECK(disconnect_stepping(clock, *driver) < seconds(2));
 }
@@ -4096,7 +4086,7 @@ TEST_CASE("QHY Camera Driver - the polling workers skip a cycle during an exposu
     driver->set_connected(true);
     REQUIRE(clock.wait_for_waiters(2, seconds(2)));
     driver->start_exposure(5.0, true);
-    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    REQUIRE(wait_until([&] { return gate.entered.load(); }));
     const int temp_polls = fake.call_count("control_temp");
     const int telemetry_polls = fake.call_count("get_param");
 
@@ -4136,13 +4126,13 @@ TEST_CASE("QHY Camera Driver - PercentCompleted only while Exposing", "[qhy][cam
     SECTION("idle before the first exposure") { alpacacore::test::require_percent_completed_unavailable(*driver); }
     SECTION("idle after a completed exposure") {
         driver->start_exposure(0.001, true);
-        REQUIRE(eventually([&]() { return driver->get_image_ready(); }));
+        REQUIRE(wait_until([&]() { return driver->get_image_ready(); }));
         alpacacore::test::require_percent_completed_unavailable(*driver);
     }
     SECTION("idle after a failed exposure") {
         fake.frame_ok = false;
         driver->start_exposure(0.001, true);
-        REQUIRE(eventually([&]() {
+        REQUIRE(wait_until([&]() {
             try {
                 (void)driver->get_image_ready();
                 return false;
@@ -4155,7 +4145,7 @@ TEST_CASE("QHY Camera Driver - PercentCompleted only while Exposing", "[qhy][cam
     SECTION("while exposing") {
         hold_frame = true;
         driver->start_exposure(1.0, true);
-        REQUIRE(eventually([&]() { return in_frame.load(); }));
+        REQUIRE(wait_until([&]() { return in_frame.load(); }));
         alpacacore::test::require_percent_completed_available(*driver);
     }
     release = true;

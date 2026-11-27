@@ -40,6 +40,7 @@ namespace {
 using alpacacore::test::FakeSynScanHandset;
 using alpacacore::test::SynScanGotoLanding;
 using alpacacore::test::wait_until;
+using namespace std::chrono_literals;
 
 struct PulseBesideJogRig {
     alpacacore::test::FakeTaskClock clock;
@@ -143,7 +144,7 @@ TEST_CASE("SynScan PulseGuide - accepted during a MoveAxis on the other axis (#2
                     return pulse_device == 17 ? is_zero_rate_command(command, 17) : command[0] == 'T';
                 }) > 0;
             },
-            5000));
+            5s));
         CHECK(rig.driver->get_slewing());
         CHECK(rig.commands_since(
                   after_jog, [&](const std::string& command) { return is_motor_command(command, jog_device); }) == 0);

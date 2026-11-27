@@ -132,16 +132,7 @@ private:
     std::vector<std::string> lines_;
 };
 
-// A rendezvous with a driver thread, bounded in real time.
-template <typename Pred>
-bool eventually(Pred pred) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (!pred()) {
-        if (std::chrono::steady_clock::now() > deadline) return false;
-        std::this_thread::yield();
-    }
-    return true;
-}
+using alpacacore::test::wait_until;
 
 struct Rig {
     std::shared_ptr<ClockMount> mount = std::make_shared<ClockMount>();
@@ -177,7 +168,7 @@ struct Rig {
     }
     std::size_t time_writes() { return mount->count(":SL"); }
     bool resync_done() {
-        return eventually([&] { return !onstep::clock_resync_running_for_testing(*driver); });
+        return wait_until([&] { return !onstep::clock_resync_running_for_testing(*driver); });
     }
 };
 
@@ -336,7 +327,7 @@ TEST_CASE("OnStep host clock - a MoveAxis that starts after the host clock chang
 
     alpacacore::util::HostClockTrust::mark_set("test step");
     rig.driver->on_host_clock_changed(kStepped);
-    REQUIRE(eventually([&] { return log.contains("re-sync waits for the motion to end"); }));
+    REQUIRE(wait_until([&] { return log.contains("re-sync waits for the motion to end"); }));
     CHECK(moved.load());
     REQUIRE(rig.clock.wait_for_waiters(2, kRendezvous));  // the re-sync and the MoveAxis re-send (7 s)
     CHECK(rig.time_writes() == 0);
@@ -379,7 +370,7 @@ TEST_CASE("OnStep host clock - a disconnect drains a re-sync that waits out moti
     rig.driver->move_axis(0, 0.5);
     alpacacore::util::HostClockTrust::mark_set("test step");
     rig.driver->on_host_clock_changed(kStepped);
-    REQUIRE(eventually([&] { return log.contains("re-sync waits for the motion to end"); }));
+    REQUIRE(wait_until([&] { return log.contains("re-sync waits for the motion to end"); }));
 
     rig.driver->set_connected(false);
     CHECK_FALSE(onstep::clock_resync_running_for_testing(*rig.driver));

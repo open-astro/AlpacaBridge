@@ -91,6 +91,47 @@ TEST_CASE("driver_rig - timed returns the elapsed duration of the call", "[drive
     CHECK(spent < std::chrono::seconds(5));
 }
 
+// Falsified by: wait_until() sleeping before its first check (an already-true predicate then costs the bound).
+TEST_CASE("driver_rig - wait_until returns at once when the predicate already holds", "[driver_rig]") {
+    int calls = 0;
+    bool held = false;
+    const auto spent = timed([&] {
+        held = wait_until(
+            [&] {
+                ++calls;
+                return true;
+            },
+            std::chrono::seconds(10));
+    });
+    CHECK(held);
+    CHECK(calls == 1);
+    CHECK(spent < std::chrono::seconds(1));
+}
+
+// Falsified by: wait_until() checking the predicate only once, or only at the deadline.
+TEST_CASE("driver_rig - wait_until returns true once another thread makes the predicate hold", "[driver_rig]") {
+    std::atomic<bool> flag{false};
+    std::thread setter([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        flag = true;
+    });
+    bool held = false;
+    const auto spent = timed([&] { held = wait_until([&] { return flag.load(); }, std::chrono::seconds(10)); });
+    setter.join();
+    CHECK(held);
+    CHECK(spent >= std::chrono::milliseconds(50));
+    CHECK(spent < std::chrono::seconds(5));
+}
+
+// Falsified by: wait_until() returning true at the deadline, or returning before the bound has passed.
+TEST_CASE("driver_rig - wait_until returns false after the bound when the predicate never holds", "[driver_rig]") {
+    bool held = true;
+    const auto spent = timed([&] { held = wait_until([] { return false; }, std::chrono::milliseconds(50)); });
+    CHECK_FALSE(held);
+    CHECK(spent >= std::chrono::milliseconds(50));
+    CHECK(spent < std::chrono::seconds(5));
+}
+
 // Falsified by: parse_timestamp() dropping the milliseconds or reading the month as zero-based.
 TEST_CASE("driver_rig - parse_timestamp reads the DeviceState TimeStamp format", "[driver_rig]") {
     const auto stamp = parse_timestamp("2026-10-10T21:46:30.626Z");

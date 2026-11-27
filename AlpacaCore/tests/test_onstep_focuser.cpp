@@ -422,7 +422,8 @@ TEST_CASE("OnStep shared link - telescope then focuser share one link", "[onstep
     CHECK_FALSE(telescope->get_connected());
     CHECK(focuser->get_connected());
     const int polls = controller.state->count(":F1T#");
-    CHECK(alpacacore::test::wait_until([&] { return controller.state->count(":F1T#") >= polls + 2; }, 3000));
+    CHECK(alpacacore::test::wait_until([&] { return controller.state->count(":F1T#") >= polls + 2; },
+                                       std::chrono::milliseconds(3000)));
     focuser->move(4000);
     CHECK(controller.state->count(":F1s4100#") == 1);
     CHECK(controller.server.accepted_connections() == 1);
@@ -449,7 +450,8 @@ TEST_CASE("OnStep shared link - focuser then telescope share one link", "[onstep
     CHECK_FALSE(focuser->get_connected());
     CHECK(telescope->get_connected());
     const int polls = controller.state->count(":GU#");
-    CHECK(alpacacore::test::wait_until([&] { return controller.state->count(":GU#") >= polls + 1; }, 3000));
+    CHECK(alpacacore::test::wait_until([&] { return controller.state->count(":GU#") >= polls + 1; },
+                                       std::chrono::milliseconds(3000)));
     CHECK_NOTHROW((void)telescope->get_right_ascension());
 
     // The focuser joins again, still on the one link.
@@ -474,7 +476,7 @@ TEST_CASE("OnStep shared link - a link loss reaches both devices", "[onstep][foc
     onstep::set_onstep_focuser_poll_paused_for_testing(*focuser, true);
 
     REQUIRE(controller.server.drop_connections());
-    CHECK(alpacacore::test::wait_until([&] { return !telescope->get_connected(); }, 2000));
+    CHECK(alpacacore::test::wait_until([&] { return !telescope->get_connected(); }, std::chrono::milliseconds(2000)));
     CHECK_FALSE(focuser->get_connected());
     CHECK(focuser->get_link_fault().find("lost") != std::string::npos);
     require_alpaca_error([&] { (void)focuser->get_position(); }, AlpacaError::NotConnected);

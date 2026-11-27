@@ -545,7 +545,7 @@ TEST_CASE("run_motion_deadline - a cancel ends the waiting body with no clock ad
     });
     REQUIRE(clock.wait_for_waiters(1, 2s));
     slot.cancel();
-    const bool ended = alpacacore::test::wait_until([&] { return returned.load(); }, 2000);
+    const bool ended = alpacacore::test::wait_until([&] { return returned.load(); }, 2s);
     clock.advance(kMaxMoveAxisDuration);  // lets a body that slept through the cancel finish, so the join cannot hang
     slot.cancel_all_and_join();
     CHECK(ended);
@@ -577,7 +577,7 @@ TEST_CASE("run_motion_deadline - a renewal supersedes the waiting body, and only
     REQUIRE(clock.wait_for_woken_settled(2s));
     start_move();  // the renewal at 40 s
     // The superseded body wakes from the supersede, not from the clock: no virtual time passes here.
-    CHECK(alpacacore::test::wait_until([&] { return returned.load() == 1; }, 2000));
+    CHECK(alpacacore::test::wait_until([&] { return returned.load() == 1; }, 2s));
     REQUIRE(clock.wait_for_waiters(1, 2s));
     clock.advance(21s);  // 61 s: the first deadline has passed
     REQUIRE(clock.wait_for_woken_settled(2s));

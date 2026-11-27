@@ -42,6 +42,7 @@ using alpacacore::test::CelestronTracking;
 using alpacacore::test::FakeCelestronHandset;
 using alpacacore::test::require_alpaca_error;
 using alpacacore::test::wait_until;
+using namespace std::chrono_literals;
 
 // The driver on a caller-owned task clock over a fake handset: tracking on, the mount at 12AB0500,20000500, and the
 // model and pier bytes of an Alt-Az HC (a GEM's 'W' would send a slew through the meridian-flip path half the day).
@@ -171,7 +172,7 @@ TEST_CASE("Celestron motion owner - a blocking slew whose pier read fails leaves
     CHECK(rig.st->goto_count.load() == 0);
     CHECK(rig.driver->get_is_pulse_guiding());  // the pulse was not superseded
     step_virtual(rig.clock, std::chrono::milliseconds(3000));
-    REQUIRE(wait_until([&] { return rig.st->guide_command_count(0) == 2; }, 5000));  // its next chunk still goes out
+    REQUIRE(wait_until([&] { return rig.st->guide_command_count(0) == 2; }, 5s));  // its next chunk still goes out
 }
 
 // PIN: a pulse chunk goes out only while its pulse still owns the axis. Mutation that breaks it: pulse_owns_locked()
@@ -230,7 +231,7 @@ TEST_CASE("Celestron motion owner - a pulse chunk is not sent once a newer comma
     }
     REQUIRE(hook_calls.load() == 1);
     // Real time: the chain thread runs the newer command's exchanges with the fake handset, then decides its chunk.
-    REQUIRE(wait_until([&] { return chain_done.load(); }, 5000));
+    REQUIRE(wait_until([&] { return chain_done.load(); }, 5s));
     CHECK(newer_code.load() == 0);
     if (leg == 0) {
         CHECK(rig.st->guide_command_count(0) == 2);  // the first chunk and the newer pulse; no stale second chunk
@@ -242,7 +243,7 @@ TEST_CASE("Celestron motion owner - a pulse chunk is not sent once a newer comma
     }
     if (leg == 2) {
         // Real time: the slew body sends its GOTO on its own thread.
-        CHECK(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+        CHECK(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5s));
     }
     CHECK(hook_calls.load() == 1);
 }

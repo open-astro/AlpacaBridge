@@ -331,20 +331,7 @@ std::unique_ptr<alpacacore::SwitchDriver> connect_fake_hub(const FakeGeminiPdh& 
     return driver;
 }
 
-// Polls in real time: what it waits for is wire activity (the fake's reader,
-// the driver's reader thread and its steady_clock poll cadence and read
-// windows, decision 0005 rule 6), never a driver timer on the task clock.
-template <typename Pred>
-bool wait_until(Pred pred, std::chrono::milliseconds limit) {
-    const auto deadline = std::chrono::steady_clock::now() + limit;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (pred()) {
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    return pred();
-}
+using alpacacore::test::wait_until;
 
 }  // namespace
 

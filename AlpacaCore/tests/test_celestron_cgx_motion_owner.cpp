@@ -48,12 +48,7 @@ alpacacore::vendor::celestron::CelestronCgxConnectionInfo owner_info(const alpac
     return info;
 }
 
-template <typename Predicate>
-bool wait_for(Predicate predicate, std::chrono::milliseconds timeout = 2s) {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (!predicate() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(1ms);
-    return predicate();
-}
+using alpacacore::test::wait_until;
 
 bool slew_finished(const alpacacore::TelescopeDriver& driver) {
     try {
@@ -82,7 +77,7 @@ void connect_home_and_track(alpacacore::test::FakeCelestronCgxMount& mount, alpa
     mount.set_auto_complete_motions(true);
     driver.set_connected(true);
     driver.find_home();
-    REQUIRE(wait_for([&] { return driver.get_at_home() && !driver.get_slewing(); }));
+    REQUIRE(wait_until([&] { return driver.get_at_home() && !driver.get_slewing(); }));
     driver.set_tracking(true);
 }
 
@@ -115,7 +110,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a pulse whose first ACK was lost
 
     mount.complete_axis_guide(0x10);
     driver->abort_slew();
-    CHECK(wait_for([&] { return slew_finished(*driver); }));
+    CHECK(wait_until([&] { return slew_finished(*driver); }));
     driver->set_connected(false);
 }
 
@@ -133,7 +128,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a stale RA pulse failure refuses
     // reference holds and only the kept failure is left.
     mount.set_hold_guide_until_completed(true);
     driver->pulse_guide(2, 100);
-    REQUIRE(wait_for(
+    REQUIRE(wait_until(
         [&] {
             clock.advance(100ms);
             return thrown_by([&] { static_cast<void>(driver->get_is_pulse_guiding()); }).code ==
@@ -187,7 +182,7 @@ TEST_CASE(
     mount.set_auto_complete_motions(true);
     mount.complete_axis_slew(0x10);
     mount.complete_axis_slew(0x11);
-    const bool idle = wait_for([&] {
+    const bool idle = wait_until([&] {
         clock.advance(20ms);
         return slew_finished(*driver);
     });
@@ -218,7 +213,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - a retarget whose GOTO ACK is los
     INFO(failed.text);
     CHECK(failed.code == alpacacore::AlpacaError::DriverException);
     CHECK(driver->get_tracking());
-    CHECK(wait_for([&] {
+    CHECK(wait_until([&] {
         clock.advance(20ms);
         return slew_finished(*driver);
     }));
@@ -263,7 +258,7 @@ TEST_CASE(
     at_end_read.release();
     // FindHome starts no pulse, so the held body is still its slot's current one: IsPulseGuiding is true until it
     // returns.
-    CHECK(wait_for([&] { return !driver->get_is_pulse_guiding(); }));
+    CHECK(wait_until([&] { return !driver->get_is_pulse_guiding(); }));
     CHECK(mount.count_command(0x10, 0x01) == ra_reads);
     CHECK(mount.count_command(0x11, 0x01) == dec_reads);
     alpacacore::vendor::celestron::set_pulse_pre_lock_hook_for_testing(*driver, {});
@@ -307,7 +302,7 @@ TEST_CASE(
     at_poll.release();
     // FindHome starts no pulse, so the held body is still its slot's current one: IsPulseGuiding is true until it
     // returns.
-    CHECK(wait_for([&] { return !driver->get_is_pulse_guiding(); }));
+    CHECK(wait_until([&] { return !driver->get_is_pulse_guiding(); }));
     CHECK(mount.count_command(0x10, 0x27) == ra_polls);
     alpacacore::vendor::celestron::set_pulse_pre_lock_hook_for_testing(*driver, {});
 }

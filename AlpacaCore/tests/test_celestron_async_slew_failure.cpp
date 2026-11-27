@@ -69,6 +69,7 @@ double no_flip_ra_hours() {
 using alpacacore::test::CelestronTracking;
 using alpacacore::test::FakeCelestronHandset;
 using alpacacore::test::wait_until;
+using namespace std::chrono_literals;
 
 // This file's handset: a CGX-L-class GEM (model 24, HC 5.35, pier W) tracking EQ North, at 12AB0500,20000500.
 std::shared_ptr<FakeCelestronHandset> make_handset(
@@ -140,7 +141,7 @@ void run_virtual(alpacacore::test::FakeTaskClock& clock, Fn&& fn, const std::fun
         }
         done.store(true);
     });
-    const bool began = wait_until([&] { return started() || done.load(); }, 5000);
+    const bool began = wait_until([&] { return started() || done.load(); }, 5s);
     const bool finished = began && advance_until(clock, [&] { return done.load(); });
     while (!done.load()) {
         clock.advance(std::chrono::hours(1));  // release a hung caller (it may park again) so the thread can join
@@ -193,7 +194,7 @@ TEST_CASE("Celestron Telescope Driver - all four equatorial slews are refused wh
     require_alpaca_error([&] { driver->slew_to_target_async(); }, alpacacore::AlpacaError::InvalidOperation);
 
     // Nothing reached the mount, and the driver is not slewing.
-    CHECK_FALSE(wait_until([&] { return st->goto_count.load() != 0; }, 300));
+    CHECK_FALSE(wait_until([&] { return st->goto_count.load() != 0; }, 300ms));
     CHECK(st->cancel_goto_count.load() == 0);
     CHECK_FALSE(driver->get_slewing());
 
@@ -203,7 +204,7 @@ TEST_CASE("Celestron Telescope Driver - all four equatorial slews are refused wh
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     REQUIRE(driver->get_tracking());
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(ra, 20.0));
-    CHECK(wait_until([&] { return st->goto_count.load() != 0; }, 3000));
+    CHECK(wait_until([&] { return st->goto_count.load() != 0; }, 3s));
     driver->set_connected(false);
 }
 
@@ -223,7 +224,7 @@ TEST_CASE("Celestron async - a GOTO the hand controller never acknowledges surfa
     REQUIRE((first == SlewingRead::True || first == SlewingRead::Threw));
 
     std::string message;
-    REQUIRE(wait_until([&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, 10000));
+    REQUIRE(wait_until([&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, 10s));
     CHECK_FALSE(message.empty());
     CHECK(message.find("Slew") != std::string::npos);
     CHECK(read_slewing(*driver) == SlewingRead::Threw);  // preserved, not one-shot
@@ -233,8 +234,8 @@ TEST_CASE("Celestron async - a GOTO the hand controller never acknowledges surfa
     st->reject_goto.store(false);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
     CHECK(read_slewing(*driver) == SlewingRead::True);
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::False; }, 15000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
+    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::False; }, 15s));
     CHECK(st->goto_count.load() == 1);  // the retried slew sends exactly one GOTO
     driver->set_connected(false);
 }
@@ -249,7 +250,7 @@ TEST_CASE("Celestron MoveAxis - failed dispatch preserves a stored slew error",
 
     st->reject_goto.store(true);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10000));
+    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10s));
 
     // The controller takes the rate command and never answers it: a reply timeout, the link stays up (a reset
     // connection is a lost link at once, decision 0009 rule 2a, #2718).
@@ -275,7 +276,7 @@ TEST_CASE("Celestron MoveAxis - successful dispatch clears a stored slew error",
 
     st->reject_goto.store(true);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10000));
+    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10s));
 
     st->reject_goto.store(false);
     REQUIRE_NOTHROW(driver->move_axis(0, 0.5));
@@ -305,7 +306,7 @@ TEST_CASE("Celestron MoveAxis - Slewing reads the moving axis while a superseded
             (void)released.wait_for(std::chrono::seconds(5));  // bounded, so a regression fails instead of hanging
         });
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-    REQUIRE(wait_until([&] { return held.load(); }, 5000));
+    REQUIRE(wait_until([&] { return held.load(); }, 5s));
 
     REQUIRE_NOTHROW(driver->move_axis(0, 0.5));  // supersedes the held body without joining it
     CHECK(driver->get_slewing());                // the moving axis, not the body's published false
@@ -325,12 +326,12 @@ TEST_CASE("Celestron Unpark - a no-op Unpark clears a stored slew error",
 
     st->reject_goto.store(true);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10000));
+    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10s));
 
     // An Unpark with no park in flight claims nothing and joins nothing (decision 0006): the failing body finishes its
     // own failure, so Slewing reads false once its stop is answered, not necessarily when Unpark returns.
     REQUIRE_NOTHROW(driver->unpark());
-    CHECK(wait_until([&] { return read_slewing(*driver) == SlewingRead::False; }, 5000));
+    CHECK(wait_until([&] { return read_slewing(*driver) == SlewingRead::False; }, 5s));
     driver->set_connected(false);
 }
 
@@ -343,7 +344,7 @@ TEST_CASE("Celestron async - HC completion-poll failure persists through Slewing
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     st->silent.store(true);  // The hand controller stops answering its "L" status query.
 
     std::string message;
@@ -353,7 +354,7 @@ TEST_CASE("Celestron async - HC completion-poll failure persists through Slewing
             return read_slewing(*driver, &message) == SlewingRead::Threw &&
                    message.find("Slew completion polling failed") != std::string::npos;
         },
-        10000));
+        10s));
     CHECK(read_slewing(*driver) == SlewingRead::Threw);
     driver->set_connected(false);
 }
@@ -409,7 +410,7 @@ TEST_CASE("Celestron async - one bad HC or MC status poll recovers before the fa
         alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
 
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
         const auto poll_count = [&] {
             return motor_controller ? st->slew_done_count.load() : st->slew_status_polls.load();
         };
@@ -455,7 +456,7 @@ TEST_CASE("Celestron sync slew - three status-poll failures abort the wait",
         }
         finished.store(true);
     });
-    const bool goto_dispatched = wait_until([&] { return st->goto_count.load() > 0; }, 5000);
+    const bool goto_dispatched = wait_until([&] { return st->goto_count.load() > 0; }, 5s);
     const bool waiting_for_poll = clock.wait_for_waiters(2, std::chrono::seconds(2));
     const int polls_before = st->slew_status_polls.load();
     st->malformed_slew_status.store(1);
@@ -498,7 +499,7 @@ TEST_CASE("Celestron sync slew - tracking restoration failure is propagated",
         }
         finished.store(true);
     });
-    const bool goto_dispatched = wait_until([&] { return st->goto_count.load() > 0; }, 5000);
+    const bool goto_dispatched = wait_until([&] { return st->goto_count.load() > 0; }, 5s);
     const bool waiting_for_completion = clock.wait_for_waiters(2, std::chrono::seconds(2));  // + the status poll
     st->reject_next_tracking_write.store(true);
     clock.advance(std::chrono::seconds(9));
@@ -532,7 +533,7 @@ TEST_CASE("Celestron async - motor-controller completion-poll failure persists t
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
     // One GOTO per axis: muting after the first would fail the dispatch, not the completion poll.
-    REQUIRE(wait_until([&] { return st->goto_count.load() >= 2; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() >= 2; }, 5s));
     st->silent.store(true);  // The motor controllers stop answering MC_SLEW_DONE.
 
     std::string message;
@@ -542,7 +543,7 @@ TEST_CASE("Celestron async - motor-controller completion-poll failure persists t
             return read_slewing(*driver, &message) == SlewingRead::Threw &&
                    message.find("Slew completion polling failed") != std::string::npos;
         },
-        10000));
+        10s));
     CHECK(read_slewing(*driver) == SlewingRead::Threw);
     driver->set_connected(false);
 }
@@ -558,10 +559,10 @@ TEST_CASE("Celestron async - invalid motor-controller completion status is rejec
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     st->invalid_mc_slew_status.store(true);
     std::string message;
-    REQUIRE(wait_until([&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, 10000));
+    REQUIRE(wait_until([&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, 10s));
     CHECK(message.find("Motor-controller slew completion query returned an invalid response") != std::string::npos);
     driver->set_connected(false);
 }
@@ -576,10 +577,10 @@ TEST_CASE("Celestron async - complete HC status replies are validated", "[celest
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
         st->malformed_slew_status.store(malformed);
         std::string message;
-        REQUIRE(wait_until([&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, 10000));
+        REQUIRE(wait_until([&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, 10s));
         CHECK(st->slew_status_polls.load() > 0);
         CHECK(message.find("invalid response") != std::string::npos);
         driver->set_connected(false);
@@ -596,7 +597,7 @@ TEST_CASE("Celestron async - slew timeout is a persistent failure", "[celestron]
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     std::string message;
     const auto started = clock.now();
     REQUIRE(advance_until(
@@ -617,7 +618,7 @@ TEST_CASE("Celestron async - tracking restoration failure is retained", "[celest
     REQUIRE_NOTHROW(driver->set_tracking(true));
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     st->reject_next_tracking_write.store(true);
     std::string message;
     REQUIRE(advance_until(
@@ -638,7 +639,7 @@ TEST_CASE("Celestron async - post-slew position-read failure is retained",
     REQUIRE_NOTHROW(driver->set_tracking(true));
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     st->reject_position_after_slew.store(true);
     std::string message;
     REQUIRE(advance_until(
@@ -658,7 +659,7 @@ TEST_CASE("Celestron async - AbortSlew clears a stored slew failure (#575)",
 
     st->reject_goto.store(true);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10000));
+    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10s));
 
     REQUIRE_NOTHROW(driver->abort_slew());
     CHECK(read_slewing(*driver) == SlewingRead::False);
@@ -700,7 +701,7 @@ TEST_CASE("Celestron AbortSlew - a stop failure still reaps the cancelled slew t
     REQUIRE_NOTHROW(driver->set_connected(true));
     const int before = st->goto_count.load();
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-    CHECK(wait_until([&] { return st->goto_count.load() > before; }, 5000));
+    CHECK(wait_until([&] { return st->goto_count.load() > before; }, 5s));
     driver->set_connected(false);
 }
 
@@ -727,7 +728,7 @@ void refused_slot_start_stops_mount(const std::function<void(alpacacore::Telesco
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0);
-    REQUIRE(wait_until([&] { return st->goto_count.load() == 1; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() == 1; }, 5s));
     REQUIRE(driver->get_slewing());
     const int cancels_before = st->command_count('M');
 
@@ -851,7 +852,7 @@ TEST_CASE("Celestron async - MoveAxis owns motion after superseding an async sle
 
     const int before = st->goto_count.load();
     driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0);
-    REQUIRE(wait_until([&] { return st->goto_count.load() > before; }, 3000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > before; }, 3s));
     driver->move_axis(0, 0.5);
     const int tracking_writes_after_move = st->command_count('T');
     // Virtual time past the superseded slew task's longest wait; a stray tracking write would show.
@@ -877,7 +878,7 @@ TEST_CASE("Celestron sync - a blocking slew reaps a prior async slew task",
 
     const int before = st->goto_count.load();
     driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0);
-    REQUIRE(wait_until([&] { return st->goto_count.load() > before; }, 3000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > before; }, 3s));
     std::atomic<bool> sync_done{false};
     std::optional<std::string> sync_error;
     std::thread syncer([&] {
@@ -886,7 +887,7 @@ TEST_CASE("Celestron sync - a blocking slew reaps a prior async slew task",
     });
     // #2518: the blocking slew's own GOTO reaching the fake proves it claimed the slot. Before that, virtual time
     // could let the async body land and restore tracking first, a legal order that writes a second T.
-    const bool claimed = wait_until([&] { return st->goto_count.load() > before + 1; }, 3000);
+    const bool claimed = wait_until([&] { return st->goto_count.load() > before + 1; }, 3s);
     const bool finished = advance_until(clock, [&] { return sync_done.load(); });
     syncer.join();
     INFO("syncer threw: " << sync_error.value_or(""));
@@ -924,7 +925,7 @@ TEST_CASE("Celestron PulseGuide - overlapping axes keep independent pulse chains
     driver->pulse_guide(0, 3500);  // North: must not cancel RA's remaining chunks.
     // Both chains must be parked on the clock before it moves: the pulses end on virtual time since their start, so
     // a clock that runs ahead of a chain still on the socket ends them before the checks below.
-    REQUIRE(wait_until([&] { return clock.waiter_count() >= parked_before + 2; }, 5000));
+    REQUIRE(wait_until([&] { return clock.waiter_count() >= parked_before + 2; }, 5s));
 
     REQUIRE(advance_until(
         clock, [&] { return st->guide_command_count(0) >= ra_before + 2; }, std::chrono::milliseconds(250)));
@@ -952,7 +953,7 @@ TEST_CASE("Celestron MoveAxis - a jog on one axis preserves the other axis pulse
     const auto parked_before = clock.waiter_count();
     driver->pulse_guide(2, 6000);  // RA pulse is still chaining after its first hardware chunk.
     driver->move_axis(1, 0.0);     // A Dec-axis stop must not cancel the RA pulse.
-    REQUIRE(wait_until([&] { return clock.waiter_count() >= parked_before + 1; }, 5000));  // as above
+    REQUIRE(wait_until([&] { return clock.waiter_count() >= parked_before + 1; }, 5s));  // as above
 
     CHECK(advance_until(
         clock, [&] { return st->guide_command_count(0) >= ra_before + 2; }, std::chrono::milliseconds(250)));
@@ -1368,7 +1369,7 @@ TEST_CASE("Celestron async - a reaper's cancel is not lost between a parked task
         }
     });
     driver->pulse_guide(0, 4000);  // North: longer than one 2.55 s chunk, so a chained task parks on the clock
-    REQUIRE(wait_until([&] { return at_window.load(); }, 3000));
+    REQUIRE(wait_until([&] { return at_window.load(); }, 3s));
 
     // The superseding pulse reaps the parked one: cancel, notify, join.
     std::atomic<bool> reaped{false};
@@ -1377,7 +1378,7 @@ TEST_CASE("Celestron async - a reaper's cancel is not lost between a parked task
         reaper_error = thrown_by([&] { driver->pulse_guide(0, 300); });
         reaped.store(true);
     });
-    CHECK(wait_until([&] { return reaped.load(); }, 2000));
+    CHECK(wait_until([&] { return reaped.load(); }, 2s));
 
     // Whatever happened, reaching the timer's deadline wakes it, so the case ends instead of hanging in a join.
     clock.advance(std::chrono::seconds(5));
@@ -1691,7 +1692,7 @@ TEST_CASE("Celestron site - site and time writes are refused while the mount mov
     SECTION("a GOTO") {
         st->goto_never_ends.store(true);
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
         CHECK(writes_refused());
         REQUIRE_NOTHROW(driver->abort_slew());
         st->goto_never_ends.store(false);
@@ -1725,12 +1726,12 @@ TEST_CASE("Celestron hold window - an async GOTO reports landed before the 8 s h
     const auto start = clock.now();
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
     CHECK(driver->get_slewing());
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(2)));  // the paused poll and the slew body
     REQUIRE(advance_until(clock, [&] { return clock.now() - start >= std::chrono::seconds(4); }));
     CHECK_FALSE(st->goto_in_progress());
     // The body lands (its tracking restore and landing read run on real time); virtual time stays at 4 s.
-    CHECK(wait_until([&] { return !driver->get_slewing(); }, 3000));
+    CHECK(wait_until([&] { return !driver->get_slewing(); }, 3s));
     CHECK(clock.now() - start < std::chrono::seconds(8));
     driver->set_connected(false);
 }
@@ -1747,7 +1748,7 @@ TEST_CASE("Celestron hold window - AbortSlew inside the hold clears Slewing once
     alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(2)));  // the paused poll and the slew body
     clock.advance(std::chrono::seconds(1));
     REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(2)));
@@ -1761,7 +1762,7 @@ TEST_CASE("Celestron hold window - AbortSlew inside the hold clears Slewing once
     // claim and ends). The clearing is the verified stop's, not the 8 s hold's expiry.
     // Step only once the stop check waits and the superseded body has left: the paused poll alone meets
     // advance_until()'s rendezvous, so a stop check slow to start would let virtual time run past the hold.
-    REQUIRE(wait_until([&] { return clock.wait_count() > waits_before && clock.waiter_count() == 2; }, 5000));
+    REQUIRE(wait_until([&] { return clock.wait_count() > waits_before && clock.waiter_count() == 2; }, 5s));
     REQUIRE(advance_until(
         clock, [&] { return read_slewing(*driver) != SlewingRead::True; }, std::chrono::milliseconds(100)));
     CHECK(read_slewing(*driver) == SlewingRead::False);
@@ -2080,7 +2081,7 @@ TEST_CASE("Celestron hold window - FindHome ends a superseded GOTO's hold", "[ce
 
     const auto start = clock.now();
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(2)));  // the paused poll and the slew body
     clock.advance(std::chrono::seconds(1));
     REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(2)));
@@ -2088,7 +2089,7 @@ TEST_CASE("Celestron hold window - FindHome ends a superseded GOTO's hold", "[ce
 
     REQUIRE_NOTHROW(driver->find_home());
     // The superseded body wakes from the claim's cancel and ends; only the paused poll waits then.
-    REQUIRE(wait_until([&] { return clock.waiter_count() == 1; }, 2000));
+    REQUIRE(wait_until([&] { return clock.waiter_count() == 1; }, 2s));
     REQUIRE(driver->get_slewing());  // homing
     // The fake's GOTO does not end at MC_LEVEL_START; the mount that took the home reports no GOTO on L, so the
     // poll's L read below cannot hold Slewing true for the device.
@@ -2135,7 +2136,7 @@ TEST_CASE("Celestron hold window - FindHome keeps a superseded GOTO's hold while
                                  static_cast<unsigned char>(chunk[3]) == 0x0B;
         if (auto* driver = probe.exchange(nullptr); driver != nullptr && level_start) {
             // The superseded body wakes from the claim's cancel and returns, so the slot no longer reports it running.
-            body_returned_before_tick.store(wait_until([&] { return bodies_returned->load() >= 1; }, 5000));
+            body_returned_before_tick.store(wait_until([&] { return bodies_returned->load() >= 1; }, 5s));
             polling.store(true);
             poller = std::thread([&, driver] {
                 poller_error =
@@ -2165,7 +2166,7 @@ TEST_CASE("Celestron hold window - FindHome keeps a superseded GOTO's hold while
     });
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(2)));  // the paused poll and the slew body
     REQUIRE(driver->get_slewing());
 
@@ -2206,14 +2207,14 @@ TEST_CASE("Celestron hold window - a failed FindHome dispatch ends a superseded 
 
     const auto start = clock.now();
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(2)));  // the paused poll and the slew body
     REQUIRE(driver->get_slewing());
 
     st->reject_level_start.store(true);
     require_alpaca_error([&] { driver->find_home(); }, alpacacore::AlpacaError::DriverException);
     // The superseded body wakes from the claim's cancel and returns, so the slot no longer reports it running.
-    REQUIRE(wait_until([&] { return bodies_returned->load() >= 1; }, 5000));
+    REQUIRE(wait_until([&] { return bodies_returned->load() >= 1; }, 5s));
     std::string message;
     REQUIRE(read_slewing(*driver, &message) == SlewingRead::Threw);
     CHECK(message.find("FindHome dispatch failed") != std::string::npos);
@@ -2438,7 +2439,7 @@ TEST_CASE("Celestron GOTO - a GOTO that comes to rest far from its target fails 
 
     SECTION("an async slew") {
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
         REQUIRE(advance_until(clock, [&] { return read_slewing(*driver, &message) != SlewingRead::True; }));
         CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
     }
@@ -2464,7 +2465,7 @@ TEST_CASE("Celestron GOTO - a GOTO that comes to rest on its target completes",
     auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     REQUIRE(advance_until(clock, [&] { return read_slewing(*driver) != SlewingRead::True; }));
     CHECK(read_slewing(*driver) == SlewingRead::False);
     CHECK(std::abs(driver->get_declination() - 20.0) < 0.1);
@@ -2484,7 +2485,7 @@ TEST_CASE("Celestron GOTO - a GOTO reply other than # is not a confirmed GOTO",
     st->odd_goto_reply.store(true);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
     std::string message;
-    REQUIRE(wait_until([&] { return read_slewing(*driver, &message) != SlewingRead::True; }, 10000));
+    REQUIRE(wait_until([&] { return read_slewing(*driver, &message) != SlewingRead::True; }, 10s));
     CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
     CHECK(message.find("not confirmed") != std::string::npos);
     CHECK(st->cancel_goto_count.load() >= 1);
@@ -2503,7 +2504,7 @@ TEST_CASE("Celestron AbortSlew - a stop the mount ignores is sent three times an
     auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     st->ignore_cancels.store(1000);
     REQUIRE_NOTHROW(driver->abort_slew());
     std::string message;
@@ -2524,7 +2525,7 @@ TEST_CASE("Celestron AbortSlew - a lost stop is sent again and the abort verifie
     auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     st->ignore_cancels.store(1);  // the first stop is lost
     REQUIRE_NOTHROW(driver->abort_slew());
     REQUIRE(advance_until(clock, [&] { return read_slewing(*driver) != SlewingRead::True; }));
@@ -2572,7 +2573,7 @@ TEST_CASE("Celestron site - a GOTO started after the motion check does not reach
                 } catch (...) {  // NOLINT(bugprone-empty-catch): the ledger below is the check
                 }
             });
-            (void)wait_until([&] { return st->goto_count.load() > 0; }, 1500);
+            (void)wait_until([&] { return st->goto_count.load() > 0; }, 1500ms);
         });
     if (writer == 0) REQUIRE_NOTHROW(driver->set_site_latitude(10.0));
     if (writer == 1) REQUIRE_NOTHROW(driver->set_site_longitude(10.0));
@@ -2581,7 +2582,7 @@ TEST_CASE("Celestron site - a GOTO started after the motion check does not reach
     slewer.join();
     alpacacore::vendor::celestron::set_clock_resync_hook_for_testing(*driver, nullptr);
     CHECK(st->goto_count_at_write.load() == 0);                          // the write reached the mount before the GOTO
-    CHECK(wait_until([&] { return st->goto_count.load() > 0; }, 5000));  // and the GOTO went out after it
+    CHECK(wait_until([&] { return st->goto_count.load() > 0; }, 5s));    // and the GOTO went out after it
     driver->set_connected(false);
 }
 
@@ -2606,7 +2607,7 @@ TEST_CASE("Celestron site - site and time writes are refused during a Park and a
     SECTION("a Park") {
         st->goto_never_ends.store(true);
         REQUIRE_NOTHROW(driver->park());
-        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
         CHECK(writes_refused());
         st->goto_never_ends.store(false);
     }
@@ -2631,7 +2632,7 @@ void stop_sibling_after_held_goto(alpacacore::test::FakeTaskClock& clock, FakeCe
     } else {
         REQUIRE_NOTHROW(driver.slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
     }
-    REQUIRE(wait_until([&] { return st.goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st.goto_count.load() > 0; }, 5s));
     st.ignore_cancels.store(ignored);
     if (park) {
         REQUIRE_NOTHROW(driver.unpark());
@@ -2715,10 +2716,10 @@ SlewingRead after_failed_goto_then(const std::function<void(alpacacore::Telescop
     st.reject_goto.store(true);
     st.first_cancel_delay_ms.store(800);  // under the 1 s reply timeout: the failure stop is acknowledged, late
     REQUIRE_NOTHROW(start(driver));
-    REQUIRE(wait_until([&] { return read_slewing(driver) == SlewingRead::Threw; }, 10000));
+    REQUIRE(wait_until([&] { return read_slewing(driver) == SlewingRead::Threw; }, 10s));
     // The failure stop's cancel is on the wire, not yet answered. A Park body can store its error before it sends the
     // cancel (seen on arm64 CI), so wait for the cancel itself; its 800 ms late answer still leaves the window open.
-    REQUIRE(wait_until([&] { return st.cancel_goto_count.load() == 1; }, 2000));
+    REQUIRE(wait_until([&] { return st.cancel_goto_count.load() == 1; }, 2s));
     REQUIRE_NOTHROW(takeover(driver));
     return read_slewing(driver);
 }
@@ -2774,10 +2775,10 @@ TEST_CASE("Celestron GOTO - a motor-controller GOTO reply other than # is not a 
     st->odd_goto_reply.store(true);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
     std::string message;
-    REQUIRE(wait_until([&] { return read_slewing(*driver, &message) != SlewingRead::True; }, 10000));
+    REQUIRE(wait_until([&] { return read_slewing(*driver, &message) != SlewingRead::True; }, 10s));
     CHECK(read_slewing(*driver, &message) == SlewingRead::Threw);
     CHECK(message.find("not confirmed") != std::string::npos);
-    CHECK(wait_until([&] { return st->cancel_goto_count.load() >= 1; }, 3000));  // the unconfirmed GOTO got a stop
+    CHECK(wait_until([&] { return st->cancel_goto_count.load() >= 1; }, 3s));  // the unconfirmed GOTO got a stop
     driver->set_connected(false);
 }
 
@@ -2792,7 +2793,7 @@ TEST_CASE("Celestron GOTO - a mount that never comes to rest after its GOTO fail
     auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     st->unsettled.store(true);
     const auto started = clock.now();
     std::string message;

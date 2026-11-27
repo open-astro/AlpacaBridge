@@ -567,16 +567,8 @@ std::unique_ptr<alpacacore::TelescopeDriver> serial_driver(const std::string& pa
     return sw::create_skywatcher_telescope(0, serial_info(path), -37.0, 175.0, 50.0);
 }
 
-bool wait_until_true(const std::function<bool()>& pred, int timeout_ms) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (pred()) {
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-    return pred();
-}
+using alpacacore::test::wait_until;
+using namespace std::chrono_literals;
 
 // A by-id style symlink to a fake board, repointable to a "replugged" one.
 struct PortLink {
@@ -620,7 +612,7 @@ TEST_CASE("SkyWatcher serial - Connected drops when the adapter is pulled, with 
     // releases it, and the port's registry claim with it. The status poll may
     // hold the link in an exchange at that moment, and that exchange then
     // finishes the close (decision 0009, point 3).
-    CHECK(wait_until_true([&] { return !alpacacore::util::is_serial_port_in_use(key); }, 3000));
+    CHECK(wait_until([&] { return !alpacacore::util::is_serial_port_in_use(key); }, 3s));
     require_alpaca_error([&] { driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
 
     // An explicit disconnect of the dead link still completes cleanly, and
@@ -1002,7 +994,7 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses the position cache instead
     // Getters never ask the board (decision 0010): the status poll finds the
     // silence. Until it latches the fault the frame is served; once latched the
     // frame is not an answer at any age.
-    REQUIRE(wait_until_true([&] { return !driver->get_link_fault().empty(); }, 6000));
+    REQUIRE(wait_until([&] { return !driver->get_link_fault().empty(); }, 6s));
     require_driver_error([&] { driver->get_right_ascension(); }, "communications compromised");
     require_driver_error([&] { driver->get_declination(); }, "communications compromised");
     CHECK(driver->get_connected());  // DriverException, not NotConnected
@@ -1011,7 +1003,7 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses the position cache instead
     board.set_muted(false);
     // Recovery is automatic: no reconnect, no client action; the poll's first
     // good reply clears the latch.
-    REQUIRE(wait_until_true([&] { return driver->get_link_fault().empty(); }, 6000));
+    REQUIRE(wait_until([&] { return driver->get_link_fault().empty(); }, 6s));
     const double ra_after = driver->get_right_ascension();
     CHECK(std::abs(ra_after - ra_before) < 0.01);
     CHECK(driver->get_connected());
@@ -1031,7 +1023,7 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses Slewing and every start wi
     REQUIRE(driver->get_slewing());
 
     board.set_muted(true);
-    REQUIRE(wait_until_true([&] { return !driver->get_link_fault().empty(); }, 6000));
+    REQUIRE(wait_until([&] { return !driver->get_link_fault().empty(); }, 6s));
 
     const auto expect_compromised = [&](const std::function<void()>& fn) {
         try {
@@ -1086,7 +1078,7 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses Slewing and every start wi
     CHECK_NOTHROW(driver->get_can_pulse_guide());
 
     board.set_muted(false);
-    REQUIRE(wait_until_true([&] { return driver->get_link_fault().empty(); }, 6000));
+    REQUIRE(wait_until([&] { return driver->get_link_fault().empty(); }, 6s));
     CHECK_NOTHROW(driver->get_slewing());
     CHECK_NOTHROW(driver->set_tracking(true));
     CHECK_NOTHROW(driver->get_tracking());
@@ -1114,7 +1106,7 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses a hemisphere-crossing Site
     REQUIRE(driver->get_tracking());
 
     board.set_muted(true);
-    REQUIRE(wait_until_true([&] { return !driver->get_link_fault().empty(); }, 6000));
+    REQUIRE(wait_until([&] { return !driver->get_link_fault().empty(); }, 6s));
 
     const std::size_t frames_before = board.frames().size();
     try {
@@ -1133,7 +1125,7 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses a hemisphere-crossing Site
     CHECK(driver->get_connected());
 
     board.set_muted(false);
-    REQUIRE(wait_until_true([&] { return driver->get_link_fault().empty(); }, 6000));
+    REQUIRE(wait_until([&] { return driver->get_link_fault().empty(); }, 6s));
     CHECK_NOTHROW(driver->set_site_latitude(51.477833));
     CHECK(driver->get_site_latitude() == 51.477833);
     driver->set_connected(false);
@@ -1157,8 +1149,8 @@ int count_exact_frames(const FakeSkyWatcherSerialBoard& board, const std::string
 void start_dec_duty_and_wait_idle(alpacacore::TelescopeDriver& driver, FakeSkyWatcherSerialBoard& board) {
     const int starts = count_exact_frames(board, "J2");
     driver.set_declination_rate(0.01);
-    REQUIRE(wait_until_true([&] { return count_exact_frames(board, "J2") > starts; }, 5000));
-    REQUIRE(wait_until_true([&] { return !board.axis_running(2); }, 2000));
+    REQUIRE(wait_until([&] { return count_exact_frames(board, "J2") > starts; }, 5s));
+    REQUIRE(wait_until([&] { return !board.axis_running(2); }, 2s));
     // The stop's confirming ':f2' follows the ':K2' at once; let it land.
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
 }
@@ -1188,7 +1180,7 @@ TEST_CASE("SkyWatcher serial - a faulted link starts no sub-floor rate burst unt
     start_dec_duty_and_wait_idle(*driver, board);
 
     board.set_muted(true);
-    REQUIRE(wait_until_true([&] { return !driver->get_link_fault().empty(); }, 6000));
+    REQUIRE(wait_until([&] { return !driver->get_link_fault().empty(); }, 6s));
     // A start attempt in flight when the latch set may still be timing out.
     std::this_thread::sleep_for(std::chrono::milliseconds(1500));
     const std::size_t frames_before = board.frames().size();
@@ -1198,8 +1190,8 @@ TEST_CASE("SkyWatcher serial - a faulted link starts no sub-floor rate burst unt
 
     const int starts = count_exact_frames(board, "J2");
     board.set_muted(false);
-    REQUIRE(wait_until_true([&] { return driver->get_link_fault().empty(); }, 6000));
-    CHECK(wait_until_true([&] { return count_exact_frames(board, "J2") > starts; }, 5000));
+    REQUIRE(wait_until([&] { return driver->get_link_fault().empty(); }, 6s));
+    CHECK(wait_until([&] { return count_exact_frames(board, "J2") > starts; }, 5s));
     driver->set_connected(false);
 }
 
@@ -1216,10 +1208,10 @@ TEST_CASE("SkyWatcher serial - a board that restarted under a recovered link sta
     start_dec_duty_and_wait_idle(*driver, board);
 
     board.set_muted(true);
-    REQUIRE(wait_until_true([&] { return !driver->get_link_fault().empty(); }, 6000));
+    REQUIRE(wait_until([&] { return !driver->get_link_fault().empty(); }, 6s));
     board.set_init_done(false);
     board.set_muted(false);
-    REQUIRE(wait_until_true([&] { return driver->get_link_fault().find("restarted") != std::string::npos; }, 6000));
+    REQUIRE(wait_until([&] { return driver->get_link_fault().find("restarted") != std::string::npos; }, 6s));
     // A burst started between the good reply and the restart check ends in 50 ms.
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     const std::size_t frames_before = board.frames().size();
@@ -1240,9 +1232,9 @@ TEST_CASE("SkyWatcher serial - state getters on a faulted link that is then lost
     REQUIRE(driver->get_connected());
 
     board.set_muted(true);
-    REQUIRE(wait_until_true([&] { return !driver->get_link_fault().empty(); }, 6000));
+    REQUIRE(wait_until([&] { return !driver->get_link_fault().empty(); }, 6s));
     board.sever_link();
-    REQUIRE(wait_until_true([&] { return !driver->get_connected(); }, 6000));
+    REQUIRE(wait_until([&] { return !driver->get_connected(); }, 6s));
     REQUIRE_FALSE(driver->get_link_fault().empty());  // the latch is still set
 
     const auto expect_not_connected = [&](const char* name, const std::function<void()>& fn) {
@@ -1282,13 +1274,13 @@ TEST_CASE("SkyWatcher serial - a board that restarted while the link was down is
     REQUIRE_NOTHROW(driver->get_right_ascension());
 
     board.set_muted(true);
-    REQUIRE(wait_until_true([&] { return !driver->get_link_fault().empty(); }, 6000));
+    REQUIRE(wait_until([&] { return !driver->get_link_fault().empty(); }, 6s));
 
     // The board comes back - but it is not the board we set up. The status
     // poll's first good reply finds out.
     board.set_init_done(false);
     board.set_muted(false);
-    REQUIRE(wait_until_true([&] { return driver->get_link_fault().find("restarted") != std::string::npos; }, 6000));
+    REQUIRE(wait_until([&] { return driver->get_link_fault().find("restarted") != std::string::npos; }, 6s));
     require_driver_error([&] { driver->get_right_ascension(); }, "restarted");
     // Terminal for the session: the latch cleared on that good reply, so
     // nothing else would ever raise this again.
@@ -1317,9 +1309,9 @@ TEST_CASE("SkyWatcher serial - a board that merely went quiet resumes with its s
     REQUIRE(driver->get_connected());
 
     board.set_muted(true);
-    REQUIRE(wait_until_true([&] { return !driver->get_link_fault().empty(); }, 6000));
+    REQUIRE(wait_until([&] { return !driver->get_link_fault().empty(); }, 6s));
     board.set_muted(false);  // init_done left true: same session, still aligned
-    REQUIRE(wait_until_true([&] { return driver->get_link_fault().empty(); }, 6000));
+    REQUIRE(wait_until([&] { return driver->get_link_fault().empty(); }, 6s));
     CHECK_NOTHROW(driver->get_right_ascension());
     CHECK(driver->get_connected());
     driver->set_connected(false);
@@ -1782,7 +1774,7 @@ TEST_CASE("SkyWatcher serial - an EQM-35 board's geometry and features reach the
     // AutoHome arms the indexers with ":W" (kIndexerReset); the count-frame
     // fallback goes to the origin with a GOTO and never sends one.
     driver->find_home();
-    REQUIRE(wait_until_true([&] { return board.count_frames('S') > 0 || board.count_frames('W') > 0; }, 3000));
+    REQUIRE(wait_until([&] { return board.count_frames('S') > 0 || board.count_frames('W') > 0; }, 3s));
     CHECK(board.count_frames('W') == 0);
     driver->abort_slew();
 
@@ -1821,7 +1813,7 @@ TEST_CASE("SkyWatcher serial - a refused connect names the port or host:port and
         }
         CHECK_FALSE(driver->get_connected());
         driver->connect();  // LastConnectError is stored by the async path
-        REQUIRE(wait_until_true([&] { return !driver->get_connecting(); }, 5000));
+        REQUIRE(wait_until([&] { return !driver->get_connecting(); }, 5s));
         const std::string last = driver->get_last_connect_error();
         CHECK(last.find(path) != std::string::npos);
         CHECK(last.find("No such file or directory") != std::string::npos);
@@ -1843,7 +1835,7 @@ TEST_CASE("SkyWatcher serial - a refused connect names the port or host:port and
             CHECK(what.find("did not reply to the handshake") != std::string::npos);
         }
         driver->connect();  // LastConnectError is stored by the async path
-        REQUIRE(wait_until_true([&] { return !driver->get_connecting(); }, 5000));
+        REQUIRE(wait_until([&] { return !driver->get_connecting(); }, 5s));
         const std::string last = driver->get_last_connect_error();
         CHECK(last.find("127.0.0.1:9") != std::string::npos);
         CHECK(last.find("did not reply to the handshake") != std::string::npos);
@@ -1867,7 +1859,7 @@ TEST_CASE("SkyWatcher serial - a muted board's refused connect names the port an
     }
     CHECK_FALSE(driver->get_connected());
     driver->connect();
-    REQUIRE(wait_until_true([&] { return !driver->get_connecting(); }, 15000));
+    REQUIRE(wait_until([&] { return !driver->get_connecting(); }, 15s));
     const std::string last = driver->get_last_connect_error();
     CHECK(last.find(path) != std::string::npos);
     CHECK(last.find("Serial Port setting") != std::string::npos);

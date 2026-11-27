@@ -582,26 +582,16 @@ TEST_CASE("SVBONY Camera Driver - an unknown SensorName is empty", "[svbony][cam
 namespace {
 
 using namespace std::chrono_literals;
-
-// Real time: each waits for a driver thread (the exposure body or the connection task), bounded at 2 s.
-template <typename Pred>
-bool eventually(Pred pred, std::chrono::milliseconds bound = 2000ms) {
-    const auto deadline = std::chrono::steady_clock::now() + bound;
-    while (!pred()) {
-        if (std::chrono::steady_clock::now() >= deadline) return false;
-        std::this_thread::sleep_for(1ms);
-    }
-    return true;
-}
+using alpacacore::test::wait_until;
 
 void wait_ready(alpacacore::CameraDriver& camera) {
-    REQUIRE(eventually([&] { return camera.get_image_ready(); }));
+    REQUIRE(wait_until([&] { return camera.get_image_ready(); }));
 }
 
 // Polls ImageReady until it raises and returns the exception's code and text; {0, ""} when it never does.
 std::pair<int, std::string> wait_for_raise(const alpacacore::CameraDriver& camera) {
     std::pair<int, std::string> raised{0, ""};
-    static_cast<void>(eventually([&] {
+    static_cast<void>(wait_until([&] {
         try {
             static_cast<void>(camera.get_image_ready());
             return false;
@@ -916,7 +906,7 @@ TEST_CASE("SVBONY Camera Driver - an exposure in flight when the camera goes fai
     sdk.remove_during_held_read();
     sdk.release_video_data();
 
-    REQUIRE(eventually([&] { return sdk.call_count("close_camera") == 1; }));  // the body's way out
+    REQUIRE(wait_until([&] { return sdk.call_count("close_camera") == 1; }));  // the body's way out
     const int reads = sdk.call_count("get_video_data");
     CHECK_FALSE(camera->get_connected());
     CHECK(camera->get_link_fault() == "SVBGetVideoData: SVB_ERROR_CAMERA_REMOVED");
@@ -1001,7 +991,7 @@ TEST_CASE("SVBONY Camera Driver - a Connect after a loss reconnects and exposes"
     REQUIRE(sdk.wait_for_video_data(2s));
     sdk.remove_during_held_read();
     sdk.release_video_data();
-    REQUIRE(eventually([&] { return sdk.call_count("close_camera") == 1; }));
+    REQUIRE(wait_until([&] { return sdk.call_count("close_camera") == 1; }));
     REQUIRE_FALSE(camera->get_connected());
     CHECK(sdk.call_count("open_camera") == 1);  // no autonomous reopen
 
@@ -1112,7 +1102,7 @@ TEST_CASE("SVBONY Camera Driver - a Disconnect queued against a Connect in fligh
     REQUIRE(alpacacore::test::wait_for_flag(open_entered));  // the relink is inside the SDK open
     camera->disconnect();
     release_open = true;
-    REQUIRE(eventually([&] { return !camera->get_connecting(); }, 5000ms));
+    REQUIRE(wait_until([&] { return !camera->get_connecting(); }, 5000ms));
     CHECK_FALSE(camera->get_connected());
     CHECK(sdk.call_count("open_camera") == 2);
     CHECK(sdk.open_count() == 0);

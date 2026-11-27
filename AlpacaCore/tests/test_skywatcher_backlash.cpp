@@ -47,6 +47,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_skywatcher_mount.h"
 #include "fake_task_clock.h"
 #include "skywatcher_fake_clock.h"
@@ -137,14 +138,7 @@ void land(FakeTaskClock& clock, alpacacore::TelescopeDriver& driver, FakeSkyWatc
     pump_until_landed(clock, driver, mount);
 }
 
-bool wait_for(const std::function<bool()>& done, std::chrono::seconds bound = std::chrono::seconds(20)) {
-    const auto deadline = std::chrono::steady_clock::now() + bound;
-    while (!done()) {
-        if (std::chrono::steady_clock::now() >= deadline) return false;
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    return true;
-}
+using alpacacore::test::wait_until;
 
 double counts_deg(uint32_t counts, const FakeMountProfile& profile) { return counts * 360.0 / profile.cpr; }
 
@@ -303,7 +297,7 @@ struct MidFirstLeg : Rig {
         mount.jump_axis_degrees(2, 4.0);
         mount.clear_motion_log();
         driver->find_home();
-        REQUIRE(wait_for([&] { return mount.axis_in_goto(2); }));
+        REQUIRE(wait_until([&] { return mount.axis_in_goto(2); }));
         const Frames first = axis_two(mount.motion_log());
         REQUIRE(first_target(first) < first.size());
         // The first leg overshoots the count origin by the slack.
@@ -328,7 +322,7 @@ struct SteppedHome : Rig {
         mount.jump_axis_degrees(2, 4.0);
         mount.clear_motion_log();
         driver->find_home();
-        REQUIRE(wait_for([&] { return mount.start_count(2) >= 1; }));
+        REQUIRE(wait_until([&] { return mount.start_count(2) >= 1; }));
         REQUIRE(clock.wait_for_waiters(kParked, std::chrono::milliseconds(2000)));
     }
     bool slewing() {
@@ -635,7 +629,7 @@ TEST_CASE("SkyWatcher backlash - an AbortSlew during the first leg stops it and 
     MidFirstLeg rig;
     rig.driver->abort_slew();
     CHECK_FALSE(rig.mount.axis_running(2));  // stopped at once, the clock still frozen
-    REQUIRE(wait_for([&] { return !rig.driver->get_slewing(); }));
+    REQUIRE(wait_until([&] { return !rig.driver->get_slewing(); }));
     rig.clock.advance(std::chrono::seconds(20));
     std::this_thread::sleep_for(std::chrono::milliseconds(600));  // a wait poll or two
     CHECK_FALSE(rig.final_leg_sent());
@@ -692,7 +686,7 @@ TEST_CASE("SkyWatcher backlash - a MoveAxis during the first leg sends no final 
     rig.driver->move_axis(1, 0.5);  // Dec: the goto's wait loses the axis to the manual motion
     follow_wall_clock(rig.clock, std::chrono::milliseconds(300));
     rig.driver->move_axis(1, 0.0);
-    REQUIRE(wait_for([&] {
+    REQUIRE(wait_until([&] {
         rig.clock.advance(std::chrono::milliseconds(100));
         return !rig.mount.axis_running(2);
     }));

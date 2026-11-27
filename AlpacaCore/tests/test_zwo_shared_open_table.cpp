@@ -351,12 +351,7 @@ struct CountingUnits {
     }
 };
 
-bool wait_until(const std::function<bool()>& done) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (!done() && std::chrono::steady_clock::now() < deadline)
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    return done();
-}
+using alpacacore::test::wait_until;
 
 // A holder's blocking call: runs call_unserialised() on its own thread until released.
 struct HeldDownload {

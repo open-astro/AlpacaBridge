@@ -51,6 +51,7 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "driver_rig.h"
 #include "fake_task_clock.h"
 
 namespace AlpacaError = alpacacore::AlpacaError;
@@ -74,18 +75,7 @@ namespace {
 
 constexpr auto kBound = 2s;
 
-// Spins (yielding, no sleep) until pred() is true or `bound` of real time
-// passes; returns pred().
-bool eventually(const std::function<bool()>& pred, std::chrono::milliseconds bound = kBound) {
-    const auto give_up = std::chrono::steady_clock::now() + bound;
-    while (!pred()) {
-        if (std::chrono::steady_clock::now() >= give_up) {
-            return pred();
-        }
-        std::this_thread::yield();
-    }
-    return true;
-}
+using alpacacore::test::wait_until;
 
 // A test-owned gate: a body blocked in wait() ignores the slot's cancel.
 class Gate {
@@ -215,7 +205,7 @@ struct Harness {
         // aborts the binary with a message instead of hanging it. A
         // destructor cannot fail a Catch2 case, and detaching a helper that
         // references this Harness would be a use-after-free.
-        if (!eventually([&] { return helpers_done->load() == helpers.size(); })) {
+        if (!wait_until([&] { return helpers_done->load() == helpers.size(); }, kBound)) {
             std::fprintf(stderr, "test_async_operation: %zu of %zu helper threads still running after %lld ms\n",
                          helpers.size() - helpers_done->load(), helpers.size(),
                          static_cast<long long>(std::chrono::milliseconds(kBound).count()));
@@ -303,7 +293,7 @@ TEST_CASE("AsyncOperation - wait contract", "[util][async_operation][unit]") {
         h.clock.advance(99ms);
         CHECK(h.clock.waiter_count() == 1);  // not due, not woken
         h.clock.advance(1ms);
-        REQUIRE(eventually([&] { return p->exited.load(); }));
+        REQUIRE(wait_until([&] { return p->exited.load(); }));
         CHECK(p->wait_result == 1);
         CHECK(p->reason.load() == StopReason::None);
     }
@@ -313,7 +303,7 @@ TEST_CASE("AsyncOperation - wait contract", "[util][async_operation][unit]") {
         REQUIRE(h.clock.wait_for_waiters(1, kBound));
         const auto before = h.clock.now();
         h.op->cancel();
-        REQUIRE(eventually([&] { return p->exited.load(); }));
+        REQUIRE(wait_until([&] { return p->exited.load(); }));
         CHECK(p->wait_result == 0);
         CHECK(h.clock.now() == before);
         CHECK(p->reason.load() == StopReason::Cancelled);
@@ -324,7 +314,7 @@ TEST_CASE("AsyncOperation - wait contract", "[util][async_operation][unit]") {
         REQUIRE(h.clock.wait_for_waiters(1, kBound));
         h.op->cancel();
         h.clock.advance(200ms);
-        REQUIRE(eventually([&] { return p->exited.load(); }));
+        REQUIRE(wait_until([&] { return p->exited.load(); }));
         CHECK(p->wait_result == 0);
     }
 
@@ -339,10 +329,10 @@ TEST_CASE("AsyncOperation - wait contract", "[util][async_operation][unit]") {
             *registered = h.clock.waiter_count();
             p->exited = true;
         }));
-        REQUIRE(eventually([&] { return p->entered.load(); }));
+        REQUIRE(wait_until([&] { return p->entered.load(); }));
         h.op->cancel();
         g->open();
-        REQUIRE(eventually([&] { return p->exited.load(); }));
+        REQUIRE(wait_until([&] { return p->exited.load(); }));
         CHECK(p->wait_result == 0);
         CHECK(registered->load() == 0);
     }
@@ -355,7 +345,7 @@ TEST_CASE("AsyncOperation - start returns while the old body is blocked", "[util
     auto ga = h.gate();
     auto a_thread_ended = std::make_shared<std::atomic<bool>>(false);
     REQUIRE(h.start_within(gated_body_signalling_exit(a, ga, a_thread_ended)));
-    REQUIRE(eventually([&] { return a->entered.load(); }));
+    REQUIRE(wait_until([&] { return a->entered.load(); }));
 
     auto b = probe();
     REQUIRE(h.start_within(waiting_body(b, 1h)));  // A's gate is still closed
@@ -365,7 +355,7 @@ TEST_CASE("AsyncOperation - start returns while the old body is blocked", "[util
     ga->open();
     // Wait for A's thread to exit, not only for `exited`: the next start()
     // joins A only once the slot has published that A returned.
-    REQUIRE(eventually([&] { return a_thread_ended->load(); }));
+    REQUIRE(wait_until([&] { return a_thread_ended->load(); }));
     CHECK(a->exited);
     CHECK(a->reason.load() == StopReason::Superseded);
     CHECK(a->stops == 0);
@@ -397,7 +387,7 @@ TEST_CASE("AsyncOperation - stale bound", "[util][async_operation][unit]") {
     }
     for (int i = 0; i < 4; ++i) {
         REQUIRE(h.start_within(gated_body(p[i], g[i])));
-        REQUIRE(eventually([&] { return p[i]->entered.load(); }));
+        REQUIRE(wait_until([&] { return p[i]->entered.load(); }));
     }
     CHECK(h.op->stale_count() == 3);
     const auto generation_before = h.generation.current();
@@ -435,7 +425,7 @@ TEST_CASE("AsyncOperation - stale bound", "[util][async_operation][unit]") {
         CHECK(out.token == generation_before + 1);
         CHECK(p[0]->exited);
         CHECK(h.op->stale_count() == 3);
-        REQUIRE(eventually([&] { return p[4]->entered.load(); }));
+        REQUIRE(wait_until([&] { return p[4]->entered.load(); }));
     }
 
     SECTION("the bound expires: start() refuses and changes nothing") {
@@ -452,7 +442,7 @@ TEST_CASE("AsyncOperation - stale bound", "[util][async_operation][unit]") {
 
         // The current body was not superseded.
         g[3]->open();
-        REQUIRE(eventually([&] { return p[3]->exited.load(); }));
+        REQUIRE(wait_until([&] { return p[3]->exited.load(); }));
         CHECK(p[3]->reason.load() == StopReason::None);
     }
 }
@@ -465,7 +455,7 @@ TEST_CASE("AsyncOperation - a refused thread is an AlpacaException and changes n
     auto first = probe();
     auto gate = h.gate();
     REQUIRE(h.start_within(gated_body(first, gate)));
-    REQUIRE(eventually([&] { return first->entered.load(); }));
+    REQUIRE(wait_until([&] { return first->entered.load(); }));
     const auto generation_before = h.generation.current();
     const auto failure_before = h.op->last_failure();
 
@@ -495,7 +485,7 @@ TEST_CASE("AsyncOperation - a refused thread is an AlpacaException and changes n
 
     // The body that was current is still current, not superseded.
     gate->open();
-    REQUIRE(eventually([&] { return first->exited.load(); }));
+    REQUIRE(wait_until([&] { return first->exited.load(); }));
     CHECK(first->reason.load() == StopReason::None);
 }
 
@@ -515,7 +505,7 @@ TEST_CASE("AsyncOperation - shared generation: a stop body sees superseded", "[u
         auto w = probe();
         const auto slew_token = slew.start(waiting_body(w, 1h));
         CHECK(slew_token == token + 1);
-        REQUIRE(eventually([&] { return w->entered.load(); }));
+        REQUIRE(wait_until([&] { return w->entered.load(); }));
     }
 
     SECTION("a direct bump()") { CHECK(h.generation.bump() == token + 1); }
@@ -526,7 +516,7 @@ TEST_CASE("AsyncOperation - shared generation: a stop body sees superseded", "[u
     // generation and ends early. Either way it ends Superseded.
 
     h.clock.advance(50ms);
-    REQUIRE(eventually([&] { return s->exited.load(); }));
+    REQUIRE(wait_until([&] { return s->exited.load(); }));
     CHECK(s->reason.load() == StopReason::Superseded);
     CHECK(s->stops == 0);
 }
@@ -540,7 +530,7 @@ TEST_CASE("AsyncOperation - replaced sees superseded, aborted sees cancelled", "
         REQUIRE(h.start_within(polling_body(p)));
         REQUIRE(h.clock.wait_for_waiters(1, kBound));
         REQUIRE(h.start_within(waiting_body(probe(), 1h)));
-        REQUIRE(eventually([&] { return p->exited.load(); }));  // woken at once
+        REQUIRE(wait_until([&] { return p->exited.load(); }));  // woken at once
         CHECK(p->reason.load() == StopReason::Superseded);
         CHECK(p->stops == 0);
     }
@@ -549,7 +539,7 @@ TEST_CASE("AsyncOperation - replaced sees superseded, aborted sees cancelled", "
         REQUIRE(h.start_within(polling_body(p)));
         REQUIRE(h.clock.wait_for_waiters(1, kBound));
         h.op->cancel();
-        REQUIRE(eventually([&] { return p->exited.load(); }));
+        REQUIRE(wait_until([&] { return p->exited.load(); }));
         CHECK(p->reason.load() == StopReason::Cancelled);
         CHECK(p->stops == 1);
     }
@@ -557,11 +547,11 @@ TEST_CASE("AsyncOperation - replaced sees superseded, aborted sees cancelled", "
     SECTION("cancelled, then replaced before it looks: Superseded, no stop") {
         auto g = h.gate();
         REQUIRE(h.start_within(gated_body(p, g)));
-        REQUIRE(eventually([&] { return p->entered.load(); }));
+        REQUIRE(wait_until([&] { return p->entered.load(); }));
         h.op->cancel();
         REQUIRE(h.start_within(waiting_body(probe(), 1h)));
         g->open();
-        REQUIRE(eventually([&] { return p->exited.load(); }));
+        REQUIRE(wait_until([&] { return p->exited.load(); }));
         CHECK(p->reason.load() == StopReason::Superseded);
         CHECK(p->stops == 0);
     }
@@ -570,12 +560,12 @@ TEST_CASE("AsyncOperation - replaced sees superseded, aborted sees cancelled", "
         AsyncOperation slew("slew-slot", h.generation, h.clock);
         auto g = h.gate();
         REQUIRE(h.start_within(gated_body(p, g)));
-        REQUIRE(eventually([&] { return p->entered.load(); }));
+        REQUIRE(wait_until([&] { return p->entered.load(); }));
         slew.start(waiting_body(probe(), 1h));
         auto joined = h.on_helper([&h] { h.op->cancel_all_and_join(); });
         // cancel_all_and_join() has marked and taken the body once the slot
         // reports nothing running; it is now blocked joining the gated body.
-        REQUIRE(eventually([&] { return !h.op->running(); }));
+        REQUIRE(wait_until([&] { return !h.op->running(); }));
         CHECK(joined.wait_for(0s) == std::future_status::timeout);
         g->open();
         REQUIRE(joined.wait_for(kBound) == std::future_status::ready);
@@ -587,10 +577,10 @@ TEST_CASE("AsyncOperation - replaced sees superseded, aborted sees cancelled", "
     SECTION("replaced on its own slot, then reached by cancel_all_and_join(): Superseded, no stop") {
         auto g = h.gate();
         REQUIRE(h.start_within(gated_body(p, g)));
-        REQUIRE(eventually([&] { return p->entered.load(); }));
+        REQUIRE(wait_until([&] { return p->entered.load(); }));
         REQUIRE(h.start_within(waiting_body(probe(), 1h)));
         auto joined = h.on_helper([&h] { h.op->cancel_all_and_join(); });
-        REQUIRE(eventually([&] { return h.op->stale_count() == 0; }));
+        REQUIRE(wait_until([&] { return h.op->stale_count() == 0; }));
         g->open();
         REQUIRE(joined.wait_for(kBound) == std::future_status::ready);
         CHECK(p->reason.load() == StopReason::Superseded);
@@ -608,7 +598,7 @@ TEST_CASE("AsyncOperation - live() is false for a stopped body that has not retu
     auto g = h.gate();
     CHECK_FALSE(h.op->live());
     REQUIRE(h.start_within(gated_body(p, g)));
-    REQUIRE(eventually([&] { return p->entered.load(); }));
+    REQUIRE(wait_until([&] { return p->entered.load(); }));
     CHECK(h.op->live());
 
     SECTION("cancelled") { h.op->cancel(); }
@@ -616,7 +606,7 @@ TEST_CASE("AsyncOperation - live() is false for a stopped body that has not retu
     CHECK(h.op->running());
     CHECK_FALSE(h.op->live());
     g->open();
-    REQUIRE(eventually([&] { return !h.op->running(); }));
+    REQUIRE(wait_until([&] { return !h.op->running(); }));
     CHECK_FALSE(h.op->live());
 }
 
@@ -628,7 +618,7 @@ TEST_CASE("AsyncOperation - failure retention", "[util][async_operation][unit]")
 
     SECTION("std::exception from the current body") {
         REQUIRE(h.start_within([](OperationContext&) { throw std::runtime_error("boom"); }));
-        REQUIRE(eventually([&] { return !h.op->running(); }));
+        REQUIRE(wait_until([&] { return !h.op->running(); }));
         CHECK(h.op->last_failure() == std::optional<std::string>("boom"));
         h.op->cancel();
         CHECK(h.op->last_failure() == std::optional<std::string>("boom"));
@@ -640,7 +630,7 @@ TEST_CASE("AsyncOperation - failure retention", "[util][async_operation][unit]")
 
     SECTION("a non-std::exception value") {
         REQUIRE(h.start_within([](OperationContext&) { throw 42; }));
-        REQUIRE(eventually([&] { return !h.op->running(); }));
+        REQUIRE(wait_until([&] { return !h.op->running(); }));
         CHECK(h.op->last_failure() == std::optional<std::string>("unknown exception"));
     }
 
@@ -653,9 +643,9 @@ TEST_CASE("AsyncOperation - failure retention", "[util][async_operation][unit]")
             stale->exited = true;
             throw std::runtime_error("stale");
         }));
-        REQUIRE(eventually([&] { return stale->entered.load(); }));
+        REQUIRE(wait_until([&] { return stale->entered.load(); }));
         REQUIRE(h.start_within([](OperationContext&) { throw std::runtime_error("current"); }));
-        REQUIRE(eventually([&] { return !h.op->running(); }));
+        REQUIRE(wait_until([&] { return !h.op->running(); }));
         CHECK(h.op->last_failure() == std::optional<std::string>("current"));
         g->open();
         h.op->cancel_all_and_join();  // the stale body has returned after this
@@ -672,12 +662,12 @@ TEST_CASE("AsyncOperation - failure retention", "[util][async_operation][unit]")
             taken->exited = true;
             throw std::runtime_error("taken");
         }));
-        REQUIRE(eventually([&] { return taken->entered.load(); }));
+        REQUIRE(wait_until([&] { return taken->entered.load(); }));
         auto joined = h.on_helper([&h] { h.op->cancel_all_and_join(); });
         // cancel_all_and_join() has taken the body once nothing is running;
         // it is now blocked joining it. A start() now is refused (#1713), so
         // the next start() can only come after the taken body has thrown.
-        REQUIRE(eventually([&] { return !h.op->running(); }));
+        REQUIRE(wait_until([&] { return !h.op->running(); }));
         g->open();
         REQUIRE(joined.wait_for(kBound) == std::future_status::ready);
         CHECK(taken->exited);
@@ -694,7 +684,7 @@ TEST_CASE("AsyncOperation - failure retention", "[util][async_operation][unit]")
             throw std::runtime_error("disconnect");
         }));
         auto joined = h.on_helper([&h] { h.op->cancel_all_and_join(); });
-        REQUIRE(eventually([&] { return !h.op->running(); }));
+        REQUIRE(wait_until([&] { return !h.op->running(); }));
         g->open();
         REQUIRE(joined.wait_for(kBound) == std::future_status::ready);
         CHECK(h.op->last_failure() == std::optional<std::string>("disconnect"));
@@ -715,7 +705,7 @@ TEST_CASE("AsyncOperation - a superseded body's throw is logged", "[util][async_
         stale->reason = ctx.stop_reason();
         throw std::runtime_error("late boom");
     }));
-    REQUIRE(eventually([&] { return stale->entered.load(); }));
+    REQUIRE(wait_until([&] { return stale->entered.load(); }));
     auto next = probe();
     REQUIRE(h.start_within(waiting_body(next, 1h)));
     g->open();
@@ -746,9 +736,9 @@ TEST_CASE("AsyncOperation - destructor joins every body", "[util][async_operatio
     auto g1 = h.gate();
     auto g2 = h.gate();
     REQUIRE(h.start_within(gated_body(s1, g1)));
-    REQUIRE(eventually([&] { return s1->entered.load(); }));
+    REQUIRE(wait_until([&] { return s1->entered.load(); }));
     REQUIRE(h.start_within(gated_body(s2, g2)));
-    REQUIRE(eventually([&] { return s2->entered.load(); }));
+    REQUIRE(wait_until([&] { return s2->entered.load(); }));
     REQUIRE(h.start_within(waiting_body(cur, 1h)));
     REQUIRE(h.clock.wait_for_waiters(1, kBound));
     CHECK(h.op->stale_count() == 2);
@@ -761,7 +751,7 @@ TEST_CASE("AsyncOperation - destructor joins every body", "[util][async_operatio
         done = h.on_helper([&h] { h.op->cancel_all_and_join(); });
     }
 
-    REQUIRE(eventually([&] { return cur->exited.load(); }));  // the current body was woken
+    REQUIRE(wait_until([&] { return cur->exited.load(); }));  // the current body was woken
     CHECK(cur->reason.load() == StopReason::Cancelled);
     CHECK(cur->wait_result == 0);
     CHECK(done.wait_for(100ms) == std::future_status::timeout);  // still joining the gated bodies
@@ -781,10 +771,10 @@ TEST_CASE("AsyncOperation - destructor joins every body", "[util][async_operatio
         CHECK_FALSE(h.op->running());
         auto again = probe();
         REQUIRE(h.start_within(waiting_body(again, 10ms)));
-        REQUIRE(eventually([&] { return again->entered.load(); }));
+        REQUIRE(wait_until([&] { return again->entered.load(); }));
         REQUIRE(h.clock.wait_for_waiters(1, kBound));
         h.clock.advance(10ms);
-        REQUIRE(eventually([&] { return again->exited.load(); }));
+        REQUIRE(wait_until([&] { return again->exited.load(); }));
         CHECK(again->wait_result == 1);
     }
 }
@@ -809,7 +799,7 @@ TEST_CASE("AsyncOperation - a start() while cancel_all_and_join() joins is refus
     REQUIRE(h.clock.wait_for_waiters(1, kBound));
 
     auto drain = h.on_helper([&h] { h.op->cancel_all_and_join(); });
-    REQUIRE(eventually([&] { return first_cancelled->load(); }));  // taken out, now being joined
+    REQUIRE(wait_until([&] { return first_cancelled->load(); }));  // taken out, now being joined
     CHECK(drain.wait_for(0s) == std::future_status::timeout);
 
     const auto generation_before = h.generation.current();
@@ -841,7 +831,7 @@ TEST_CASE("AsyncOperation - a start() while cancel_all_and_join() joins is refus
     REQUIRE(h.start_within(waiting_body(again, 10ms)));
     REQUIRE(h.clock.wait_for_waiters(1, kBound));
     h.clock.advance(10ms);
-    REQUIRE(eventually([&] { return again->exited.load(); }));
+    REQUIRE(wait_until([&] { return again->exited.load(); }));
     CHECK(again->wait_result == 1);
 }
 
@@ -859,7 +849,7 @@ TEST_CASE("AsyncOperation - a start() waiting at the stale bound is refused by c
     }
     for (int i = 0; i < 4; ++i) {
         REQUIRE(h.start_within(gated_body(p[i], g[i])));
-        REQUIRE(eventually([&] { return p[i]->entered.load(); }));
+        REQUIRE(wait_until([&] { return p[i]->entered.load(); }));
     }
     REQUIRE(h.op->stale_count() == 3);
 
