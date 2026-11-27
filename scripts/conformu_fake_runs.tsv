@@ -38,6 +38,7 @@ gphoto	camera	fake_gphoto_sdk.h	run	5	AlpacaCore/conformu/GPhoto/Fake/Fake-camer
 wandererastro	covercalibrator	fake_serial_streamer.h	run	6	AlpacaCore/conformu/WandererAstro/Fake/Fake-covercalibrator-fake_serial_streamer-Linux-arm64.txt	-
 wandererastro	filterwheel	fake_serial_streamer.h	run	6	AlpacaCore/conformu/WandererAstro/Fake/Fake-filterwheel-fake_serial_streamer-Linux-arm64.txt	-
 wandererastro	switch	fake_serial_streamer.h	pending	6	-	ConformU time, not the fake: the row hosts and passes every check it reached in a 10-minute run, but ConformU steps each of the three 0-255 dew heater outputs through every value at four offsets with a 3.5 s pause per step (about an hour per output), so a full run takes about three hours against the 45-minute CI job limit; runs once the job limit or the step count allows it
+wandererastro	rotator	fake_wandererastro_rotator.h	run	6	AlpacaCore/conformu/WandererAstro/Fake/Fake-rotator-fake_wandererastro_rotator-Linux-arm64.txt	-
 bisque	telescope	-	no-fake	6	-	no fake exists yet
 weewx	observingconditions	-	no-fake	6	-	no fake exists yet
 remotealpaca	observingconditions	fake_http_client.h	run	6	AlpacaCore/conformu/Remote Alpaca/Fake/Fake-observingconditions-fake_http_client-Linux-arm64.txt	-
@@ -50,7 +51,6 @@ remotealpaca	focuser	fake_http_client.h	pending	6	-	not yet tried: slice 6 decid
 zwo	switch	-dewheater	no-fake	6	-	no fake exists yet
 zwo	switch	-asiair	no-fake	6	-	no fake exists yet
 zwo	switch	-asiair_plus	no-fake	6	-	no fake exists yet
-wandererastro	rotator	-	no-fake	6	-	no fake exists yet
 touptek	switch	-thermal	no-fake	6	-	no fake exists yet
 touptek	filterwheel	-	no-fake	6	-	no fake exists yet
 touptek	focuser	-	no-fake	6	-	no fake exists yet

@@ -201,8 +201,10 @@
 #include <alpacacore/vendor/wandererastro/wandererastro_box_switch_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_covercalibrator_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_filterwheel_driver.h>
+#include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
 
 #include "fake_serial_streamer.h"
+#include "fake_wandererastro_rotator.h"
 #endif
 #endif
 
@@ -3554,6 +3556,36 @@ Tier2Host tier2_host_wandererastro_switch() {
     };
     return h;
 }
+
+// The rotator turns at the ConformU host's rate (conformu_rotator_factories.h), so a move stays in flight for its
+// travel time (the tier-3 control window needs one that lasts).
+constexpr double kWandererRotatorMsPerDegree = 240.0;
+
+Tier2Host tier2_host_wandererastro_rotator() {
+    Tier2Host h{"wandererastro_rotator",
+                "wandererastro",
+                "rotator",
+                "fake_wandererastro_rotator.h",
+                DeviceType::Rotator,
+                "wandererastro_rotator",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto fake = std::make_shared<alpacacore::test::FakeWandererRotator>(kWandererRotatorMsPerDegree);
+        if (hold) fake->hold_next_reply(kHold);  // the handshake read waits serial_timeout_s (3 s)
+        return host_over(fake, [](const alpacacore::test::FakeWandererRotator& f) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, f.slave_path());
+        });
+    };
+    h.failing = []() {
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, kAbsentPort);
+        return hosted;
+    };
+    return h;
+}
 #endif
 
 // One X(id, kind) per hosted roster row, under the vendor's guard. kind decides which cases the row is
@@ -3650,7 +3682,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_GPHOTO(X)
 #endif
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
-#define CS2_WANDERERASTRO(X) X(wandererastro_covercalibrator, PRB) X(wandererastro_filterwheel, PRB) X(wandererastro_switch, PRB)
+#define CS2_WANDERERASTRO(X) X(wandererastro_covercalibrator, PRB) X(wandererastro_filterwheel, PRB) X(wandererastro_switch, PRB) X(wandererastro_rotator, PRB)
 #else
 #define CS2_WANDERERASTRO(X)
 #endif
@@ -4457,6 +4489,21 @@ Tier3Recipe tier3_recipe_wandererastro_filterwheel() {
                                  });
             }};
 }
+
+// A 10 degree move (2.4 s of travel) loses its motor power mid-sweep: the rotator stops with no completion report, as
+// a WandererRotator with its DC supply pulled does, and the monitor's budget (twice the travel plus 5 s, 9.8 s from the
+// start, on steady_clock: the driver is not on the task clock) ends with IsMoving raising the fault. Restoring the
+// power never reports the stopped move. Falsified by: the move monitor reporting arrival when no report came.
+Tier3Recipe tier3_recipe_wandererastro_rotator() {
+    using Fake = alpacacore::test::FakeWandererRotator;
+    return {[](Hosted& hosted) {
+                auto& r = dynamic_cast<alpacacore::RotatorDriver&>(*hosted.driver);
+                r.move_absolute(r.get_position() < 180.0 ? r.get_position() + 10.0 : r.get_position() - 10.0);
+            },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_motor_power_off(true); },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_motor_power_off(false); },
+            "FakeWandererRotator::set_motor_power_off(true) mid-move"};
+}
 #endif
 
 [[maybe_unused]] void t3_start_filterwheel_move(Hosted& hosted) {
@@ -4864,7 +4911,7 @@ Tier3Recipe tier3_recipe_gphoto_camera() {
 #define CT3_GEMINI(X)
 #endif
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
-#define CT3_WANDERERASTRO(X) X(wandererastro_filterwheel, OK)
+#define CT3_WANDERERASTRO(X) X(wandererastro_filterwheel, OK) X(wandererastro_rotator, OK)
 #else
 #define CT3_WANDERERASTRO(X)
 #endif

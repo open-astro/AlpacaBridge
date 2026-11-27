@@ -1219,6 +1219,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"gphoto", "camera", "fake_gphoto_sdk.h"},
     {"wandererastro", "covercalibrator", "fake_serial_streamer.h"},
     {"wandererastro", "filterwheel", "fake_serial_streamer.h"},
+    {"wandererastro", "rotator", "fake_wandererastro_rotator.h"},
     {"wandererastro", "switch", "fake_serial_streamer.h"},
 };
 

@@ -92,6 +92,7 @@ on:
       - "AlpacaCore/tests/fake_zwo_caa_sdk.h"
       - "AlpacaCore/tests/fake_gemini_flatpanel.h"
       - "AlpacaCore/tests/fake_serial_streamer.h"
+      - "AlpacaCore/tests/fake_wandererastro_rotator.h"
       - "AlpacaCore/tests/conformu_switch_factories.h"
       - "AlpacaCore/tests/fake_ioptron_gpio.h"
       - "AlpacaCore/tests/fake_gemini_pdh.h"

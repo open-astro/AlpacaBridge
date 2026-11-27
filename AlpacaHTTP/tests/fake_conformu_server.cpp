@@ -218,6 +218,12 @@ const std::vector<ConformuHost> kHosts = {
      "FakeIoptronIfr (simulated iFR over a pseudo-terminal)", [] { return !cu::ioptron_ifr().slave_path().empty(); },
      driver_of(cu::make_ifr_rotator)},
 #endif
+#ifdef FAKE_CONFORMU_WANDERERASTRO
+    {"wandererastro", "rotator", "fake_wandererastro_rotator.h", alpacacore::DeviceType::Rotator, "wandererastro-fake",
+     "WandererAstro WandererRotator Mini (fake, test only)", "ALPACACORE_ENABLE_WANDERERASTRO",
+     "FakeWandererRotator (a simulated WandererRotator Mini over a pseudo-terminal)",
+     [] { return !cu::wandererastro_rotator().slave_path().empty(); }, driver_of(cu::make_wandererastro_rotator)},
+#endif
 #ifdef FAKE_CONFORMU_GEMINI
     {"gemini", "covercalibrator", "fake_gemini_flatpanel.h", alpacacore::DeviceType::CoverCalibrator, "gemini-fake",
      "Gemini Flat Panel Pro (fake, test only)", "ALPACACORE_ENABLE_GEMINI",
