@@ -507,6 +507,71 @@ TEST_CASE("FakeToupTekSDK - AAF rejects a Set code on a read and a Get code on a
     fake.close_focuser(handle);
 }
 
+TEST_CASE("FakeToupTekSDK - an AAF move reports ISMOVING for aaf_moving_reads reads, then lands",
+          "[touptek][focuser][unit][fakesdk]") {
+    namespace ToupAAF = alpacacore::vendor::touptek::ToupAAF;
+    FakeToupTekSDK fake;
+    FakeToupTekSDK::ToupFocuserInfo focuser;
+    focuser.id = "fake-aaf-0";
+    fake.focusers.push_back(focuser);
+    fake.aaf_moving_reads = 2;
+    const auto handle = fake.open_focuser_by_id("fake-aaf-0");
+
+    fake.aaf_set(handle, ToupAAF::SetPosition, 500, "set");
+    for (int read = 0; read < 2; ++read) {
+        INFO("read " << read);
+        CHECK(fake.aaf_get(handle, ToupAAF::IsMoving, "moving") == 1);
+        CHECK(fake.aaf_get(handle, ToupAAF::GetPosition, "position") == 0);  // still at the start
+    }
+    CHECK(fake.aaf_get(handle, ToupAAF::IsMoving, "moving") == 0);
+    CHECK(fake.aaf_get(handle, ToupAAF::GetPosition, "position") == 500);
+
+    // A HALT mid-move stops the focuser where it is: the move never lands.
+    fake.aaf_set(handle, ToupAAF::SetPosition, 900, "set");
+    CHECK(fake.aaf_get(handle, ToupAAF::IsMoving, "moving") == 1);
+    fake.aaf_set(handle, ToupAAF::Halt, 0, "halt");
+    CHECK(fake.aaf_get(handle, ToupAAF::IsMoving, "moving") == 0);
+    CHECK(fake.aaf_get(handle, ToupAAF::GetPosition, "position") == 500);
+    CHECK(fake.aaf_get(handle, ToupAAF::GetPosition, "position") == 500);
+    fake.close_focuser(handle);
+}
+
+TEST_CASE("FakeToupTekSDK - an AFW move reads -1 for wheel_moving_reads reads, then the target",
+          "[touptek][filterwheel][unit][fakesdk]") {
+    FakeToupTekSDK fake;
+    FakeToupTekSDK::ToupFilterWheelInfo wheel;
+    wheel.id = "fake-afw-0";
+    fake.wheels.push_back(wheel);
+    fake.wheel_moving_reads = 3;
+    const auto handle = fake.open_filter_wheel_by_id("fake-afw-0");
+
+    CHECK(fake.get_filter_wheel_position(handle) == 0);
+    fake.set_filter_wheel_position(handle, 3);
+    for (int read = 0; read < 3; ++read) {
+        INFO("read " << read);
+        CHECK(fake.get_filter_wheel_position(handle) == -1);
+    }
+    CHECK(fake.get_filter_wheel_position(handle) == 3);
+    CHECK(fake.get_filter_wheel_position(handle) == 3);
+    fake.close_filter_wheel(handle);
+}
+
+TEST_CASE("FakeToupTekSDK - fail_from fails a named call until clear_fail", "[touptek][unit][fakesdk]") {
+    FakeToupTekSDK fake;
+    FakeToupTekSDK::ToupFilterWheelInfo wheel;
+    wheel.id = "fake-afw-0";
+    fake.wheels.push_back(wheel);
+    const auto handle = fake.open_filter_wheel_by_id("fake-afw-0");
+
+    fake.fail_from("get_filter_wheel_position");
+    require_alpaca_error([&] { (void)fake.get_filter_wheel_position(handle); },
+                         alpacacore::AlpacaError::DriverException);
+    CHECK(fake.get_filter_wheel_slot_count(handle) == 5);  // only the named call fails
+    fake.clear_fail("get_filter_wheel_position");
+    CHECK(fake.get_filter_wheel_position(handle) == 0);
+    fake.close_filter_wheel(handle);
+}
+
 TEST_CASE("ToupTek SharedOpenRefs - first holder opens, last holder closes", "[touptek][unit]") {
     using Refs = alpacacore::vendor::touptek::SharedOpenRefs<int>;
     Refs refs;

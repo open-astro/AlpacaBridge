@@ -26,6 +26,7 @@
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -44,6 +45,7 @@ namespace alpacacore::test {
 // download never blocks the table. The attached units are camera.camera_id with `serial`, or the id -> serial map of
 // set_units() and replug(); every unit answers with the one `camera` state. KNOWN PARITY GAPS: a TargetTemperature
 // write outside the control's range is refused, where the SDK clamps it and returns success (ASICamera2.h:443).
+// get_camera_info_by_id() answers only an open camera, where ZWOSDKWrapper's works on a closed one (#738).
 class FakeZWOSDK final : public vendor::zwo::ZWOSDK {
 public:
     using CameraInfo = vendor::zwo::ZWOCameraInfo;
@@ -271,6 +273,7 @@ public:
         for (const auto& [id, unit_serial] : listed_units_locked()) {
             cameras.push_back(camera);
             cameras.back().camera_id = id;
+            cameras.back().slot_index = static_cast<int>(cameras.size()) - 1;  // the SDK slot, as the wrapper sets it
         }
         return cameras;
     }
@@ -291,10 +294,13 @@ public:
         hit("get_camera_info_by_id");
         const auto unchecked = table_.lock_unchecked();
         std::lock_guard lock(mutex_);
-        if (listed_units_locked().count(camera_id) == 0) return false;
+        const auto units = listed_units_locked();
+        const auto unit = units.find(camera_id);
+        if (unit == units.end()) return false;
         require_open_locked(camera_id);
         info = camera;
         info.camera_id = camera_id;
+        info.slot_index = static_cast<int>(std::distance(units.begin(), unit));
         return true;
     }
 
@@ -306,6 +312,7 @@ public:
         if (camera_index < 0 || camera_index >= static_cast<int>(units.size())) return false;
         info = camera;
         info.camera_id = std::next(units.begin(), camera_index)->first;
+        info.slot_index = camera_index;
         return true;
     }
 

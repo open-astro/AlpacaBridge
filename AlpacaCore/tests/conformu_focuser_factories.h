@@ -62,6 +62,12 @@
 
 #include "fake_qhy_qfocuser.h"
 #endif
+#ifdef FAKE_CONFORMU_TOUPTEK
+#include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
+
+#include "fake_touptek_sdk.h"
+#include "locked_touptek_sdk.h"
+#endif
 
 namespace alpacacore::test::conformu {
 
@@ -158,6 +164,30 @@ inline FakeQhyQFocuser& qhy_qfocuser() {
 }
 inline std::unique_ptr<FocuserDriver> make_qhy_focuser(int device_number) {
     return vendor::qhy::create_qhy_focuser(device_number, qhy_qfocuser().slave_path());
+}
+#endif
+
+#ifdef FAKE_CONFORMU_TOUPTEK
+// One AAF on the fake ToupTek SDK, behind the per-call lock. A move reports IsMoving for a few reads before it lands,
+// so ConformU sees it run (the unit default lands at once).
+struct ToupTekFocuserHost {
+    FakeToupTekSDK fake;
+    LockedToupTekSDK sdk{fake};
+    ToupTekFocuserHost() {
+        FakeToupTekSDK::ToupFocuserInfo focuser;
+        focuser.id = "fake-aaf-0";
+        focuser.name = "AAF";
+        focuser.model_name = "AAF";
+        fake.focusers.push_back(focuser);
+        fake.aaf_moving_reads = 3;
+    }
+};
+inline ToupTekFocuserHost& touptek_focuser_host() {
+    static ToupTekFocuserHost host;
+    return host;
+}
+inline std::unique_ptr<FocuserDriver> make_touptek_focuser(int device_number) {
+    return vendor::touptek::create_touptek_focuser_by_index(device_number, 0, touptek_focuser_host().sdk);
 }
 #endif
 

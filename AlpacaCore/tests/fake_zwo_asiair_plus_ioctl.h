@@ -12,22 +12,14 @@
 
 #pragma once
 
-// The hardware side of the two ZWO ASIAIR switch drivers, for every test that drives them (issue #1862): the
-// libgpiod calls of the ASIAIR Pro (and Plus Pi CM4) util::GpiodLineBackend and the ioctl() of the ASIAIR Plus
-// RK3568 PwmGpioMiscBackend. The driver cases run those real backends (the engine's own cases run on a fake
-// backend, fake_gpio_line_backend.h), so zwo_asiair_stubs.cpp, compiled once into alpacacore_tests, defines the
-// C symbols the backends call; the backends linked into the binary call them instead of the shared libraries. Each stub
-// acts only on its own chip or file and forwards everything else to the real call (RTLD_NEXT), so every other test in
-// the binary sees the real library. The definitions live in that one .cpp because an extern "C" override defined in two
-// test files is a duplicate symbol.
+// The ioctl() side of the ZWO ASIAIR Plus (RK3568) switch, for every test that drives it (issue #1862) and for its
+// fake ConformU host (conformu_switch_factories.h, #2697): the calls of PwmGpioMiscBackend. The driver cases run that
+// real backend, so zwo_asiair_stubs.cpp defines ioctl(); the backend linked into the binary calls it instead of
+// libc's. The stub acts only on its own device file and forwards everything else to the real call (RTLD_NEXT). The
+// definition lives in that one .cpp, beside the libgpiod stub of fake_zwo_asiair_gpiod.h (the header there says why).
 //
-// The libgpiod side models a chip in memory at kStubChip: a line's level outlives its request (as on the Pi
-// kernels, persist_gpio_outputs), a request or reconfigure drives only the lines its config sets to output (an
-// as-is line keeps its level), every real level change is counted, and the level each line held when its request
-// was released is recorded (issue #300). Like the chip, it refuses a second request while one is live (EBUSY).
-//
-// The ioctl side plays one of two kernel modules on the device named by ioctl_stub().path (StubDeviceFile sets one
-// up), chosen by ioctl_stub().module (pwm_gpio.h has both numberings):
+// The stub plays one of two kernel modules on the device named by ioctl_stub().path (StubDeviceFile sets one up),
+// chosen by ioctl_stub().module (pwm_gpio.h has both numberings):
 // - StubModule::Legacy, ZWO's stock pwm_gpio.ko as the legacy decode sees it: answers PWM_GPIO_SET_MODE,
 //   PWM_GPIO_ENABLE and PWM_GPIO_SET_LEVEL and records each SET_LEVEL. Raw SET_LEVEL polarity is the legacy path's:
 //   0 = ON, 1 = OFF.
@@ -40,7 +32,6 @@
 // file is not a character device, so a compat case opens /dev/null (`char_device`), which any user can open.
 //
 // KNOWN PARITY GAPS (prefer closing a gap):
-// - the chip accepts any offset below kStubLines; the real one refuses an offset it does not have.
 // - Legacy: PWM_GPIO_GET_LEVEL and every other ioctl go to the real ioctl() and fail on a plain file (ENOTTY), and the
 //   stub accepts the legacy SET_LEVEL code before SET_MODE and ENABLE. The field-validated stock stream always sends
 //   those two first; what stock does otherwise is unverified under the corrected numbering (pwm_gpio.h). The legacy
@@ -59,25 +50,6 @@
 #include <vector>
 
 namespace alpacacore::test {
-
-// ---- libgpiod (ASIAIR Pro, ASIAIR Plus Pi CM4) ----
-
-inline constexpr const char* kStubChip = "/dev/gpiochip-asiair-stub";
-inline constexpr unsigned int kStubLines = 64;
-
-// The level @p offset held when its request was last released; -1 when no release recorded one since the last
-// request.
-int stub_level_at_release(unsigned int offset);
-// Sets every line's level as the boot or a previous session left it, and clears the change count.
-void stub_reset_levels(int level);
-void stub_set_level(unsigned int offset, int level);
-int stub_level(unsigned int offset);
-// Writes that changed a line's level.
-int stub_level_changes();
-// Requests granted and released since the binary started; a live request is one more grant than release.
-int stub_requests();
-int stub_releases();
-bool stub_claimed();
 
 // ---- ioctl (ASIAIR Plus RK3568) ----
 

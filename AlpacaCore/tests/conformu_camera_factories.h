@@ -130,6 +130,21 @@ inline FakePlayerOneSDK& playerone_camera_sdk() {
 inline std::unique_ptr<CameraDriver> make_playerone_camera(int device_number) {
     return vendor::playerone::create_playerone_camera(device_number, 0, playerone_camera_sdk());
 }
+// The iOptron iCAM is a rebadged Player One camera: the ioptron/camera descriptor builds the Player One driver
+// (register_ioptron_icam_factory() in playerone_catalog.cpp), and the SDK lists an iCAM178M by its own name. Timed as
+// the Player One row is.
+inline FakePlayerOneSDK& ioptron_icam_sdk() {
+    static FakePlayerOneSDK sdk;
+    [[maybe_unused]] static const bool configured = [] {
+        sdk.set_camera_name("iCAM178M");
+        sdk.set_timing_clock(&util::default_task_clock());
+        return true;
+    }();
+    return sdk;
+}
+inline std::unique_ptr<CameraDriver> make_ioptron_camera(int device_number) {
+    return vendor::playerone::create_playerone_camera(device_number, 0, ioptron_icam_sdk());
+}
 #endif
 
 #if defined(FAKE_CONFORMU_TOUPTEK) || defined(FAKE_CONFORMU_ALTAIR)

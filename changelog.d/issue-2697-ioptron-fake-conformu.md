@@ -1,0 +1,3 @@
+### Changed
+
+- **Fake ConformU hosts the iOptron iEFW filter wheel and iCAM camera**, test-only server, issue #2697 (refs #2078). The iEFW runs over `FakeIoptronIeaf` as an iEFW-15 (model code 99, Position -1 for three polls after a move), and the iCAM runs the Player One camera driver behind the iOptron factory over `FakePlayerOneSDK`, timed on the real clock and listed as an iCAM178M. Both get `kFakeConnectableRoster` rows with tier-2 hosts and tier-3 recipes, both rows are `run` in `scripts/conformu_fake_runs.tsv` with committed `Fake-*` reports under `AlpacaCore/conformu/iOptron/Fake/`, and `conformu-fake.yml` builds and selects the iCAM row through the Player One option.
