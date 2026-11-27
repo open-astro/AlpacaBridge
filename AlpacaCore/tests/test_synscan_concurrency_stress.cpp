@@ -80,6 +80,16 @@ alpacacore::test::FakeMountServer::Responder muteable_responder(std::shared_ptr<
         if (!chunk.empty() && chunk[0] == 'e') {
             handset->position_polls.fetch_add(1);
         }
+        // A valid, steady position: a relink over a lost link with motion running sends the stops and verifies them
+        // by two matching position reads (#2412), and the canned `0#` is no position, so the stop would never verify
+        // and the Connect would fail. Over TCP the severed link is lost at once (decision 0009 rule 2a, #2718), so
+        // the storm's slews are still recorded as running when the case relinks.
+        if (!chunk.empty() && chunk[0] == 'e') {
+            return std::string("12AB0500,20000500#");
+        }
+        if (!chunk.empty() && chunk[0] == 'E') {
+            return std::string("12AB,2000#");
+        }
         return base(chunk);
     };
 }
@@ -91,6 +101,30 @@ std::unique_ptr<alpacacore::TelescopeDriver> synscan_with_clock(int port, alpaca
         0, synscan_endpoint(port), alpacacore::vendor::synscan::SynScanVersion::V4, -33.856784, 151.215297, 42.0, false,
         alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
 }
+
+// Moves the fake task clock on while it lives. A relink over a lost link with motion running verifies its stop on the
+// task clock (#2412), and over TCP a hangup is such a loss at once (#2718), so a Connect the case waits for needs the
+// clock to move.
+class ClockPump {
+public:
+    explicit ClockPump(alpacacore::test::FakeTaskClock& clock)
+        : thread_([this, &clock] {
+              while (!stop_.load()) {
+                  clock.advance(std::chrono::milliseconds(50));
+                  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+              }
+          }) {}
+    ~ClockPump() {
+        stop_.store(true);
+        thread_.join();
+    }
+    ClockPump(const ClockPump&) = delete;
+    ClockPump& operator=(const ClockPump&) = delete;
+
+private:
+    std::atomic<bool> stop_{false};
+    std::thread thread_;
+};
 
 void telescope_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
     auto& scope = static_cast<alpacacore::TelescopeDriver&>(d);
@@ -285,7 +319,10 @@ TEST_CASE("SynScan telescope - handset muted and severed mid-storm, then relinke
                 ++lost_rounds;
             }
             handset->mute = false;
-            guard([&] { driver->set_connected(true); });
+            {
+                ClockPump pump(clock);
+                guard([&] { driver->set_connected(true); });
+            }
             if (driver->get_connected()) {
                 ++relinked_rounds;
             }
@@ -306,8 +343,11 @@ TEST_CASE("SynScan telescope - handset muted and severed mid-storm, then relinke
 
     // Unmuted, a Connected=true relinks whatever state the storm left (a lost link included).
     handset->mute = false;
-    CHECK(alpacacore::test::settle_connected(*driver, false, 5s));
-    CHECK(alpacacore::test::settle_connected(*driver, true, 5s));
+    {
+        ClockPump pump(clock);
+        CHECK(alpacacore::test::settle_connected(*driver, false, 5s));
+        CHECK(alpacacore::test::settle_connected(*driver, true, 5s));
+    }
     CHECK(driver->get_connected());
 
     // A severed, silent handset reaches the lost-link state within a bounded time: three failed polls latch the
@@ -330,7 +370,10 @@ TEST_CASE("SynScan telescope - handset muted and severed mid-storm, then relinke
 
     // Decision 0009 point 4: the client's Connected=true relinks, and the relinked driver polls again.
     handset->mute = false;
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, 5s));
+    {
+        ClockPump pump(clock);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, 5s));
+    }
     CHECK(driver->get_connected());
     const int before = handset->position_polls.load();
     const auto poll_deadline = std::chrono::steady_clock::now() + 5s;

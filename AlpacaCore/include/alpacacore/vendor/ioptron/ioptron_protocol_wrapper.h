@@ -201,10 +201,11 @@ public:
     bool is_connected() const;
 
     /**
-     * @brief False once an exchange over serial has seen the port gone (a hangup on a read, a blind command's ack
-     *        drain included, or EIO/ENXIO/ENODEV/EBADF on a write), or lose_link() was called; the port is then already
-     *        released and the exchange threw NotConnected (decision 0009 rule 2). Over TCP a hangup stays a
-     *        DriverException. Cleared by the next successful connect(). Lock-free.
+     * @brief False once an exchange has seen the transport gone (a hangup on a read, a blind command's ack drain
+     *        included, or on a write: over serial EIO/ENXIO/ENODEV/EBADF, over TCP util::socket_hangup_errno()), or
+     *        lose_link() was called; the port or socket is then already released and the exchange threw NotConnected
+     *        (decision 0009 rule 2a). A TCP reply timeout, EHOSTUNREACH or ENETUNREACH stays a DriverException.
+     *        Cleared by the next successful connect(). Lock-free.
      */
     bool link_alive() const noexcept;
 

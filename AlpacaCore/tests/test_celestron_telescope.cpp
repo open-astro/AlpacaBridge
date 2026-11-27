@@ -828,22 +828,23 @@ TEST_CASE("Celestron Telescope Driver - AbortSlew reports a stop it could not se
         CHECK(axis_stops == 4);  // each axis gets both stop directions
     }
 
-    SECTION("a dropped link throws DriverException and keeps the slew error observable") {
+    // Over TCP the dropped connection is a lost link at once (decision 0009 rule 2a, #2718): AbortSlew reports its
+    // stop failure as a DriverException, and the reads that follow answer NotConnected; neither waits for the
+    // staleness bound.
+    SECTION("a dropped link is lost at once: AbortSlew fails and Slewing throws NotConnected") {
         REQUIRE(server.drop_connections());
         try {
             driver->abort_slew();
             FAIL("AbortSlew returned success although the stops could not be sent");
         } catch (const alpacacore::AlpacaException& ex) {
             CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
-            CHECK(std::string(ex.what()).rfind("AbortSlew stop failed: ", 0) == 0);
         }
-        CHECK_FALSE(driver->get_at_home());
+        CHECK_FALSE(driver->get_connected());
         try {
             (void)driver->get_slewing();
-            FAIL("Slewing returned a completion value after the stop failed");
+            FAIL("Slewing returned a value over a lost link");
         } catch (const alpacacore::AlpacaException& ex) {
-            CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
-            CHECK(std::string(ex.what()).rfind("AbortSlew stop failed: ", 0) == 0);
+            CHECK(ex.error_code() == alpacacore::AlpacaError::NotConnected);
         }
     }
 
@@ -2841,9 +2842,11 @@ TEST_CASE("Celestron Link - a cable pulled mid-pulse loses the link and the puls
     CHECK(rig.clock.waiter_count() == idle);  // the chain ended on its failed re-arm
 }
 
-// Over TCP a hangup is not a pulled cable: it stays a DriverException and the fault latch and the staleness bound
-// decide, as before. (OnStep differs since #2220: its network link treats a TCP hangup as a lost link at once.)
-TEST_CASE("Celestron Link - over TCP a hangup is a failed exchange, not a lost link",
+// Over TCP a peer hangup is positive evidence that the transport is gone, as a pulled cable is over serial (decision
+// 0009 rule 2a, #2718): the exchange in flight answers NotConnected and Connected reads false at once.
+// Falsified by: celestron_protocol_wrapper.cpp throw_link_lost() failing the link over serial only (the exchange
+// answers DriverException and Connected stays true)
+TEST_CASE("Celestron Link - over TCP a hangup is a lost link at once",
           "[celestron][telescope][unit][fake][link-lost]") {
     FakeTaskClock clock;
     auto st = std::make_shared<SnapshotMount>();
@@ -2880,9 +2883,9 @@ TEST_CASE("Celestron Link - over TCP a hangup is a failed exchange, not a lost l
     REQUIRE(snapshot_wait_for([&] { return st->transactions.load() > before; }));
     REQUIRE(server.drop_connections());  // the read in flight meets the reset
     call.join();
-    CHECK(code == err::DriverException);
-    CHECK(driver->get_connected());
-    CHECK(driver->get_link_fault().empty());
+    CHECK(code == err::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(driver->get_link_fault().empty());
     driver->set_connected(false);
 }
 
