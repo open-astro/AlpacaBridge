@@ -262,6 +262,13 @@ TEST_CASE("Remote Alpaca Telescope Driver - UTCDate and SiderealTime advance wit
     rig.poll();
     require_alpaca_error([&] { (void)t.get_utc_date(); }, AlpacaError::DriverException);
     CHECK(t.get_link_fault().empty());
+    // Nor is a date the calendar does not have.
+    rig.upstream.set("utcdate", "\"2026-02-31T12:00:00.000Z\"");
+    rig.poll();
+    require_alpaca_error([&] { (void)t.get_utc_date(); }, AlpacaError::DriverException);
+    rig.upstream.set("utcdate", "\"2028-02-29T12:00:00Z\"");
+    rig.poll();
+    CHECK(t.get_utc_date() == alpacacore::test::parse_timestamp("2028-02-29T12:00:00.000Z"));
 }
 
 TEST_CASE(
@@ -741,13 +748,115 @@ TEST_CASE("Remote Alpaca Telescope MoveAxis - a stopped move, an AbortSlew or a 
     for (int i = 0; i < 8; ++i) rig.poll(alpacacore::util::kStopVerifyPollInterval);
     CHECK(rig.puts_from(from).empty());
     CHECK(error_code_of([&] { (void)t.get_slewing(); }) == 0);
-    // A Disconnect joins the cap of a move still running.
+    // A Disconnect joins the cap of a move still running, and sends that axis's stop itself.
     t.move_axis(1, 1.0);
+    const std::size_t before_disconnect = rig.upstream.puts().size();
     t.set_connected(false);
+    CHECK(rig.puts_from(before_disconnect) == std::vector<std::string>{"moveaxis 1 0", "disconnect"});
+    CHECK_FALSE(rig.upstream.axis_moving(1));
     rig.connect();
     const std::size_t after = rig.upstream.puts().size();
     run_to_cap(rig);
     CHECK(rig.puts_from(after).empty());
+}
+
+// Only a stop the upstream took cancels a cap: a MoveAxis(axis, 0) or an AbortSlew with no usable reply leaves the
+// axis's cap armed, so it still stops the move at its deadline.
+TEST_CASE("Remote Alpaca Telescope MoveAxis - a stop or AbortSlew with no reply keeps the cap, which still fires",
+          "[remotealpaca][telescope][goto-safety]") {
+    for (const bool abort : {false, true}) {
+        INFO((abort ? "AbortSlew" : "MoveAxis(0, 0)"));
+        Rig rig;
+        std::atomic<bool> stops_silent{false};
+        rig.http.set_responder([&](const alpacacore::test::FakeHttpClient::Request& request) {
+            const bool stop = request.method == "PUT" && (request.url.find("/abortslew") != std::string::npos ||
+                                                          (request.url.find("/moveaxis") != std::string::npos &&
+                                                           request.form_body.find("Rate=0&") != std::string::npos));
+            if (stops_silent.load() && stop) return alpacacore::util::HttpResponse{500, ""};
+            return rig.upstream.answer(request);
+        });
+        rig.connect();
+        auto& t = *rig.driver;
+        t.move_axis(0, 1.0);
+        stops_silent.store(true);
+        require_alpaca_error([&] { abort ? t.abort_slew() : t.move_axis(0, 0.0); }, AlpacaError::DriverException);
+        REQUIRE(rig.upstream.axis_moving(0));  // the upstream never heard the stop
+        stops_silent.store(false);
+        run_to_cap(rig);
+        CHECK(stop_steps_until_raised(rig, 40) >= 0);
+        CHECK_FALSE(rig.upstream.axis_moving(0));
+    }
+}
+
+TEST_CASE("Remote Alpaca Telescope Disconnect - a jog still running is stopped, and a stop with no reply is owed",
+          "[remotealpaca][telescope][goto-safety]") {
+    SECTION("the upstream takes the stop") {
+        Rig rig;
+        rig.connect();
+        rig.driver->move_axis(0, 2.0);
+        rig.driver->set_connected(false);
+        CHECK_FALSE(rig.upstream.axis_moving(0));
+        const auto puts = rig.upstream.puts();
+        CHECK(std::count(puts.begin(), puts.end(), "moveaxis 0 0") == 1);
+        CHECK(std::count(puts.begin(), puts.end(), "moveaxis 1 0") == 0);  // axis 1 was not this server's
+    }
+    SECTION("the stop gets no reply: the next Connect sends the relink stop") {
+        Rig rig;
+        std::atomic<bool> stops_silent{false};
+        rig.http.set_responder([&](const alpacacore::test::FakeHttpClient::Request& request) {
+            if (stops_silent.load() && request.method == "PUT" && request.url.find("/moveaxis") != std::string::npos) {
+                return alpacacore::util::HttpResponse{500, ""};
+            }
+            return rig.upstream.answer(request);
+        });
+        rig.connect();
+        rig.driver->move_axis(0, 2.0);
+        stops_silent.store(true);
+        rig.driver->set_connected(false);
+        REQUIRE(rig.upstream.axis_moving(0));
+        stops_silent.store(false);
+        rig.connect();
+        CHECK(rig.upstream.calls("abortslew") == 1);
+        CHECK_FALSE(rig.upstream.axis_moving(0));
+    }
+}
+
+// A motion PUT whose reply is lost may have started the mount: the MoveAxis sends its stop at once, and both it and a
+// slew stay this server's motion, so a link lost next owes the relink stop.
+TEST_CASE("Remote Alpaca Telescope motion - a motion PUT with no reply is stopped or owed, never orphaned",
+          "[remotealpaca][telescope][goto-safety]") {
+    for (const char* member : {"moveaxis", "slewtocoordinatesasync"}) {
+        INFO(member);
+        Rig rig;
+        rig.upstream.hold_motion(true);
+        std::atomic<bool> lose_reply{false};
+        rig.http.set_responder([&](const alpacacore::test::FakeHttpClient::Request& request) {
+            const bool target = request.method == "PUT" &&
+                                request.url.find(std::string("/") + member) != std::string::npos &&
+                                request.form_body.find("Rate=0&") == std::string::npos;
+            auto reply = rig.upstream.answer(request);  // the upstream acts on it
+            if (lose_reply.load() && target) return alpacacore::util::HttpResponse{500, ""};
+            return reply;
+        });
+        rig.connect();
+        auto& t = *rig.driver;
+        lose_reply.store(true);
+        if (std::string(member) == "moveaxis") {
+            require_alpaca_error([&] { t.move_axis(0, 1.5); }, AlpacaError::DriverException);
+            const auto puts = rig.upstream.puts();
+            REQUIRE(puts.size() >= 2);
+            CHECK(puts[puts.size() - 2] == "moveaxis 0 1.5");
+            CHECK(puts.back() == "moveaxis 0 0");  // the best-effort stop
+            CHECK_FALSE(rig.upstream.axis_moving(0));
+            lose_reply.store(false);
+        } else {
+            require_alpaca_error([&] { t.slew_to_coordinates_async(3.0, 4.0); }, AlpacaError::DriverException);
+            lose_reply.store(false);
+        }
+        rig.lose();
+        rig.connect();
+        CHECK(rig.upstream.calls("abortslew") == 1);
+    }
 }
 
 // The other axis's move is this server's too: the whole mount's Slewing reads as stopped for the axis being verified.
@@ -858,9 +967,11 @@ TEST_CASE("Remote Alpaca Telescope link loss - a connect whose stop gets no repl
     CHECK_FALSE(rig.driver->get_slewing());
 }
 
-TEST_CASE("Remote Alpaca Telescope link loss - no stop for a still mount, or for motion this server did not start",
-          "[remotealpaca][telescope][goto-safety]") {
-    SECTION("this server's slew ended upstream before the relink") {
+TEST_CASE(
+    "Remote Alpaca Telescope link loss - the relink stop goes out whatever Slewing reads, only for this server's "
+    "motion",
+    "[remotealpaca][telescope][goto-safety]") {
+    SECTION("this server's slew ended upstream before the relink: the stop still goes out") {
         Rig rig;
         rig.upstream.hold_motion(true);
         rig.connect();
@@ -868,7 +979,7 @@ TEST_CASE("Remote Alpaca Telescope link loss - no stop for a still mount, or for
         rig.lose();
         rig.upstream.finish_motion();
         rig.connect();
-        CHECK(rig.upstream.calls("abortslew") == 0);
+        CHECK(rig.upstream.calls("abortslew") == 1);
     }
     SECTION("another client's slew: a poll saw this server's own end first") {
         Rig rig;

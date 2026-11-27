@@ -30,7 +30,7 @@
 // - The motion guards that fit a proxy (util/motion_guards.h): a MoveAxis this server sent is capped at
 //   util::kMaxMoveAxisDuration by a verified stop in that axis's own slot (util::run_motion_deadline), because the
 //   upstream may cap nothing (the simulators, a COM driver behind ASCOM Remote); and a Connect after a link lost while
-//   this server's GoTo, Park, FindHome or MoveAxis ran stops a mount that still slews (util::RelinkMotionStop). The
+//   this server's GoTo, Park, FindHome or MoveAxis ran stops the mount first (util::RelinkMotionStop). The
 //   slew deadline, the landing gate and the sync bound are the upstream driver's: the upstream runs the slew and
 //   keeps the pointing model.
 
@@ -52,6 +52,7 @@
 #include <alpacacore/vendor/remotealpaca/remotealpaca_telescope_driver.h>
 #include <alpacacore/version.h>
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <chrono>
@@ -161,17 +162,8 @@ Answer<T> set_to(T value) {
     return {std::move(value), 0, {}};
 }
 
-// Days from 1970-01-01 to a proleptic Gregorian date (H. Hinnant's days_from_civil).
-std::int64_t days_from_civil(std::int64_t y, std::int64_t m, std::int64_t d) {
-    y -= m <= 2 ? 1 : 0;
-    const std::int64_t era = (y >= 0 ? y : y - 399) / 400;
-    const std::int64_t yoe = y - era * 400;
-    const std::int64_t doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;
-    const std::int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    return era * 146097 + doe - 719468;
-}
-
-// The upstream's UTCDate, ISO 8601 "YYYY-MM-DDTHH:MM:SS[.fraction][Z]" (the Alpaca form), or nullopt.
+// The upstream's UTCDate, ISO 8601 "YYYY-MM-DDTHH:MM:SS[.fraction][Z]" (the Alpaca form), or nullopt; a date the
+// calendar does not have (2026-02-31) is nullopt too.
 std::optional<TimePoint> parse_utc(const std::string& text) {
     int year = 0;
     int month = 0;
@@ -182,10 +174,12 @@ std::optional<TimePoint> parse_utc(const std::string& text) {
     int consumed = 0;
     if (std::sscanf(text.c_str(), "%4d-%2d-%2dT%2d:%2d:%2d%n", &year, &month, &day, &hour, &minute, &second,
                     &consumed) != 6 ||
-        month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
-        second < 0 || second > 60) {
+        month < 1 || day < 1 || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 60) {
         return std::nullopt;
     }
+    const std::chrono::year_month_day date{std::chrono::year{year}, std::chrono::month{static_cast<unsigned>(month)},
+                                           std::chrono::day{static_cast<unsigned>(day)}};
+    if (!date.ok()) return std::nullopt;
     std::size_t at = static_cast<std::size_t>(consumed);
     std::chrono::nanoseconds fraction{0};
     if (at < text.size() && text[at] == '.') {
@@ -197,9 +191,8 @@ std::optional<TimePoint> parse_utc(const std::string& text) {
     }
     if (at < text.size() && (text[at] == 'Z' || text[at] == 'z')) ++at;
     if (at != text.size()) return std::nullopt;
-    const auto seconds = std::chrono::seconds(days_from_civil(year, month, day) * 86400 + std::int64_t{hour} * 3600 +
-                                              std::int64_t{minute} * 60 + second);
-    return TimePoint(std::chrono::duration_cast<TimePoint::duration>(seconds + fraction));
+    const auto time = std::chrono::hours(hour) + std::chrono::minutes(minute) + std::chrono::seconds(second) + fraction;
+    return std::chrono::sys_days(date) + std::chrono::duration_cast<TimePoint::duration>(time);
 }
 
 const char* on_off(bool value) { return value ? "True" : "False"; }
@@ -267,6 +260,7 @@ public:
         // The caps of the session that ends: a cap's stop runs as a command, which no Connect or Disconnect waits for
         // under a lock the cap needs.
         stop_move_axis_caps();
+        if (!connected) stop_jogs_before_disconnect();
         end_motion_session();
         if (connected) {
             proxy_.connect([this] { return read_settings(); });
@@ -555,7 +549,7 @@ public:
         }
         require_frame();
         run([this, side](util::OperationContext& ctx) {
-            proxy_.client().put("sideofpier", {{"SideOfPier", std::to_string(side)}});
+            owned_motion([&] { proxy_.client().put("sideofpier", {{"SideOfPier", std::to_string(side)}}); });
             started_motion(ctx);
         });
     }
@@ -578,11 +572,12 @@ public:
 
     // Forwarded even while the link is faulted: the safety stop is refused only for a lost link (NotConnected).
     // Slewing is left to the poll (ITelescopeV4: it stays true until the motion has stopped).
+    // The caps are cancelled only once the upstream took the stop: a stop with no reply leaves them armed.
     void abort_slew() override {
         proxy_.require_connected();
-        for (auto& cap : move_axis_cap_) cap->cancel();
         run([this](util::OperationContext&) {
             proxy_.client().put("abortslew");
+            for (auto& cap : move_axis_cap_) cap->cancel();
             proxy_.with_state([this](Proxy::State&) {
                 driver_motion_ = false;
                 axis_moving_ = {false, false, false};
@@ -591,15 +586,18 @@ public:
         });
     }
 
-    // MoveAxis(axis, 0) is forwarded even while the link is faulted, as AbortSlew. A non-zero rate is refused while
-    // faulted; the upstream judges it against its AxisRates. Slewing is written true at once, and the move is capped.
+    // MoveAxis(axis, 0) is forwarded even while the link is faulted, as AbortSlew; its cap is cancelled only once the
+    // upstream took the stop. A non-zero rate is refused while faulted; the upstream judges it against its AxisRates.
+    // Slewing is written true at once, and the move is capped: the cap starts inside the move's command body, so it
+    // keeps the caller order with every other command. A move whose PUT got no usable reply may have started the axis:
+    // a stop goes out at once (best effort), and the axis stays this server's, so a loss owes the relink stop.
     void move_axis(int axis, double rate) override {
         const bool stop = util::check_move_axis(kLimits, axis, rate, StateChecks{*this});
         const auto index = static_cast<std::size_t>(axis);
         if (stop) {
-            move_axis_cap_[index]->cancel();
             run([this, axis, index](util::OperationContext&) {
                 proxy_.client().put("moveaxis", {{"Axis", std::to_string(axis)}, {"Rate", "0"}});
+                move_axis_cap_[index]->cancel();
                 proxy_.with_state([this, index](Proxy::State&) {
                     axis_moving_[index] = false;
                     motion_error_.clear();
@@ -608,11 +606,19 @@ public:
             return;
         }
         run([this, axis, index, rate](util::OperationContext& ctx) {
-            proxy_.client().put("moveaxis", {{"Axis", std::to_string(axis)}, {"Rate", number_text(rate)}});
+            try {
+                owned_motion([&] {
+                    proxy_.client().put("moveaxis", {{"Axis", std::to_string(axis)}, {"Rate", number_text(rate)}});
+                });
+            } catch (const RemoteTransportError&) {
+                proxy_.with_state([this, index](Proxy::State&) { axis_moving_[index] = true; });
+                send_axis_stop(axis, "after a MoveAxis with no reply");
+                throw;
+            }
             proxy_.with_state([this, index](Proxy::State&) { axis_moving_[index] = true; });
             started_motion(ctx);
+            start_move_axis_cap(axis);
         });
-        start_move_axis_cap(axis);
     }
 
     void pulse_guide(int direction, int duration) override {
@@ -629,8 +635,10 @@ public:
         util::check_equatorial_slew_arguments(ra, dec, "SlewToCoordinatesAsync");
         require_frame();
         run([this, ra, dec](util::OperationContext& ctx) {
-            proxy_.client().put("slewtocoordinatesasync",
-                                {{"RightAscension", number_text(ra)}, {"Declination", number_text(dec)}});
+            owned_motion([&] {
+                proxy_.client().put("slewtocoordinatesasync",
+                                    {{"RightAscension", number_text(ra)}, {"Declination", number_text(dec)}});
+            });
             started_motion(ctx);
             read_targets(ctx);
         });
@@ -639,7 +647,7 @@ public:
     void slew_to_target_async() override {
         require_frame();
         run([this](util::OperationContext& ctx) {
-            proxy_.client().put("slewtotargetasync");
+            owned_motion([&] { proxy_.client().put("slewtotargetasync"); });
             started_motion(ctx);
         });
     }
@@ -648,8 +656,10 @@ public:
         util::check_alt_az_arguments(kLimits, altitude, azimuth, "SlewToAltAzAsync");
         require_frame();
         run([this, altitude, azimuth](util::OperationContext& ctx) {
-            proxy_.client().put("slewtoaltazasync",
-                                {{"Altitude", number_text(altitude)}, {"Azimuth", number_text(azimuth)}});
+            owned_motion([&] {
+                proxy_.client().put("slewtoaltazasync",
+                                    {{"Altitude", number_text(altitude)}, {"Azimuth", number_text(azimuth)}});
+            });
             started_motion(ctx);
         });
     }
@@ -670,7 +680,7 @@ public:
     void park() override {
         require_frame();
         run([this](util::OperationContext& ctx) {
-            proxy_.client().put("park");
+            owned_motion([&] { proxy_.client().put("park"); });
             started_motion(ctx);
         });
     }
@@ -678,7 +688,7 @@ public:
     void find_home() override {
         require_frame();
         run([this](util::OperationContext& ctx) {
-            proxy_.client().put("findhome");
+            owned_motion([&] { proxy_.client().put("findhome"); });
             started_motion(ctx);
         });
     }
@@ -836,12 +846,58 @@ private:
     // relink stop) until a poll measured after it reads Slewing false, the kept cap outcome ends, and Slewing reads
     // true at once. Only the command writes Slewing true; only the poll (or the upstream after a stop) writes it false.
     void started_motion(util::OperationContext& ctx) {
-        proxy_.with_state([this](Proxy::State&) {
-            ++motion_seq_;
-            driver_motion_ = true;
-            motion_error_.clear();
-        });
+        proxy_.with_state([this](Proxy::State&) { motion_error_.clear(); });
         write_frame(ctx, [](Frame& frame) { frame.slewing = set_to(true); });
+    }
+
+    // A motion PUT (a GoTo, Park, FindHome, flip or MoveAxis): this server owns the motion from before the PUT, so a
+    // PUT with no usable reply (the upstream may have acted) still owes the relink stop if the link is lost. Only an
+    // upstream error answer (it refused the motion) gives the ownership back as it was.
+    template <class Put>
+    void owned_motion(Put&& put) {
+        const bool before = proxy_.with_state([this](Proxy::State&) {
+            ++motion_seq_;
+            return std::exchange(driver_motion_, true);
+        });
+        try {
+            put();
+        } catch (const RemoteTransportError&) {
+            throw;
+        } catch (const AlpacaException&) {
+            proxy_.with_state([this, before](Proxy::State&) { driver_motion_ = before; });
+            throw;
+        }
+    }
+
+    // MoveAxis(axis, 0) with no lock held, best effort: true when the upstream answered (an error answer included),
+    // false when the call got no usable reply. Logged either way; it never throws.
+    bool send_axis_stop(int axis, const char* why) {
+        try {
+            proxy_.client().put("moveaxis", {{"Axis", std::to_string(axis)}, {"Rate", "0"}});
+            return true;
+        } catch (const RemoteTransportError& e) {
+            ALPACA_LOG_WARN(detail::kComponent,
+                            "MoveAxis(" + std::to_string(axis) + ", 0) " + why + " got no reply: " + e.what());
+            return false;
+        } catch (const std::exception& e) {
+            ALPACA_LOG_INFO(detail::kComponent,
+                            "MoveAxis(" + std::to_string(axis) + ", 0) " + why + " answered: " + e.what());
+            return true;
+        }
+    }
+
+    // Disconnect, after the caps are joined: an axis this server's MoveAxis still runs gets its stop, because no cap
+    // is left to end it. Not on a lost link (nothing answers there; the loss owes the relink stop already). A stop with
+    // no reply owes the relink stop, so the next Connect sends it. Under transition_mutex_ only.
+    void stop_jogs_before_disconnect() {
+        if (proxy_.lost() || !proxy_.connected()) return;
+        const auto moving = proxy_.with_state([this](Proxy::State&) { return axis_moving_; });
+        for (int axis = 0; axis < kAxes; ++axis) {
+            if (!moving[static_cast<std::size_t>(axis)]) continue;
+            if (!send_axis_stop(axis, "at Disconnect")) {
+                proxy_.with_state([this](Proxy::State&) { relink_stop_.note_link_lost(true); });
+            }
+        }
     }
 
     // The targets the upstream set from a coordinate slew or sync, read back rather than computed. A read with no
@@ -864,7 +920,10 @@ private:
     void end_motion_session() {
         const bool lost = proxy_.lost();  // takes the state lock itself
         proxy_.with_state([this, lost](Proxy::State&) {
-            if (lost) relink_stop_.note_link_lost(driver_motion_);
+            if (lost) {
+                relink_stop_.note_link_lost(
+                    driver_motion_ || std::any_of(axis_moving_.begin(), axis_moving_.end(), [](bool m) { return m; }));
+            }
             driver_motion_ = false;
             axis_moving_ = {false, false, false};
             motion_error_.clear();
@@ -881,9 +940,10 @@ private:
         for (auto& cap : move_axis_cap_) cap->cancel_all_and_join();
     }
 
-    // In the MoveAxis caller after its command, with no lock held (decision 0006 rule 4). A start the slot refuses
-    // leaves the move with no cap, so the axis is stopped and the call fails (fail closed): InvalidOperation ("try
-    // again") when a Connect or Disconnect is joining the caps (issue #1713), DriverException otherwise.
+    // In the MoveAxis command body after its PUT, with no lock held (decision 0006 rule 4): a body of the command slot
+    // may start another slot (async_operation.h forbids only its own). A start the slot refuses leaves the move with no
+    // cap, so the axis is stopped and the call fails (fail closed): InvalidOperation ("try again") when a Connect or
+    // Disconnect is joining the caps (issue #1713), DriverException otherwise.
     void start_move_axis_cap(int axis) {
         util::HoldWindow window;
         window.arm(proxy_.clock().now(), util::kMaxMoveAxisDuration);
@@ -901,12 +961,7 @@ private:
             } else {
                 ALPACA_LOG_WARN(detail::kComponent, "MoveAxis cap could not start: " + std::string(e.what()));
             }
-            try {
-                proxy_.client().put("moveaxis", {{"Axis", std::to_string(axis)}, {"Rate", "0"}});
-            } catch (const std::exception& stop_error) {
-                ALPACA_LOG_WARN(detail::kComponent,
-                                "MoveAxis stop after the refused cap failed: " + std::string(stop_error.what()));
-            }
+            (void)send_axis_stop(axis, "after the refused cap");
             throw AlpacaException(
                 std::string("MoveAxis: the cap on the move could not start, so the axis was stopped: ") + e.what(),
                 code);
@@ -917,7 +972,15 @@ private:
         const std::string expired = "MoveAxis ran for " + std::to_string(util::kMaxMoveAxisDuration.count()) +
                                     " s with no new MoveAxis; the axis was stopped";
         try {
-            util::run_motion_deadline(ctx, proxy_.clock(), window, cap_hooks(axis, ctx), expired);
+            // util::run_motion_deadline()'s wait, then the deadline's stop only for an axis this server still moves: a
+            // stop or AbortSlew that ended the move while this body waited leaves nothing to stop and no outcome to
+            // keep.
+            util::TaskClock& clock = proxy_.clock();
+            for (auto now = clock.now(); window.active(now); now = clock.now()) {
+                if (!ctx.wait_for(window.until() - now)) return;
+            }
+            if (!axis_moving(axis)) return;
+            static_cast<void>(util::enforce_motion_deadline(ctx, clock, window, cap_hooks(axis, ctx), expired));
         } catch (const AlpacaException& e) {
             const std::string kept = e.what();
             proxy_.with_state([this, axis, &ctx, &kept](Proxy::State&) {
@@ -969,7 +1032,7 @@ private:
     // ── Connect ─────────────────────────────────────────────────────────────────────────────────────────────────
 
     // At Connect, with no lock held, after the upstream's identity: the Settings, then the relink stop a lost link
-    // owes when the mount still slews. Returns what to store under the state lock with the identity.
+    // owes, whatever Slewing reads. Returns what to store under the state lock with the identity.
     std::function<void()> read_settings() {
         const int version = proxy_.upstream_interface_version();
         if (version < kFirstSupportedVersion) {
@@ -1031,16 +1094,14 @@ private:
     }
 
     // The relink stop (#2405, #2396 AB-9): a link lost while this server's GoTo or MoveAxis ran left the mount moving
-    // with nobody in control. When the upstream still reports Slewing, AbortSlew and MoveAxis(axis, 0) on every
-    // movable axis go out before any client command. An upstream that answers them with an error has heard the stop;
-    // a call with no reply fails the Connect, and the stop stays owed for the next one. True when nothing is owed now.
+    // with nobody in control. AbortSlew and MoveAxis(axis, 0) on every movable axis go out before any client command,
+    // whatever the upstream's Slewing says (a stop on a still mount is harmless; a Slewing that reads false may be a
+    // MoveAxis the upstream does not count as a slew). An upstream that answers them with an error has heard the stop;
+    // a call with no reply fails the Connect, and the stop stays owed for the next one. Returns whether a stop went out
+    // (the Connect's store then marks it sent); false when none was owed.
     bool send_relink_stop() {
         if (!proxy_.with_state([this](const Proxy::State&) { return relink_stop_.stop_owed(); })) return false;
         RemoteAlpacaClient& client = proxy_.client();
-        if (!client.get_bool("slewing")) {
-            ALPACA_LOG_INFO(detail::kComponent, "Relink: the upstream telescope is still, so no stop is sent");
-            return true;
-        }
         const auto heard = [](const std::function<void()>& call) {
             try {
                 call();
@@ -1051,8 +1112,8 @@ private:
             }
         };
         ALPACA_LOG_WARN(detail::kComponent,
-                        "Relink: the link was lost while this server's motion ran and the upstream telescope still "
-                        "slews; sending AbortSlew and MoveAxis(axis, 0)");
+                        "Relink: the link was lost while this server's motion ran; sending AbortSlew and "
+                        "MoveAxis(axis, 0)");
         heard([&] { client.put("abortslew"); });
         for (int axis = 0; axis < kAxes; ++axis) {
             const auto& can_move = read_settings_.can_move_axis[static_cast<std::size_t>(axis)];

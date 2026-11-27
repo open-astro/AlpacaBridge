@@ -19,7 +19,7 @@
 // the capabilities, rates, site, optics and targets are read at Connect and written through by this server's writes;
 // the commands are forwarded in the command slot. AbortSlew and MoveAxis(axis, 0) are forwarded even while the link
 // is faulted, a MoveAxis this server sent is capped at util::kMaxMoveAxisDuration, and a Connect after a link lost
-// while this server's GoTo or MoveAxis ran stops a mount that still moves (util::RelinkMotionStop).
+// while this server's GoTo or MoveAxis ran stops the mount first (util::RelinkMotionStop).
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/http_client.h>

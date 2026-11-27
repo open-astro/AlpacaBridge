@@ -223,12 +223,19 @@ bound. The mount rules apply on top (AGENTS.md: ConformU telescope runs on a bar
   `util::kMaxMoveAxisDuration`), because the upstream may cap nothing. Its verified stop sends `MoveAxis(axis, 0)` as
   a command (caller order) and reads `Slewing`, `RightAscension` and `Declination` live from its own thread; while
   the other axis runs this server's `MoveAxis`, `Slewing` reads stopped for it and the other coordinate is pinned. The
-  outcome is kept for `Slewing` until the next motion command or Connect. A renewal supersedes it, a stop or
-  `AbortSlew` cancels it, Connect and Disconnect join it before the command slot.
+  outcome is kept for `Slewing` until the next motion command or Connect. It starts inside the move's command body
+  and stops at its deadline only an axis this server still moves. A renewal supersedes it, a stop or `AbortSlew` the
+  upstream took cancels it, Connect and Disconnect join it before the command slot.
 - **Relink stop.** A link lost while this server's GoTo, Park, FindHome, flip or `MoveAxis` ran (and no poll since
-  read `Slewing` false) owes the stop (`util::RelinkMotionStop`, kept across a Disconnect): the next Connect sends
-  `AbortSlew` and `MoveAxis(axis, 0)` on every movable axis before the first frame when the upstream still reports
-  `Slewing`. An upstream error answer counts as sent; a call with no reply fails the Connect and keeps it owed.
+  read `Slewing` false), or while any axis ran this server's `MoveAxis`, owes the stop (`util::RelinkMotionStop`,
+  kept across a Disconnect): the next Connect sends `AbortSlew` and `MoveAxis(axis, 0)` on every movable axis before
+  the first frame, whatever `Slewing` reads. An upstream error answer counts as sent; a call with no reply fails the
+  Connect and keeps it owed. A motion PUT makes the motion this server's before it goes out (a PUT with no reply may
+  have started the mount); only an upstream error answer gives it back. A `MoveAxis` PUT with no reply also gets a
+  best-effort stop at once.
+- **Disconnect** stops each axis this server's `MoveAxis` still runs (the caps are joined first, so none is left to
+  end it), before the forwarded Disconnect; a stop with no reply owes the relink stop. `AbortSlew` and
+  `MoveAxis(axis, 0)` cancel a cap only once the upstream answered the stop.
 
 Tests use the loopback `FakeAlpacaServer` (`AlpacaCore/tests/fake_alpaca_server.h`, 127.0.0.1 only, with stall,
 drop, HTTP 500, bad JSON and no-ErrorNumber modes) over the real libcurl client, and `FakeHttpClient` where a case

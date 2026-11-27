@@ -1244,8 +1244,7 @@ inline constexpr SnapshotAdopterRow kSnapshotAdopterRoster[] = {
     {"remotealpaca_filterwheel", "remotealpaca",
      "AlpacaCore/src/vendors/remotealpaca/remotealpaca_filterwheel_driver.cpp"},
     {"remotealpaca_switch", "remotealpaca", "AlpacaCore/src/vendors/remotealpaca/remotealpaca_switch_driver.cpp"},
-    {"remotealpaca_telescope", "remotealpaca",
-     "AlpacaCore/src/vendors/remotealpaca/remotealpaca_telescope_driver.cpp"},
+    {"remotealpaca_telescope", "remotealpaca", "AlpacaCore/src/vendors/remotealpaca/remotealpaca_telescope_driver.cpp"},
 };
 
 }  // namespace alpacacore::test::contract
