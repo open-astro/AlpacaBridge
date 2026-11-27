@@ -94,12 +94,15 @@ bool poll_now(alpacacore::TelescopeDriver& driver) {
 // wait registers within 5 real seconds the driver is not sleeping on the
 // clock, so the helper gives up with `done()` instead of advancing a clock
 // nobody waits on (a wait that moved back to real time then fails the case).
-bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<bool()>& done, int max_steps = 400) {
+// `min_waiters` is the number of waits parked that are not the code under test's: a jog's cap body parked on the same
+// clock would otherwise let the helper move virtual time on while the code under test is still in real I/O.
+bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<bool()>& done, int max_steps = 400,
+                   std::size_t min_waiters = 1) {
     for (int i = 0; i < max_steps; ++i) {
         bool waiting = false;
         for (int tries = 0; tries < 50 && !waiting; ++tries) {
             if (done()) return true;
-            waiting = clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+            waiting = clock.wait_for_waiters(min_waiters, std::chrono::milliseconds(100));
         }
         if (!waiting) return done();
         clock.advance(std::chrono::seconds(1));
@@ -2298,7 +2301,9 @@ TEST_CASE("Bisque MoveAxis - a jog that an unverified AbortSlew restores is stil
     REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
     rig.move(0, 0.5);
     auto aborted = std::async(std::launch::async, [&] { rig.driver->abort_slew(); });
-    CHECK(advance_until(rig.clock, [&] { return ready(aborted); }));
+    // Two waits: the jog's cap body, and the abort's own verify sleep. With one the clock moved on during the abort's
+    // real I/O, so on a loaded host the 60 s cap fired inside the abort and left nothing to stop the restored jog.
+    CHECK(advance_until(rig.clock, [&] { return ready(aborted); }, 400, 2));
     CHECK_THROWS(aborted.get());
     rig.mount.ignore_aborts = 0;
     const int stops_before = rig.mount.move_stops.load();
