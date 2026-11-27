@@ -309,7 +309,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 ## Dome Drivers
 
-*No drivers currently available.*
+The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the Dome device of another Alpaca server through this one. `Slewing`, `Azimuth` and `ShutterStatus` are the values of the last poll of the other server; a slew reads `Slewing` true and a shutter command Opening or Closing at once, and only a later poll says the dome has stopped. `AbortSlew` is sent even while the polls fail. It has fake evidence only (unit tests against a scripted upstream, no ConformU run), so it has no row here yet.
 
 [↑ Back to top](#alpacabridge-supported-drivers)
 
@@ -576,7 +576,7 @@ The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the Focuser device
 
 ## ObservingConditions Drivers
 
-The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope and Focuser devices of another Alpaca server through this one (a SafetyMonitor reads unsafe once the link to the other one is lost; see SafetyMonitor Drivers). It has fake evidence only (unit tests against a scripted upstream, and for ObservingConditions a fake ConformU run, `AlpacaCore/conformu/Remote Alpaca/Fake/`; no ConformU run on real hardware), so it has no row here yet.
+The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope, Focuser and Dome devices of another Alpaca server through this one (a SafetyMonitor reads unsafe once the link to the other one is lost; see SafetyMonitor Drivers). It has fake evidence only (unit tests against a scripted upstream, and for ObservingConditions a fake ConformU run, `AlpacaCore/conformu/Remote Alpaca/Fake/`; no ConformU run on real hardware), so it has no row here yet.
 
 ### WeeWX
 

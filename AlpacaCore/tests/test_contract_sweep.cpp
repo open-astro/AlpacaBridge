@@ -22,6 +22,7 @@
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/catalog/builtin_catalog.h>
 #include <alpacacore/covercalibrator_driver.h>
+#include <alpacacore/dome_driver.h>
 #include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/observingconditions_driver.h>
@@ -139,6 +140,7 @@
 #include "locked_astroasis_hid_transport.h"
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
+#include <alpacacore/vendor/remotealpaca/remotealpaca_dome_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_filterwheel_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_focuser_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
@@ -299,6 +301,15 @@ std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
             p.push_back({"sync(NaN)", [&] { r.sync(std::numeric_limits<double>::quiet_NaN()); }});
             p.push_back({"move_absolute(NaN)", [&] { r.move_absolute(std::numeric_limits<double>::quiet_NaN()); }});
             p.push_back({"move_mechanical(NaN)", [&] { r.move_mechanical(std::numeric_limits<double>::quiet_NaN()); }});
+            break;
+        }
+        case DeviceType::Dome: {
+            // A NaN angle is invalid whatever the dome is: InvalidValue must win over NotConnected.
+            auto& m = dynamic_cast<alpacacore::DomeDriver&>(d);
+            p.push_back({"slew_to_azimuth(NaN)", [&] { m.slew_to_azimuth(std::numeric_limits<double>::quiet_NaN()); }});
+            p.push_back(
+                {"slew_to_altitude(NaN)", [&] { m.slew_to_altitude(std::numeric_limits<double>::quiet_NaN()); }});
+            p.push_back({"sync_to_azimuth(NaN)", [&] { m.sync_to_azimuth(std::numeric_limits<double>::quiet_NaN()); }});
             break;
         }
         case DeviceType::Camera: {
@@ -827,6 +838,15 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             p.push_back({"halt", [&] { r.halt(); }});
             break;
         }
+        case DeviceType::Dome: {
+            auto& m = dynamic_cast<alpacacore::DomeDriver&>(d);
+            p.push_back({"get_slewing", [&] { (void)m.get_slewing(); }});
+            p.push_back({"get_shutter_status", [&] { (void)m.get_shutter_status(); }});
+            p.push_back({"get_at_park", [&] { (void)m.get_at_park(); }});
+            p.push_back({"get_slaved", [&] { (void)m.get_slaved(); }});
+            p.push_back({"abort_slew", [&] { m.abort_slew(); }});
+            break;
+        }
         case DeviceType::CoverCalibrator: {
             auto& c = dynamic_cast<alpacacore::CoverCalibratorDriver&>(d);
             p.push_back({"get_cover_state", [&] { (void)c.get_cover_state(); }});
@@ -981,6 +1001,23 @@ std::vector<Probe> not_implemented_probes(AlpacaDriver& d, const ContractEntry& 
             p.push_back({"sync", [&] { r.sync(0.0); }});
             break;
         }
+        case DeviceType::Dome: {
+            // A roll-off roof has no azimuth or altitude, a dome may have no shutter control, home, park or slaving.
+            auto& m = dynamic_cast<alpacacore::DomeDriver&>(d);
+            p.push_back({"get_azimuth", [&] { (void)m.get_azimuth(); }});
+            p.push_back({"get_altitude", [&] { (void)m.get_altitude(); }});
+            p.push_back({"get_at_home", [&] { (void)m.get_at_home(); }});
+            p.push_back({"slew_to_azimuth", [&] { m.slew_to_azimuth(0.0); }});
+            p.push_back({"slew_to_altitude", [&] { m.slew_to_altitude(0.0); }});
+            p.push_back({"sync_to_azimuth", [&] { m.sync_to_azimuth(0.0); }});
+            p.push_back({"find_home", [&] { m.find_home(); }});
+            p.push_back({"park", [&] { m.park(); }});
+            p.push_back({"set_park", [&] { m.set_park(); }});
+            p.push_back({"open_shutter", [&] { m.open_shutter(); }});
+            p.push_back({"close_shutter", [&] { m.close_shutter(); }});
+            p.push_back({"set_slaved", [&] { m.set_slaved(true); }});
+            break;
+        }
         case DeviceType::CoverCalibrator: {
             auto& c = dynamic_cast<alpacacore::CoverCalibratorDriver&>(d);
             p.push_back({"open_cover", [&] { c.open_cover(); }});
@@ -1048,6 +1085,18 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, const ContractEntry& entry
             p.push_back({"get_can_reverse", [&] { (void)r.get_can_reverse(); }});
             break;
         }
+        case DeviceType::Dome: {
+            auto& m = dynamic_cast<alpacacore::DomeDriver&>(d);
+            p.push_back({"get_can_find_home", [&] { (void)m.get_can_find_home(); }});
+            p.push_back({"get_can_park", [&] { (void)m.get_can_park(); }});
+            p.push_back({"get_can_set_altitude", [&] { (void)m.get_can_set_altitude(); }});
+            p.push_back({"get_can_set_azimuth", [&] { (void)m.get_can_set_azimuth(); }});
+            p.push_back({"get_can_set_park", [&] { (void)m.get_can_set_park(); }});
+            p.push_back({"get_can_set_shutter", [&] { (void)m.get_can_set_shutter(); }});
+            p.push_back({"get_can_slave", [&] { (void)m.get_can_slave(); }});
+            p.push_back({"get_can_sync_azimuth", [&] { (void)m.get_can_sync_azimuth(); }});
+            break;
+        }
         case DeviceType::Focuser: {
             auto& f = dynamic_cast<alpacacore::FocuserDriver&>(d);
             p.push_back({"get_absolute", [&] { (void)f.get_absolute(); }});
@@ -1077,6 +1126,7 @@ bool has_can_subject(const ContractEntry& e) {
         case DeviceType::Rotator:
         case DeviceType::Focuser:
         case DeviceType::Switch:
+        case DeviceType::Dome:
             return true;
         default:
             return false;
@@ -1777,6 +1827,14 @@ const std::map<std::string, StateType>* ascom_device_state_types(DeviceType type
          {{"IsMoving", T::Bool}, {"MechanicalPosition", T::Double}, {"Position", T::Double}, {"TimeStamp", T::String}}},
         {DeviceType::FilterWheel, {{"Position", T::Int}, {"TimeStamp", T::String}}},
         {DeviceType::SafetyMonitor, {{"IsSafe", T::Bool}, {"TimeStamp", T::String}}},
+        {DeviceType::Dome,
+         {{"Altitude", T::Double},
+          {"AtHome", T::Bool},
+          {"AtPark", T::Bool},
+          {"Azimuth", T::Double},
+          {"ShutterStatus", T::Int},
+          {"Slewing", T::Bool},
+          {"TimeStamp", T::String}}},
         {DeviceType::CoverCalibrator,
          {{"Brightness", T::Int},
           {"CalibratorState", T::Int},
@@ -3005,6 +3063,37 @@ Tier2Host tier2_host_remotealpaca_focuser() {
     h.failing = [make]() { return make(false, true); };
     return h;
 }
+
+// The proxied Dome over the scripted upstream, as the rotator host: its Connect makes some twenty calls, so a 50 ms
+// per-call hold keeps the handshake open past kHoldWindow.
+Tier2Host tier2_host_remotealpaca_dome() {
+    Tier2Host h{"remotealpaca_dome",
+                "remotealpaca",
+                "dome",
+                "fake_http_client.h",
+                DeviceType::Dome,
+                "remotealpaca_dome",
+                {},
+                true,
+                {},
+                ""};
+    auto make = [](bool hold, bool refuse) {
+        auto upstream = std::make_shared<RemoteUpstreamFake>(alpacacore::test::AlpacaUpstreamScript::Kind::Dome);
+        if (hold) upstream->http.set_delay(std::chrono::milliseconds(50));
+        if (refuse) upstream->http.refuse_next(1000000);
+        alpacacore::vendor::remotealpaca::RemoteDeviceConfig config;
+        config.host = "127.0.0.1";
+        config.port = 11111;
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::remotealpaca::create_remotealpaca_dome(
+            0, config, upstream->http.client(), {}, alpacacore::util::default_task_clock());
+        hosted.fake = upstream;
+        return hosted;
+    };
+    h.connectable = [make](bool hold) { return make(hold, false); };
+    h.failing = [make]() { return make(false, true); };
+    return h;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_GEMINI
@@ -3610,7 +3699,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_ASTROASIS(X)
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
-#define CS2_REMOTEALPACA(X) X(remotealpaca_observingconditions, PRB) X(remotealpaca_safetymonitor, NPR) X(remotealpaca_rotator, PRB) X(remotealpaca_filterwheel, PRB) X(remotealpaca_switch, PRB) X(remotealpaca_telescope, TEL) X(remotealpaca_focuser, NPR)
+#define CS2_REMOTEALPACA(X) X(remotealpaca_observingconditions, PRB) X(remotealpaca_safetymonitor, NPR) X(remotealpaca_rotator, PRB) X(remotealpaca_filterwheel, PRB) X(remotealpaca_switch, PRB) X(remotealpaca_telescope, TEL) X(remotealpaca_focuser, NPR) X(remotealpaca_dome, PRB)
 #else
 #define CS2_REMOTEALPACA(X)
 #endif
@@ -3700,7 +3789,7 @@ struct Tier3Recipe {
 
 bool is_tier3_type(DeviceType t) {
     return t == DeviceType::Camera || t == DeviceType::Telescope || t == DeviceType::Focuser ||
-           t == DeviceType::Rotator || t == DeviceType::FilterWheel;
+           t == DeviceType::Rotator || t == DeviceType::FilterWheel || t == DeviceType::Dome;
 }
 
 // One read of the completion property: `done` when it reports the operation finished; `code` the AlpacaException it
@@ -3726,6 +3815,9 @@ T3Read t3_read(AlpacaDriver& d, DeviceType type) {
                 break;
             case DeviceType::Rotator:
                 r.done = !dynamic_cast<alpacacore::RotatorDriver&>(d).get_is_moving();
+                break;
+            case DeviceType::Dome:
+                r.done = !dynamic_cast<alpacacore::DomeDriver&>(d).get_slewing();
                 break;
             case DeviceType::FilterWheel:
                 // -1 is the moving sentinel (IFilterWheelV3 Position); any slot is a finished move.
@@ -4395,6 +4487,31 @@ Tier3Recipe tier3_recipe_remotealpaca_rotator() {
          }},
         DeviceType::Rotator, clock);
 }
+
+// The upstream keeps reporting its slew running (the scripted slew runs until finish_move()), then stops answering:
+// every call times out, so three failed polls latch the fault. Falsified by: get_slewing() answering the frame's
+// value while the poll's fault is latched (remotealpaca_dome_driver.cpp, the module's served()).
+Tier3Recipe tier3_recipe_remotealpaca_dome() {
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    return t3_on_clock(
+        {[](Hosted& hosted) { dynamic_cast<alpacacore::DomeDriver&>(*hosted.driver).slew_to_azimuth(200.0); },
+         [](Hosted& hosted) { t3_fake<RemoteUpstreamFake>(hosted).http.fail_next(1000000); },
+         [](Hosted& hosted) { t3_fake<RemoteUpstreamFake>(hosted).http.fail_next(0); },
+         "FakeHttpClient::fail_next() mid-slew: every upstream call times out",
+         [clock](bool) {
+             auto upstream = std::make_shared<RemoteUpstreamFake>(alpacacore::test::AlpacaUpstreamScript::Kind::Dome);
+             alpacacore::vendor::remotealpaca::RemoteDeviceConfig config;
+             config.host = "127.0.0.1";
+             config.port = 11111;
+             config.poll_period = std::chrono::seconds(1);
+             Hosted hosted;
+             hosted.driver = alpacacore::vendor::remotealpaca::create_remotealpaca_dome(
+                 0, config, upstream->http.client(), {}, *clock);
+             hosted.fake = upstream;
+             return hosted;
+         }},
+        DeviceType::Dome, clock);
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_GEMINI
@@ -4854,7 +4971,7 @@ Tier3Recipe tier3_recipe_gphoto_camera() {
 #define CT3_ASTROASIS(X)
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
-#define CT3_REMOTEALPACA(X) X(remotealpaca_rotator, OK) X(remotealpaca_filterwheel, OK) X(remotealpaca_telescope, OK) X(remotealpaca_focuser, OK)
+#define CT3_REMOTEALPACA(X) X(remotealpaca_rotator, OK) X(remotealpaca_filterwheel, OK) X(remotealpaca_telescope, OK) X(remotealpaca_focuser, OK) X(remotealpaca_dome, OK)
 #else
 #define CT3_REMOTEALPACA(X)
 #endif
@@ -5769,6 +5886,21 @@ constexpr double kSnapshotValueMargin = 0.01;
     return g;
 }
 
+[[maybe_unused]] std::vector<SnapshotGetter> snapshot_dome_getters() {
+    using alpacacore::DomeDriver;
+    std::vector<SnapshotGetter> g;
+#define SNAP_DOME(label, call) \
+    g.push_back({label, [](AlpacaDriver& d) { return snap_text(static_cast<DomeDriver&>(d).call); }});
+    SNAP_DOME("Azimuth", get_azimuth())
+    SNAP_DOME("Altitude", get_altitude())
+    SNAP_DOME("Slewing", get_slewing())
+    SNAP_DOME("ShutterStatus", get_shutter_status())
+    SNAP_DOME("AtPark", get_at_park())
+    SNAP_DOME("Slaved", get_slaved())
+#undef SNAP_DOME
+    return g;
+}
+
 // The first two switches of the fake (a switch and an analog output); MaxSwitch is served from the connect's slots.
 [[maybe_unused]] std::vector<SnapshotGetter> snapshot_switch_getters() {
     using alpacacore::SwitchDriver;
@@ -6383,6 +6515,29 @@ std::unique_ptr<SnapshotRig> snapshot_rig_remotealpaca_switch() {
     return rig_owner;
 }
 
+// As the rotator rig, over a Dome upstream that is not slewing.
+std::unique_ptr<SnapshotRig> snapshot_rig_remotealpaca_dome() {
+    namespace remote = alpacacore::vendor::remotealpaca;
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto upstream = std::make_shared<RemoteUpstreamFake>(alpacacore::test::AlpacaUpstreamScript::Kind::Dome);
+    rig.fake = upstream;
+    remote::RemoteDeviceConfig config;
+    config.host = "127.0.0.1";
+    config.port = 11111;
+    config.poll_period = snap_chrono::seconds(1);
+    rig.driver = remote::create_remotealpaca_dome(0, config, upstream->http.client(), {}, *rig.clock);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    auto* driver = static_cast<alpacacore::DomeDriver*>(rig.driver.get());
+    rig.hold_frame = [driver] { remote::set_poll_paused_for_testing(*driver, true); };
+    rig.lose_link = [driver, upstream] {
+        upstream->http.fail_next(1000);
+        remote::set_poll_paused_for_testing(*driver, false);
+    };
+    return rig_owner;
+}
+
 [[maybe_unused]] std::vector<SnapshotGetter> snapshot_safetymonitor_getters() {
     return {{"IsSafe", [](AlpacaDriver& d) {
                  return snap_text(static_cast<alpacacore::SafetyMonitorDriver&>(d).get_is_safe());
@@ -6489,7 +6644,7 @@ std::unique_ptr<SnapshotRig> snapshot_rig_zwo_telescope() {
 #define CS3_ASTROASIS(X)
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
-#define CS3_REMOTEALPACA(X) X(remotealpaca_observingconditions, snapshot_observingconditions_getters()) X(remotealpaca_safetymonitor, snapshot_safetymonitor_getters()) X(remotealpaca_rotator, snapshot_rotator_getters()) X(remotealpaca_filterwheel, snapshot_filterwheel_getters()) X(remotealpaca_switch, snapshot_switch_getters()) X(remotealpaca_telescope, snapshot_telescope_getters(true)) X(remotealpaca_focuser, snapshot_focuser_getters())
+#define CS3_REMOTEALPACA(X) X(remotealpaca_observingconditions, snapshot_observingconditions_getters()) X(remotealpaca_safetymonitor, snapshot_safetymonitor_getters()) X(remotealpaca_rotator, snapshot_rotator_getters()) X(remotealpaca_filterwheel, snapshot_filterwheel_getters()) X(remotealpaca_switch, snapshot_switch_getters()) X(remotealpaca_telescope, snapshot_telescope_getters(true)) X(remotealpaca_focuser, snapshot_focuser_getters()) X(remotealpaca_dome, snapshot_dome_getters())
 #else
 #define CS3_REMOTEALPACA(X)
 #endif
