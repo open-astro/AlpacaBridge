@@ -988,6 +988,29 @@ TEST_CASE("Remote Alpaca Telescope MoveAxis - one axis's cap stops that axis onl
           std::string::npos);
 }
 
+// The same with a third movable axis: this server's MoveAxis on axis 2 is another axis too, so the axis-0 cap reads
+// the mount's Slewing as stopped for its own axis and verifies, rather than resending and raising kStopNotVerifiedText.
+TEST_CASE("Remote Alpaca Telescope MoveAxis - an axis-0 cap verifies while this server's axis-2 MoveAxis runs",
+          "[remotealpaca][telescope][goto-safety]") {
+    Rig rig;
+    rig.upstream.set_for("canmoveaxis", "2", "true");
+    rig.upstream.set_for("axisrates", "2", "[{\"Maximum\":4.0,\"Minimum\":0.0}]");
+    rig.connect();
+    auto& t = *rig.driver;
+    REQUIRE(t.get_can_move_axis(2));
+    t.move_axis(0, 1.0);
+    for (int s = 0; s < 30; ++s) rig.poll();
+    t.move_axis(2, 1.0);
+    for (int s = 0; s < 30; ++s) rig.poll();
+    CHECK(stop_steps_until_raised(rig, 40) >= 0);
+    CHECK_FALSE(rig.upstream.axis_moving(0));
+    CHECK(rig.upstream.axis_moving(2));
+    const auto puts = rig.upstream.puts();
+    CHECK(std::count(puts.begin(), puts.end(), "moveaxis 0 0") == 1);  // verified on the first stop, never resent
+    CHECK(alpaca_error_message([&] { (void)t.get_slewing(); }, AlpacaError::DriverException).find("axis was stopped") !=
+          std::string::npos);
+}
+
 TEST_CASE(
     "Remote Alpaca Telescope MoveAxis - a cap stop the upstream ignores is sent three times and Slewing raises it",
     "[remotealpaca][telescope][goto-safety]") {

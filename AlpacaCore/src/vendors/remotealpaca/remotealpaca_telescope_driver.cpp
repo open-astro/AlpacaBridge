@@ -917,9 +917,10 @@ private:
         }
     }
 
-    // Disconnect, after the caps are joined: an axis this server's MoveAxis still runs gets its stop, because no cap
-    // is left to end it. Not on a lost link (nothing answers there; the loss owes the relink stop already). A stop with
-    // no reply owes the relink stop, so the next Connect sends it. Under transition_mutex_ only.
+    // Disconnect, before the caps are joined: an axis this server's MoveAxis still runs gets its stop, because the
+    // caps are about to go and the forwarded Disconnect stops nothing. Not on a lost link (nothing answers there; the
+    // loss owes the relink stop already). A stop with no reply owes the relink stop, so the next Connect sends it.
+    // Under transition_mutex_ only.
     void stop_jogs_before_disconnect() {
         if (proxy_.lost() || !proxy_.connected()) return;
         try {
@@ -1049,9 +1050,18 @@ private:
     // the cap's own thread (the poll's frame may be a poll period old, and the guard needs reads made after its
     // stop). Slewing is the whole mount's, so it reads as stopped while the other axis runs this server's MoveAxis,
     // and the other axis's coordinate is pinned then.
+    // Whether this server's MoveAxis runs on an axis other than `axis` (any of the three).
+    bool other_axis_moving(int axis) {
+        return proxy_.with_state([this, axis](Proxy::State&) {
+            for (int other = 0; other < kAxes; ++other) {
+                if (other != axis && axis_moving_[static_cast<std::size_t>(other)]) return true;
+            }
+            return false;
+        });
+    }
+
     util::StopVerifyHooks cap_hooks(int axis, util::OperationContext& cap) {
         util::StopVerifyHooks hooks;
-        const int other = axis == 0 ? 1 : 0;
         hooks.send_stop = [this, axis, &cap] {
             proxy_.run_command([this, axis, &cap](util::OperationContext&) {
                 // A cap a renewal, a stop, AbortSlew or a disconnect ended sends nothing (decision 0006 rule 6).
@@ -1059,20 +1069,19 @@ private:
                 proxy_.client().put("moveaxis", {{"Axis", std::to_string(axis)}, {"Rate", "0"}});
             });
         };
-        hooks.read_status = [this, other]() -> std::optional<util::MotionStatusReading> {
+        hooks.read_status = [this, axis]() -> std::optional<util::MotionStatusReading> {
             if (!proxy_.connected()) return std::nullopt;
-            if (axis_moving(other)) return util::MotionStatusReading{false, proxy_.clock().now()};
+            if (other_axis_moving(axis)) return util::MotionStatusReading{false, proxy_.clock().now()};
             const bool moving = proxy_.client().get_bool("slewing");
             return util::MotionStatusReading{moving, proxy_.clock().now()};
         };
-        hooks.read_position = [this, axis, other]() -> std::optional<util::PositionReading> {
+        hooks.read_position = [this, axis]() -> std::optional<util::PositionReading> {
             if (!proxy_.connected()) return std::nullopt;
             RemoteAlpacaClient& client = proxy_.client();
             util::MountPosition position{client.get_double("rightascension"), client.get_double("declination")};
-            if (axis_moving(other)) {
-                if (axis == 0) position.dec_degrees = 0.0;
-                if (axis == 1) position.ra_hours = 0.0;
-            }
+            // Pin the coordinate another axis of this server's moves (0 RA, 1 Dec); axis 2 moves neither.
+            if (axis != 0 && axis_moving(0)) position.ra_hours = 0.0;
+            if (axis != 1 && axis_moving(1)) position.dec_degrees = 0.0;
             return util::PositionReading{position, proxy_.clock().now()};
         };
         return hooks;

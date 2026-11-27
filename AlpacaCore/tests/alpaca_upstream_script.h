@@ -484,7 +484,10 @@ private:
         if (member == "moveaxis") {
             if (parked) return refused_parked;
             const int axis = std::stoi(value("Axis"));
-            if (axis < 0 || axis > 1) return Reply{{}, 0x401, "MoveAxis axis " + value("Axis") + " cannot move"};
+            const auto can = replies_.find({"canmoveaxis", value("Axis")});
+            if (axis < 0 || axis > 2 || can == replies_.end() || can->second.value_json != "true") {
+                return Reply{{}, 0x401, "MoveAxis axis " + value("Axis") + " cannot move"};
+            }
             const double rate = number_of("Rate");
             if (std::abs(rate) > 4.0) return Reply{{}, 0x401, "MoveAxis rate " + value("Rate") + " is too fast"};
             axis_rate_[axis] = rate;
@@ -618,7 +621,7 @@ private:
 
     // Slewing, AtPark and SideOfPier from the running motion, the axes and the park.
     void set_motion_locked() {
-        const bool moving = motion_.has_value() || axis_rate_[0] != 0.0 || axis_rate_[1] != 0.0;
+        const bool moving = motion_.has_value() || axis_rate_[0] != 0.0 || axis_rate_[1] != 0.0 || axis_rate_[2] != 0.0;
         replies_[{"slewing", ""}] = {moving ? "true" : "false", 0, {}};
         replies_[{"atpark", ""}] = {at_park_ ? "true" : "false", 0, {}};
         if (replies_.find({"sideofpier", ""}) == replies_.end()) replies_[{"sideofpier", ""}] = {"0", 0, {}};
