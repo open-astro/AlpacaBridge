@@ -4,7 +4,7 @@ applyTo: "AlpacaCore/src/vendors/remotealpaca/**,AlpacaCore/include/alpacacore/v
 
 ### remotealpaca
 
-Devices: ObservingConditions, SafetyMonitor. The vendor serves a device of an upstream Alpaca server as a proxied device on this server
+Devices: ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch. The vendor serves a device of an upstream Alpaca server as a proxied device on this server
 (`CONTEXT.md`: native device vs proxied device). Its contract is fixed by
 [decision 0023](../../docs/decisions/0023-outbound-clients-in-vendor-wrappers.md) and issue #1753; read both before
 adding a device type.
@@ -19,7 +19,7 @@ the pass-through of upstream errors. A driver keeps its frame and how to measure
 commands, its `transition_mutex_` and its `get_connected()`; behaviour that does not fit the shared shape stays in the
 driver. A new device type adds a driver over it, not a second copy of these rules. The first InterfaceVersion of the
 proxied type that has `Connect` is the driver's (`UpstreamProxy::Setup::platform7_version`): 2 for ObservingConditions,
-3 for SafetyMonitor.
+3 for SafetyMonitor, FilterWheel and Switch, 4 for Rotator.
 
 #### The upstream client (`RemoteAlpacaClient`, issue #1753 slice 2)
 
@@ -72,7 +72,9 @@ Config (`remotealpaca_fields.h`, the same four fields for every proxied device t
 - **Commands.** `Refresh` (forwarded, then a new frame measured and published through the module, so its
   `measured_at` is the Refresh's; it does not feed the fault latch) and an `AveragePeriod` write (forwarded, then
   written through to the frame) run as bodies in a command `util::AsyncOperation` slot; the caller waits for the body and gets
-  its error unchanged. A transport failure there is `DriverException`, or `NotConnected` when the link is lost.
+  its error unchanged. Commands of every proxied device are serialized in caller order (`UpstreamProxy`'s command order
+  mutex, held by the caller across the start and the wait), so a later command never reaches the upstream before an
+  earlier one whose body the slot superseded but did not stop. A transport failure there is `DriverException`, or `NotConnected` when the link is lost.
 - Actions and `Command*` are not forwarded (`ActionNotImplemented`, `NotImplemented`).
 
 #### The SafetyMonitor proxied device (issue #1753 slice 4)
@@ -96,12 +98,107 @@ bound. The Connect reads nothing of its own: the first frame is `IsSafe`, a valu
 
 It has no command: nothing runs in the command slot. Actions and `Command*` are not forwarded.
 
+#### The Rotator proxied device (issue #1753 slice 5, #2708)
+
+The same config, self-loop check, Connect (Platform 7 is `IRotatorV4`; a version 3 or older upstream gets
+`Connected=true`), branded Name, snapshot, poll and link rules as the ObservingConditions device, with the same loss
+bound.
+
+- **Connect** reads `CanReverse` and `StepSize` once, each a value or the
+  upstream's error (`StepSize` is often `NotImplemented`, served unchanged). They are static metadata: they keep
+  answering while the link is faulted. `CanReverse` also answers while disconnected: the last Connect's value, true
+  before any.
+- **Members by version.** An `IRotatorV1` or `V2` upstream has no `MechanicalPosition`, `MoveMechanical` or `Sync`
+  (IRotatorV3 added them, `UpstreamProxy::upstream_interface_version()` says which the upstream is): each answers
+  `NotImplemented` naming the upstream's version, after the connection check, and
+  is never called, so an older server that answers an unknown member with HTTP 400 does not fail the poll.
+- **Snapshot.** The frame is `IsMoving`, `Position`, `MechanicalPosition`, `TargetPosition` and `Reverse`, each a value
+  or the upstream's error. A stale frame is served, never refused (decision 0010 rule 6): each getter answers the last
+  poll's value until the loss bound. A latched fault refuses the frame with `DriverException`. `DeviceState` is the
+  rotator base's, from the same getters, its `TimeStamp` the frame's age (`device_state_age()`).
+- **Moves** (`Move`, `MoveAbsolute`, `MoveMechanical`): a NaN or infinite angle is `InvalidValue` before the
+  connection check; a finite one goes to the upstream as given, which judges its range (its `InvalidValue` passes
+  through). Refused while the link is faulted. The body forwards the move and writes `IsMoving` true through:
+  `MoveAbsolute` and `MoveMechanical` always (the frame's angle can be a poll period old, so it cannot say the rotator
+  is already there), a relative `Move` unless its offset is 0 (that one leaves the polled value: an earlier move may
+  still run). Then it reads the upstream's `TargetPosition` and writes it through. A read with no usable reply leaves `TargetPosition` to the next
+  poll and does not fail the move. `Position` stays the measured one until the next poll.
+- **Sync** is forwarded (the upstream keeps the offset; this driver stores none, so decision 0018 rule 4 has nothing to
+  move) and writes `Position` through. The **Reverse** write is forwarded and written through. Both are refused while
+  faulted.
+- **Halt** is forwarded even while the link is faulted: the safety stop is refused only for a lost link
+  (`NotConnected`). Its body writes `IsMoving` false through. A Halt sent while a move's body runs waits for it (the
+  caller order above), so it reaches the upstream after the move.
+- The `TargetPosition` PUT (this server's extension; IRotatorV4 has it read-only) is `NotImplemented` (0x400) once connected:
+  the upstream has no member to take it.
+- A refused connection on any command is a lost link at once; another call with no reply is `DriverException`.
+  Actions and `Command*` are not forwarded.
+
+#### The FilterWheel proxied device (issue #1753 slice 5, #2706)
+
+The same config, self-loop check, Connect (Platform 7 is `IFilterWheelV3`; a version 1 or 2 upstream gets
+`Connected=true`), branded Name, snapshot, poll and link rules as the ObservingConditions device, with the same loss
+bound. Every FilterWheel member exists in every interface version, so none maps to `NotImplemented` by version.
+
+- **Connect** reads `Names` and `FocusOffsets` once (`RemoteAlpacaClient::get_int_list` reads the offsets). Every
+  IFilterWheel has both, so an upstream error on either fails the Connect with that error unchanged, as does a wheel
+  with no slot. The slot data lives in `util::FilterWheelSlots` (the shared FilterWheel rule), with the upstream's
+  slot count published: the upstream's lineup replaces what this server held at each Connect (a delta from the
+  native wheels, whose config wins over what the wheel stores: a proxied wheel has no lineup config, the upstream's
+  is the wheel's). A names or offsets write (the AlpacaBridge PUT extension) changes this server's copy only, never
+  the upstream's, and is checked against the count while connected; a lost link keeps the count until the
+  Disconnect, which clears it.
+- **Snapshot.** The frame is `Position`, a value or the upstream's error: -1 while the upstream's wheel moves, as it
+  reports. A stale frame is served; a latched fault refuses it with `DriverException`. `Names` and `FocusOffsets`
+  keep answering while faulted and while disconnected. `DeviceState` is the filter wheel base's, its `TimeStamp` the
+  request time (the base has no `device_state_age()`).
+- **Position write.** A negative slot is `InvalidValue` before the connection check, a slot past the count
+  `InvalidValue` once connected. It is refused while the link is faulted. Its body forwards the write and writes
+  `Position` -1 through, even for the slot the last poll saw (another client may have turned the wheel since), so a
+  client reads the move at once; the next poll reports where it landed, and an upstream error on the write passes
+  through. Writes reach the upstream in caller order (the caller order above): a second write sent while the first
+  one's body runs waits for it. A refused connection is a lost link at once; another call with no reply is `DriverException`. Actions and `Command*` are not forwarded.
+
+#### The Switch proxied device (issue #1753 slice 5, #2709)
+
+The same config, self-loop check, Connect (Platform 7 is `ISwitchV3`; a version 2 upstream gets `Connected=true`),
+branded Name, snapshot, poll and link rules as the ObservingConditions device, with the same loss bound.
+
+- **Connect** reads `MaxSwitch`, then for each switch its name, description, `MinSwitchValue`, `MaxSwitchValue`,
+  `SwitchStep`, `CanWrite` and (`ISwitchV3`) `CanAsync`, each a value or the upstream's error, served unchanged. They
+  are static metadata: they keep answering while the link is faulted. An upstream error on `MaxSwitch`, or a count
+  outside 0 to `kMaxProxiedSwitches` (64), fails the Connect.
+- **Snapshot.** The frame is `GetSwitch` and `GetSwitchValue` of every switch, and `StateChangeComplete` of each switch
+  whose `CanAsync` the Connect read true; a switch that is not asynchronous changes within its write, so its
+  `StateChangeComplete` is true. The poll is therefore two calls per switch (three for an asynchronous one), one at a
+  time on the client's mutex, which is why `MaxSwitch` is bounded. A stale frame is served; a latched fault refuses
+  it with `DriverException`. `DeviceState` is the switch base's, from the same getters, its `TimeStamp` the frame's
+  age (`device_state_age()`).
+- **Ids and values.** A negative id and a non-finite value are `InvalidValue` before the connection check; an id at or
+  past `MaxSwitch` and a value outside the switch's range are `InvalidValue` after it, with nothing sent.
+- **Writes** (`SetSwitch`, `SetSwitchValue`, `SetAsync`, `SetAsyncValue`, `SetSwitchName`) are refused while the link
+  is faulted, run in the command slot in caller order (the proxy's command order), and pass the upstream's refusal (a
+  read-only switch) through unchanged. Each write-through sets only what that write set, from its own arguments and
+  the switch's static range, never from a frame read before the command: `SetSwitch` writes `GetSwitch` and
+  `GetSwitchValue` (the range's end), `SetSwitchValue` writes `GetSwitchValue` and `GetSwitch` (true above the
+  minimum), `SetAsync` and `SetAsyncValue` write `StateChangeComplete` false for an asynchronous switch (the poll then
+  measures the upstream's change), and `SetSwitchName` replaces the name the Connect read.
+- **ISwitchV2 upstream.** It has no asynchronous members (`UpstreamProxy::upstream_interface_version()` says which the
+  upstream is): `CanAsync` is false without asking it, `StateChangeComplete` is true, and `SetAsync` and
+  `SetAsyncValue` are `MethodNotImplemented` with nothing sent. `CancelAsync` is the router's `NotImplemented` for
+  every Switch driver.
+- A refused connection on a write is a lost link at once; another call with no reply is `DriverException`. Actions and
+  `Command*` are not forwarded.
+
 Tests use the loopback `FakeAlpacaServer` (`AlpacaCore/tests/fake_alpaca_server.h`, 127.0.0.1 only, with stall,
 drop, HTTP 500, bad JSON and no-ErrorNumber modes) over the real libcurl client, and `FakeHttpClient` where a case
 counts calls. The device tests (`test_remotealpaca_observingconditions.cpp`, `test_remotealpaca_safetymonitor.cpp`,
-the contract sweep and the `[stress]` cases in `test_remotealpaca_concurrency_stress.cpp`) answer from
+`test_remotealpaca_rotator.cpp`, `test_remotealpaca_filterwheel.cpp`, `test_remotealpaca_switch.cpp`, the contract sweep and the `[stress]` cases in `test_remotealpaca_concurrency_stress.cpp`) answer from
 `AlpacaUpstreamScript` (`AlpacaCore/tests/alpaca_upstream_script.h`, a responder for `FakeHttpClient`;
-`Kind::SafetyMonitor` scripts a SafetyMonitor upstream) with the poll on `FakeTaskClock`. The contract sweep's snapshot
+`Kind::SafetyMonitor` scripts a SafetyMonitor upstream, `Kind::Rotator` a Rotator whose moves run until
+`finish_move()` or a Halt, `Kind::FilterWheel` a FilterWheel whose Position write reads -1 until
+`finish_wheel_move()`, `Kind::Switch` a Switch keyed by `Id` whose asynchronous writes run until `finish_async()`)
+with the poll on `FakeTaskClock`. The contract sweep's snapshot
 rig for the SafetyMonitor states `IsSafe`'s lost answer in `SnapshotRig::lost_answer`.
 
 ConformU against the ASCOM Alpaca Simulators (OmniSim) runs on the rig host, never in CI. The fake ConformU row

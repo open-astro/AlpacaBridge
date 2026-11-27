@@ -23,7 +23,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 - **ConformU Verification**: All drivers listed below have been tested and verified using the ConformU tool to ensure full compliance with the ASCOM Alpaca API specification.
 - **Driver Status**: Only drivers that have been verified with ConformU are listed. Additional drivers may be in development but are not included until they pass ConformU verification.
-- **Fake-only report**: The `ConformU fake` workflow (`.github/workflows/conformu-fake.yml`, artifact `conformu-fake-skywatcher`; it runs on PRs that touch a run row's driver or fake, the fake server, the device interfaces or the HTTP layer, and then only the rows those files reach, nightly on `main` and on demand, not on every PR) runs ConformU against a simulated Sky-Watcher mount, over UDP (`FakeSkyWatcherMount`) and over a serial motor board (`FakeSkyWatcherSerialBoard`, artifact `conformu-fake-skywatcher-telescope-fake_skywatcher_serial_board`), the iOptron HAE16 mount (`FakeIoptronMount` in its ConformU mode, whose GOTO, Park, tracking and pulses come from the shared `FakeMountMotionModel`), the ZWO EAF, OnStepX, iOptron iEAF and iFR, QHY Q-Focuser, Celestron focus motor and Astroasis Oasis focusers, the ZWO EFW, QHYCFW3, Player One Phoenix and WandererAstro SFW filter wheels, the ZWO ASI, ToupTek and Altair, iOptron iGuider and GPhoto (Nikon D5300) cameras, the ZWO CAA, OnStepX and iOptron iFR rotators, the Gemini Pro flat panel and WandererCover V4 Pro, the OnStepX auxiliary-feature, iOptron iMate PowerBox, Gemini Power & Data Hub and ToupTek StellaVita switches, and the Remote Alpaca ObservingConditions over their fakes (the last over a scripted upstream, `AlpacaUpstreamScript`); the reports are committed under each vendor's `AlpacaCore/conformu/<Vendor>/Fake/`. It checks the driver and the HTTP layer with no hardware and is not hardware validation; no row below depends on it.
+- **Fake-only report**: The `ConformU fake` workflow (`.github/workflows/conformu-fake.yml`, artifact `conformu-fake-skywatcher`; it runs on PRs that touch a run row's driver or fake, the fake server, the device interfaces or the HTTP layer, and then only the rows those files reach, nightly on `main` and on demand, not on every PR) runs ConformU against a simulated Sky-Watcher mount, over UDP (`FakeSkyWatcherMount`) and over a serial motor board (`FakeSkyWatcherSerialBoard`, artifact `conformu-fake-skywatcher-telescope-fake_skywatcher_serial_board`), the iOptron HAE16 mount (`FakeIoptronMount` in its ConformU mode, whose GOTO, Park, tracking and pulses come from the shared `FakeMountMotionModel`), the ZWO EAF, OnStepX, iOptron iEAF and iFR, QHY Q-Focuser, Celestron focus motor and Astroasis Oasis focusers, the ZWO EFW, QHYCFW3, Player One Phoenix and WandererAstro SFW filter wheels, the ZWO ASI, ToupTek and Altair, QHY, Player One, iOptron iGuider and GPhoto (Nikon D5300) cameras, the ZWO CAA, OnStepX and iOptron iFR rotators, the Gemini Pro flat panel and WandererCover V4 Pro, the OnStepX auxiliary-feature, iOptron iMate PowerBox, Gemini Power & Data Hub and ToupTek StellaVita switches, and the Remote Alpaca ObservingConditions over their fakes (the last over a scripted upstream, `AlpacaUpstreamScript`); the reports are committed under each vendor's `AlpacaCore/conformu/<Vendor>/Fake/`. It checks the driver and the HTTP layer with no hardware and is not hardware validation; no row below depends on it.
 - **Adding New Drivers**: New driver support can be added by implementing the appropriate driver interface. See the [Development Guide](docs/development.md) for details. All drivers must pass ConformU verification before being added to this list.
 
 - **Connection Types**:
@@ -315,6 +315,8 @@ This document lists all hardware vendors and device types that are verified to w
 
 ## FilterWheel Drivers
 
+The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the FilterWheel device of another Alpaca server through this one. `Position` is the value of the last poll of the other server, -1 while its wheel turns, and a `Position` write reads -1 at once; the filter names and focus offsets are the other server's, read at each Connect. It has fake evidence only (unit tests against a scripted upstream, no ConformU run), so it has no row here yet.
+
 ### iOptron
 
 | Model Series | Connection | Linux<br>(arm64) | Status |
@@ -572,7 +574,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 ## ObservingConditions Drivers
 
-The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingConditions and SafetyMonitor devices of another Alpaca server through this one (a SafetyMonitor reads unsafe once the link to the other one is lost; see SafetyMonitor Drivers). It has fake evidence only (unit tests against a scripted upstream, and for ObservingConditions a fake ConformU run, `AlpacaCore/conformu/Remote Alpaca/Fake/`; no ConformU run on real hardware), so it has no row here yet.
+The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingConditions, SafetyMonitor, Rotator, FilterWheel and Switch devices of another Alpaca server through this one (a SafetyMonitor reads unsafe once the link to the other one is lost; see SafetyMonitor Drivers). It has fake evidence only (unit tests against a scripted upstream, and for ObservingConditions a fake ConformU run, `AlpacaCore/conformu/Remote Alpaca/Fake/`; no ConformU run on real hardware), so it has no row here yet.
 
 ### WeeWX
 
@@ -592,6 +594,8 @@ The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the ObservingCondi
 [↑ Back to top](#alpacabridge-supported-drivers)
 
 ## Rotator Drivers
+
+The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the Rotator device of another Alpaca server through this one. `IsMoving`, `Position` and `MechanicalPosition` are the values of the last poll of the other server; a move reads `IsMoving` true at once, and `Halt` is sent even while the polls fail. It has fake evidence only (unit tests against a scripted upstream, no ConformU run), so it has no row here yet.
 
 ### iOptron
 
@@ -651,6 +655,8 @@ The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the SafetyMonitor 
 [↑ Back to top](#alpacabridge-supported-drivers)
 
 ## Switch Drivers
+
+The Remote Alpaca vendor (`remotealpaca`, issue #1753) serves the Switch device of another Alpaca server through this one. The number of switches and each switch's name, range and `CanWrite` are read once at Connect; the values are those of the last poll of the other server, and a write reads back at once. It has fake evidence only (unit tests against a scripted upstream, no ConformU run), so it has no row here yet.
 
 ### Gemini
 

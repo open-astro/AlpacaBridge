@@ -35,12 +35,15 @@
 #include "driver_rig.h"
 #include "fake_gemini_focuser.h"
 #include "fake_task_clock.h"
+#include "getter_stall_probe.h"
 
 using alpacacore::test::connect_and_park;
 using alpacacore::test::FakeGeminiFocuser;
 using alpacacore::test::FakeTaskClock;
+using alpacacore::test::kGetterBudget;
 using alpacacore::test::PolledRig;
 using alpacacore::test::tick;
+using alpacacore::test::timed;
 using namespace std::chrono_literals;
 
 namespace {
@@ -57,7 +60,9 @@ struct GeminiRig : PolledRig<FakeGeminiFocuser, alpacacore::FocuserDriver> {
           }) {}
 };
 
-int wire_reads(const FakeGeminiFocuser& fake) { return fake.count(":00#") + fake.count(":01#") + fake.count(":06#"); }
+int wire_reads(const FakeGeminiFocuser& fake) {
+    return fake.count(":00#") + fake.count(":01#") + fake.count(":06#") + fake.count(":24#");
+}
 
 // A blind command is counted when the fake's reader thread has seen it.
 bool wire_saw(const FakeGeminiFocuser& fake, const std::string& prefix) {
@@ -82,6 +87,15 @@ bool wait_asleep(const std::atomic<pid_t>& tid) {
         std::this_thread::yield();
     }
     return false;
+}
+
+// Waits up to kBound until the fake has seen `cmd` more than `before` times.
+bool wait_count_above(const FakeGeminiFocuser& fake, const std::string& cmd, int before) {
+    const auto deadline = std::chrono::steady_clock::now() + kBound;
+    while (fake.count(cmd) <= before && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(5ms);
+    }
+    return fake.count(cmd) > before;
 }
 
 }  // namespace
@@ -112,7 +126,96 @@ TEST_CASE("Gemini Focuser Snapshot - getters between poll ticks cause no wire re
     CHECK(rig.driver().get_position() == 2500);
     CHECK(rig.driver().get_is_moving() == true);
     CHECK(rig.driver().get_temperature() == Catch::Approx(-3.5));
-    CHECK(wire_reads(rig.fake()) == reads_before + 3);
+    CHECK(wire_reads(rig.fake()) == reads_before + 4);
+}
+
+// Issue #2695: TempComp is served from the polled frame like Position, so a read never waits behind the poll.
+TEST_CASE("Gemini Focuser Snapshot - TempComp reads between poll ticks cause no wire reads",
+          "[gemini][focuser][snapshot][unit][fake]") {
+    GeminiRig rig;
+    rig.fake().set_temp_comp_reply(true);
+    REQUIRE(rig.connect());
+    CHECK(rig.driver().get_temp_comp() == true);
+
+    const int reads_before = rig.fake().count(":24#");
+    for (int i = 0; i < 50; ++i) (void)rig.driver().get_temp_comp();
+    CHECK(rig.fake().count(":24#") == reads_before);
+
+    // The next tick measures the device again and the getter follows.
+    rig.fake().set_temp_comp_reply(false);
+    CHECK(rig.driver().get_temp_comp() == true);  // unchanged until the tick
+    rig.tick();
+    CHECK(rig.driver().get_temp_comp() == false);
+    CHECK(rig.fake().count(":24#") == reads_before + 1);
+}
+
+// Falsified by: gemini_focuser_driver.cpp: get_temp_comp() replace the frame read with a live protocol_ call (the read
+// waits behind the held poll exchange and misses kGetterBudget).
+TEST_CASE("Gemini Focuser Snapshot - a TempComp read returns within the getter budget while the poll holds the wire",
+          "[gemini][focuser][snapshot][unit][fake]") {
+    GeminiRig rig;
+    rig.fake().set_temp_comp_reply(true);
+    REQUIRE(rig.connect());
+
+    rig.fake().gate_next_reply();
+    rig.clock().advance(kTick);
+    REQUIRE(rig.fake().wait_reply_held(kBound));
+
+    CHECK(timed([&] { CHECK(rig.driver().get_temp_comp() == true); }) < kGetterBudget);
+    rig.fake().release_reply();
+}
+
+TEST_CASE("Gemini Focuser Snapshot - TempComp is true right after a successful set_temp_comp",
+          "[gemini][focuser][snapshot][unit][fake]") {
+    GeminiRig rig;
+    REQUIRE(rig.connect());
+    CHECK(rig.driver().get_temp_comp() == false);
+
+    rig.driver().set_temp_comp(true);
+    CHECK(wire_saw(rig.fake(), ":231#"));  // the write still reaches the device
+    CHECK(rig.driver().get_temp_comp() == true);
+}
+
+TEST_CASE("Gemini Focuser Snapshot - a TempComp probe that fails keeps Position and backs off",
+          "[gemini][focuser][snapshot][unit][fake]") {
+    GeminiRig rig;
+    rig.fake().set_garbage_temp_comp(true);
+    REQUIRE(rig.connect());
+
+    CHECK(rig.driver().get_position() == 1000);
+    try {
+        (void)rig.driver().get_temp_comp();
+        FAIL("expected DriverException");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+    }
+    CHECK(rig.fake().count(":24#") == 1);  // the connect-time frame asked once
+
+    rig.tick();
+    rig.tick();
+    CHECK(rig.fake().count(":24#") == 1);  // backed off; Position keeps polling
+
+    rig.fake().set_garbage_temp_comp(false);
+    tick(rig.clock(), 31s, kBound);
+    CHECK(rig.fake().count(":24#") == 2);
+    CHECK(rig.driver().get_temp_comp() == false);
+}
+
+// Falsified by: gemini_focuser_driver.cpp: measure() delete the else-if that keeps the last temp_comp during the
+// back-off (the next frame has none and the write-through is lost within one poll).
+TEST_CASE("Gemini Focuser Snapshot - a set_temp_comp during the TempComp back-off survives the next poll",
+          "[gemini][focuser][snapshot][unit][fake]") {
+    GeminiRig rig;
+    REQUIRE(rig.connect());
+    rig.fake().set_garbage_temp_comp(true);
+    rig.tick();  // the :24# read fails and backs off
+
+    rig.driver().set_temp_comp(true);
+    CHECK(wire_saw(rig.fake(), ":231#"));
+    CHECK(rig.driver().get_temp_comp() == true);
+
+    rig.tick();  // still backed off: the frame keeps the written value
+    CHECK(rig.driver().get_temp_comp() == true);
 }
 
 TEST_CASE("Gemini Focuser Snapshot - IsMoving is true right after a successful Move",
@@ -349,7 +452,8 @@ TEST_CASE(
 }
 
 // Falsified by: gemini_focuser_driver.cpp: probe() delete the cancel checks between the exchanges (a disconnect
-// during a poll waits for the ":00#" and ":06#" exchanges too, each up to one serial timeout).
+// during a poll waits for the ":00#" and ":06#" exchanges too, each up to one serial timeout; the ":24#" exchange
+// likewise).
 TEST_CASE("Gemini Focuser Snapshot - a disconnect during a poll waits for the exchange in flight only",
           "[gemini][focuser][snapshot][unit][fake]") {
     FakeGeminiFocuser fake;
@@ -361,6 +465,7 @@ TEST_CASE("Gemini Focuser Snapshot - a disconnect during a poll waits for the ex
     fake.gate_next_reply();
     const int position_reads = fake.count(":00#");
     const int temperature_reads = fake.count(":06#");
+    const int temp_comp_reads = fake.count(":24#");
     clock.advance(kTick);
     REQUIRE(fake.wait_reply_held(kBound));
 
@@ -378,7 +483,36 @@ TEST_CASE("Gemini Focuser Snapshot - a disconnect during a poll waits for the ex
     REQUIRE(joining);
     CHECK(fake.count(":00#") == position_reads);
     CHECK(fake.count(":06#") == temperature_reads);
+    CHECK(fake.count(":24#") == temp_comp_reads);
     CHECK(driver->get_link_fault().empty());
+}
+
+// Falsified by: gemini_focuser_driver.cpp: measure() delete the poll_cancelled_ check before the ":24#" read (a
+// disconnect during the ":06#" exchange waits for the ":24#" exchange too).
+TEST_CASE("Gemini Focuser Snapshot - a disconnect during the temperature read skips the TempComp read",
+          "[gemini][focuser][snapshot][unit][fake]") {
+    FakeGeminiFocuser fake;
+    FakeTaskClock clock;
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
+    REQUIRE(connect_and_park(*driver, clock, kBound));
+
+    // The next poll's ":06#" reply is held by the fake while the disconnect starts.
+    const int temperature_reads = fake.count(":06#");
+    const int temp_comp_reads = fake.count(":24#");
+    fake.hold_reply_to(":06#", 1000ms);
+    clock.advance(kTick);
+    REQUIRE(wait_count_above(fake, ":06#", temperature_reads));
+
+    std::atomic<pid_t> disconnect_tid{0};
+    std::thread disconnect([&] {
+        disconnect_tid.store(::gettid());
+        driver->set_connected(false);
+    });
+    const bool joining = wait_asleep(disconnect_tid);
+    disconnect.join();
+
+    REQUIRE(joining);
+    CHECK(fake.count(":24#") == temp_comp_reads);
 }
 
 // Falsified by: gemini_focuser_driver.cpp: ~GeminiFocuserDriver() delete the poll_cancelled_ store before
@@ -394,6 +528,7 @@ TEST_CASE(
     fake.gate_next_reply();
     const int position_reads = fake.count(":00#");
     const int temperature_reads = fake.count(":06#");
+    const int temp_comp_reads = fake.count(":24#");
     clock.advance(kTick);
     REQUIRE(fake.wait_reply_held(kBound));
 
@@ -411,6 +546,7 @@ TEST_CASE(
     REQUIRE(joining);
     CHECK(fake.count(":00#") == position_reads);
     CHECK(fake.count(":06#") == temperature_reads);
+    CHECK(fake.count(":24#") == temp_comp_reads);
 }
 
 // Falsified by: gemini_focuser_driver.cpp: device_state_age() delete the override (the TimeStamp is the request time,
@@ -494,19 +630,25 @@ bool reports_loss(const alpacacore::FocuserDriver& driver) {
 
 }  // namespace
 
-TEST_CASE("Gemini Focuser Link - a cable pulled during a command loses the link at once",
+// Falsified by: gemini_focuser_driver.cpp: probe() drop the link_alive() check after measure() (the hangup on the
+// optional :24# read is swallowed and the poll parks for the next tick with the link gone).
+TEST_CASE("Gemini Focuser Link - a cable pulled during a poll's TempComp read ends the poll at once",
           "[gemini][focuser][unit][fake][link-lost]") {
     GeminiRig rig;
     REQUIRE(rig.connect());
     const std::string old_pts = rig.fake().slave_path();
     REQUIRE(alpacacore::util::is_serial_port_in_use(old_pts));
 
-    rig.fake().hold_next_reply(300ms);  // the focuser sits on the ":24#" reply while the cable is pulled
+    // TempComp is read by the poll, never by the getter (#2695): the focuser sits on the ":24#" reply while the cable
+    // is pulled, and the poll must end in this cycle.
+    rig.fake().hold_reply_to(":24#", 300ms);
     std::thread pull = unplug_when_asked(rig.fake(), ":24#", rig.fake().count(":24#"));
     const auto start = std::chrono::steady_clock::now();
-    require_alpaca_error([&] { (void)rig.driver().get_temp_comp(); }, kNotConnected);
+    rig.clock().advance(kTick);
+    REQUIRE(rig.clock().wait_for_woken_settled(kBound));
     pull.join();
     CHECK(std::chrono::steady_clock::now() - start < 2s);  // the hangup, not a serial timeout
+    CHECK(rig.clock().waiter_count() == 0);
     require_lost(rig.driver(), old_pts);
     // Decision 0009 rule 5: the loss reason is kept while the link stays lost.
     CHECK(reports_loss(rig.driver()));

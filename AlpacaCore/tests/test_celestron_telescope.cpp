@@ -51,9 +51,11 @@
 #ifndef _WIN32
 #include "concurrency_stress.h"
 #include "fake_celestron_cgx_mount.h"
+#include "fake_celestron_handset.h"
 #include "fake_mount_server.h"
 #include "fake_pty_write.h"
 #include "fake_task_clock.h"
+#include "hc_motion_rig.h"
 #include "pty_responder.h"
 #endif
 
@@ -828,22 +830,23 @@ TEST_CASE("Celestron Telescope Driver - AbortSlew reports a stop it could not se
         CHECK(axis_stops == 4);  // each axis gets both stop directions
     }
 
-    SECTION("a dropped link throws DriverException and keeps the slew error observable") {
+    // Over TCP the dropped connection is a lost link at once (decision 0009 rule 2a, #2718): AbortSlew reports its
+    // stop failure as a DriverException, and the reads that follow answer NotConnected; neither waits for the
+    // staleness bound.
+    SECTION("a dropped link is lost at once: AbortSlew fails and Slewing throws NotConnected") {
         REQUIRE(server.drop_connections());
         try {
             driver->abort_slew();
             FAIL("AbortSlew returned success although the stops could not be sent");
         } catch (const alpacacore::AlpacaException& ex) {
             CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
-            CHECK(std::string(ex.what()).rfind("AbortSlew stop failed: ", 0) == 0);
         }
-        CHECK_FALSE(driver->get_at_home());
+        CHECK_FALSE(driver->get_connected());
         try {
             (void)driver->get_slewing();
-            FAIL("Slewing returned a completion value after the stop failed");
+            FAIL("Slewing returned a value over a lost link");
         } catch (const alpacacore::AlpacaException& ex) {
-            CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
-            CHECK(std::string(ex.what()).rfind("AbortSlew stop failed: ", 0) == 0);
+            CHECK(ex.error_code() == alpacacore::AlpacaError::NotConnected);
         }
     }
 
@@ -2841,9 +2844,11 @@ TEST_CASE("Celestron Link - a cable pulled mid-pulse loses the link and the puls
     CHECK(rig.clock.waiter_count() == idle);  // the chain ended on its failed re-arm
 }
 
-// Over TCP a hangup is not a pulled cable: it stays a DriverException and the fault latch and the staleness bound
-// decide, as before. (OnStep differs since #2220: its network link treats a TCP hangup as a lost link at once.)
-TEST_CASE("Celestron Link - over TCP a hangup is a failed exchange, not a lost link",
+// Over TCP a peer hangup is positive evidence that the transport is gone, as a pulled cable is over serial (decision
+// 0009 rule 2a, #2718): the exchange in flight answers NotConnected and Connected reads false at once.
+// Falsified by: celestron_protocol_wrapper.cpp throw_link_lost() failing the link over serial only (the exchange
+// answers DriverException and Connected stays true)
+TEST_CASE("Celestron Link - over TCP a hangup is a lost link at once",
           "[celestron][telescope][unit][fake][link-lost]") {
     FakeTaskClock clock;
     auto st = std::make_shared<SnapshotMount>();
@@ -2880,9 +2885,9 @@ TEST_CASE("Celestron Link - over TCP a hangup is a failed exchange, not a lost l
     REQUIRE(snapshot_wait_for([&] { return st->transactions.load() > before; }));
     REQUIRE(server.drop_connections());  // the read in flight meets the reset
     call.join();
-    CHECK(code == err::DriverException);
-    CHECK(driver->get_connected());
-    CHECK(driver->get_link_fault().empty());
+    CHECK(code == err::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(driver->get_link_fault().empty());
     driver->set_connected(false);
 }
 
@@ -3150,5 +3155,147 @@ TEST_CASE("Celestron snapshot - findhomeissensorsearch needs a home-switch model
     CHECK_FALSE(driver->can_action("findhomeissensorsearch"));
     require_alpaca_error([&] { (void)driver->action("findhomeissensorsearch", ""); },
                          alpacacore::AlpacaError::NotConnected);
+}
+#endif
+
+#ifndef _WIN32
+// FakeCelestronHandset in ConformU mode (#2692): the NexStar hand-controller wire answered from FakeMountMotionModel.
+// The cases talk to the responder directly, on a clock they advance (hc_motion_rig.h).
+namespace {
+
+using std::chrono::seconds;
+using ModelledNexStar = alpacacore::test::HcMotionRig<alpacacore::test::FakeCelestronHandset>;
+
+}  // namespace
+
+TEST_CASE("FakeCelestronHandset ConformU mode: a GOTO reports slewing and the target only after its travel time",
+          "[celestron][fake][mount-model][unit]") {
+    ModelledNexStar rig;
+    REQUIRE(rig.handset.motion() != nullptr);
+    rig.handset.goto_stops_tracking.store(
+        false);  // the landed position is read a minute on: tracking is the next case's
+    rig.ask(std::string("T") + '\x03');
+    const double aim_ra = std::fmod(rig.handset.motion()->lst_hours() + 1.0, 24.0);
+    const double dec_before = rig.dec_degrees();
+    REQUIRE(rig.ask("r" + ModelledNexStar::pair_of(aim_ra * 15.0, -30.0)) == "#");
+
+    CHECK(rig.slewing());
+    CHECK(rig.ask(std::string("P\x01\x10\x13\0\0\0\x01", 8)) == std::string("\x00#", 2));  // MC_SLEW_DONE: busy
+    rig.advance(seconds(5));
+    CHECK(rig.slewing());
+    const double mid = rig.dec_degrees();
+    CHECK(mid != Catch::Approx(dec_before).margin(0.5));
+    CHECK(mid != Catch::Approx(-30.0).margin(0.5));  // on its way, not there
+
+    rig.advance(seconds(60));
+    CHECK_FALSE(rig.slewing());
+    CHECK(rig.ask(std::string("P\x01\x10\x13\0\0\0\x01", 8)) == std::string("\xFF#"));  // MC_SLEW_DONE: done
+    CHECK(rig.dec_degrees() == Catch::Approx(-30.0).margin(1e-3));
+    CHECK(ModelledNexStar::ra_gap_hours(rig.ra_hours(), aim_ra) == Catch::Approx(0.0).margin(1e-4));
+}
+
+TEST_CASE("FakeCelestronHandset ConformU mode: a Sync re-labels the reported position",
+          "[celestron][fake][mount-model][unit]") {
+    ModelledNexStar rig;
+    const double dec_before = rig.dec_degrees();
+    REQUIRE(rig.ask("s" + ModelledNexStar::pair_of(90.0, 40.0)) == "#");  // 6 h, +40 degrees
+    CHECK(rig.dec_degrees() != Catch::Approx(dec_before).margin(1.0));
+    CHECK(rig.dec_degrees() == Catch::Approx(40.0).margin(1e-3));
+    CHECK(rig.ra_hours() == Catch::Approx(6.0).margin(1e-4));
+    CHECK_FALSE(rig.slewing());  // a sync moves nothing
+}
+
+TEST_CASE("FakeCelestronHandset ConformU mode: tracking holds RA, a GOTO leaves it stopped until a T write",
+          "[celestron][fake][mount-model][unit]") {
+    ModelledNexStar rig;
+    rig.ask("s" + ModelledNexStar::pair_of(90.0, 40.0));
+    REQUIRE(rig.ask(std::string("T") + '\x03') == "#");
+    CHECK(rig.ask("t") == std::string("\x03#"));
+    rig.advance(seconds(600));
+    CHECK(rig.ra_hours() == Catch::Approx(6.0).margin(1e-4));  // tracking: the sky position holds
+
+    // A GOTO to the spot it is on lands at once but leaves the RA motor at rate 0 (CGX-L fw 7.18), whatever `t` says.
+    REQUIRE(rig.ask("r" + ModelledNexStar::pair_of(rig.ra_hours() * 15.0, 40.0)) == "#");
+    CHECK(rig.ask("t") == std::string("\x03#"));
+    rig.advance(seconds(600));
+    const double drifted = 6.0 + 600.0 * 360.98564736629 / 86400.0 / 15.0;  // 600 s of sidereal time east
+    CHECK(rig.ra_hours() == Catch::Approx(drifted).margin(1e-3));
+    rig.ask(std::string("T") + '\x03');
+    const double held = rig.ra_hours();
+    rig.advance(seconds(600));
+    CHECK(rig.ra_hours() == Catch::Approx(held).margin(1e-4));  // the T write resumed tracking
+}
+
+TEST_CASE("FakeCelestronHandset ConformU mode: an AUX guide pulse moves its axis for its duration and then stops",
+          "[celestron][fake][mount-model][unit]") {
+    ModelledNexStar rig;
+    rig.ask("s" + ModelledNexStar::pair_of(90.0, 40.0));
+    rig.ask(std::string("T") + '\x03');
+    REQUIRE(rig.ask("p") == "W#");  // pierEast: the hour angle is positive
+    // MTR_AUX_GUIDE on Dec at +100% of sidereal for 200 cs: south on a west-pier ('W') mount.
+    REQUIRE(rig.ask(std::string("P\x03\x11\x26\x64\xC8\0\0", 8)) == "#");
+    rig.advance(seconds(1));
+    const double after_one = rig.dec_degrees();
+    CHECK(after_one < 40.0 - 0.9 * 360.98564736629 / 86400.0);
+    rig.advance(seconds(5));
+    const double after_pulse = rig.dec_degrees();
+    CHECK(after_pulse == Catch::Approx(40.0 - 2.0 * 360.98564736629 / 86400.0).margin(1e-4));  // 2 s, then held
+    rig.advance(seconds(5));
+    CHECK(rig.dec_degrees() == Catch::Approx(after_pulse).margin(1e-6));
+}
+
+TEST_CASE("FakeCelestronHandset ConformU mode: a variable-rate and a fixed-rate move run their axis",
+          "[celestron][fake][mount-model][unit]") {
+    ModelledNexStar rig;
+    rig.ask("s" + ModelledNexStar::pair_of(90.0, 40.0));
+    rig.ask(std::string("T") + '\x03');
+    constexpr double kSiderealDegPerSec = 360.98564736629 / 86400.0;
+    // Variable rate on Dec at 600"/s (scaled by 4: 2400 = 0x0960), positive (code 6).
+    REQUIRE(rig.ask(std::string("P\x03\x11\x06\x09\x60\0\0", 8)) == "#");
+    rig.advance(seconds(10));
+    CHECK(rig.dec_degrees() == Catch::Approx(40.0 + 600.0 * 10.0 / 3600.0).margin(1e-2));
+    REQUIRE(rig.ask(std::string("P\x03\x11\x06\0\0\0\0", 8)) == "#");  // rate 0: the stop
+    const double after_variable = rig.dec_degrees();
+    rig.advance(seconds(10));
+    CHECK(rig.dec_degrees() == Catch::Approx(after_variable).margin(1e-6));
+
+    // Fixed rate 3 (8x sidereal) on Dec, negative (code 37).
+    REQUIRE(rig.ask(std::string("P\x02\x11\x25\x03\0\0\0", 8)) == "#");
+    rig.advance(seconds(10));
+    CHECK(rig.dec_degrees() == Catch::Approx(after_variable - 8.0 * kSiderealDegPerSec * 10.0).margin(1e-3));
+    REQUIRE(rig.ask(std::string("P\x02\x11\x24\0\0\0\0", 8)) == "#");
+    const double after_fixed = rig.dec_degrees();
+    rig.advance(seconds(10));
+    CHECK(rig.dec_degrees() == Catch::Approx(after_fixed).margin(1e-6));
+}
+
+// ConformU "Parked:Tracking = true didn't raise an error when Parked as required" (fake ConformU run of #2692, the
+// NexStar row): the driver over the ConformU-mode handset, the way fake_conformu_server builds it, with the task clock
+// and the model's clock stepped by the case (decision 0005 rule 2). Red on purpose: set_tracking() in
+// celestron_telescope_driver.cpp checks no park state, and that file is held by another change, so this case is
+// [!shouldfail] until the driver fix lands (Catch2 then reports the case as passing unexpectedly; delete the tag with
+// the fix).
+TEST_CASE("Celestron Telescope Driver - enabling Tracking while parked is refused with InvalidOperation",
+          "[celestron][telescope][fake][mount-model][unit][!shouldfail]") {
+    ModelledNexStar rig;
+    alpacacore::test::FakeMountServer server(rig.handset.responder());
+    REQUIRE(server.ok());
+    alpacacore::vendor::celestron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::celestron::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope_with_site(
+        0, conn, -33.856784, 151.215297, 42.0, /*sync_time_on_connect=*/true,
+        alpacacore::vendor::celestron::CelestronAlignmentSetting::Auto, rig.task_clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    driver->park();
+    // The park GOTO takes modelled time and the driver polls it on the task clock: step both a second at a time.
+    for (int second = 0; second < 600 && !driver->get_at_park(); ++second) {
+        rig.advance(std::chrono::seconds(1));
+        rig.task_clock.advance(std::chrono::seconds(1));
+        REQUIRE(rig.task_clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    }
+    REQUIRE(driver->get_at_park());
+    require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::InvalidOperation);
 }
 #endif

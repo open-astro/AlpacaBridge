@@ -461,9 +461,13 @@ TEST_CASE("iOptron polled state - site getters and DeviceState refuse at once wi
     std::vector<alpacacore::DeviceState> state;
     const auto elapsed = alpacacore::test::timed([&] { state = driver.get_device_state(); });
     CHECK(elapsed < kGetterBudget);
+    // Every entry's getter refuses with the fault latched, and TimeStamp is added only beside another entry: no entry
+    // stays.
     for (const auto& entry : state) {
-        CHECK(entry.name != "SiderealTime");  // omitted: its getter refused
+        INFO(entry.name);
+        CHECK(entry.name != "SiderealTime");
     }
+    CHECK(state.empty());
     // Every sample above landed while the probe still held the wire.
     CHECK(steady_clock::now() - sampled_from < milliseconds(1500));
 

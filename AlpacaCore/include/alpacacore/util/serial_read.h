@@ -138,7 +138,9 @@ inline int read_wait_ms(const ReadSpec& spec, std::chrono::steady_clock::time_po
 }
 
 inline bool tty_hangup_errno(int e) { return is_serial_loss_errno(e); }  // the one serial rule (#2262)
-inline bool socket_hangup_errno(int e) { return e == ENOTCONN || e == ECONNRESET || e == EPIPE || e == ENOTSOCK; }
+inline bool socket_hangup_errno(int e) {
+    return e == ENOTCONN || e == ECONNRESET || e == EPIPE || e == ENOTSOCK || e == EBADF;
+}
 
 /// One byte from a socket, waiting at most @p timeout_ms: 1, 0 on timeout, -1
 /// with errno set. An orderly close by the peer is -1 / ECONNRESET.
@@ -297,8 +299,13 @@ inline ReadResult read_until(SerialLink& link, const ReadSpec& spec, std::chrono
     return res;
 }
 
-/// The same read over a connected stream socket. Hangup errnos: ENOTCONN,
-/// ECONNRESET, EPIPE, ENOTSOCK; the peer closing the stream reports ECONNRESET.
+/// An errno that says the TCP connection itself is gone (decision 0009 rule 2a): ENOTCONN, ECONNRESET, EPIPE,
+/// ENOTSOCK, EBADF. The one list for a read (read_until_socket) and a send (send_all). EHOSTUNREACH, ENETUNREACH
+/// and a timeout report reachability, not a gone connection: they are not in it.
+inline bool socket_hangup_errno(int e) { return detail::socket_hangup_errno(e); }
+
+/// The same read over a connected stream socket. Hangup errnos: socket_hangup_errno();
+/// the peer closing the stream reports ECONNRESET.
 inline ReadResult read_until_socket(int socket_fd, const ReadSpec& spec,
                                     std::chrono::steady_clock::time_point deadline) {
     return detail::read_until_impl(

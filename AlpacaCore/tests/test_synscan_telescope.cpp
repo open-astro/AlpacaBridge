@@ -36,7 +36,9 @@
 #ifndef _WIN32
 #include "concurrency_stress.h"
 #include "fake_mount_server.h"
+#include "fake_synscan_handset.h"
 #include "fake_task_clock.h"
+#include "hc_motion_rig.h"
 #endif
 
 using alpacacore::DeviceType;
@@ -905,7 +907,10 @@ TEST_CASE("SynScan Telescope Driver - AbortSlew reports a stop it could not send
         CHECK(axis_stops == 4);  // each axis gets both stop directions
     }
 
-    SECTION("a dropped link throws DriverException and keeps the slew error observable") {
+    // Over TCP the dropped connection is a lost link at once (decision 0009 rule 2a, #2718): AbortSlew reports the
+    // stops it could not send, and the Slewing read that follows answers NotConnected; neither waits for the
+    // staleness bound.
+    SECTION("a dropped link is lost at once: AbortSlew reports it and Slewing throws NotConnected") {
         REQUIRE(server.drop_connections());
         try {
             driver->abort_slew();
@@ -914,12 +919,12 @@ TEST_CASE("SynScan Telescope Driver - AbortSlew reports a stop it could not send
             CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
             CHECK(std::string(ex.what()).rfind("AbortSlew stop failed: ", 0) == 0);
         }
+        CHECK_FALSE(driver->get_connected());
         try {
             (void)driver->get_slewing();
-            FAIL("Slewing returned a completion value after the stop failed");
+            FAIL("Slewing returned a value over a lost link");
         } catch (const alpacacore::AlpacaException& ex) {
-            CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
-            CHECK(std::string(ex.what()).rfind("AbortSlew stop failed: ", 0) == 0);
+            CHECK(ex.error_code() == alpacacore::AlpacaError::NotConnected);
         }
     }
 
@@ -985,16 +990,18 @@ TEST_CASE("SynScan Telescope Driver - a cancelled pulse whose stop fails logs th
         CHECK(errors == 1);
     }
 
-    // Falsified by: synscan_telescope_driver.cpp run_pulse_stop_body cancel branch, drop the manual_axis_slewing_
-    // write: the next pulse is then refused with the link error instead of InvalidOperation. A replacement pulse
-    // supersedes instead of cancelling (#2263), so the cancel comes from AbortSlew, whose own stops fail too.
-    SECTION("after the cancel a pulse is refused while the axis may still be moving") {
-        require_alpaca_error([&] { driver->abort_slew(); }, alpacacore::AlpacaError::DriverException);
+    // The dropped TCP link is a lost link at once (decision 0009 rule 2a, #2718), so after AbortSlew's stops fail
+    // a pulse is refused with NotConnected: the link, not the cancelled pulse's axis, is the reason. (The
+    // InvalidOperation "axis may still be moving" refusal needs a failed stop on a link that stays up, which a
+    // blind send over TCP cannot give.)
+    SECTION("after the cancel over a dropped link a pulse is refused as NotConnected") {
+        // abort_slew's own write meets the lost link, so it throws NotConnected (decision 0009 rule 2a, #2718).
+        require_alpaca_error([&] { driver->abort_slew(); }, alpacacore::AlpacaError::NotConnected);
         try {
             driver->pulse_guide(2, 300);
-            FAIL("PulseGuide started although the cancelled pulse's stop failed");
+            FAIL("PulseGuide started over a lost link");
         } catch (const alpacacore::AlpacaException& ex) {
-            CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
+            CHECK(ex.error_code() == alpacacore::AlpacaError::NotConnected);
         }
         CHECK(errors == 1);
         driver.reset();
@@ -1284,3 +1291,102 @@ TEST_CASE("SynScan Telescope Driver spec audit - SiteElevation never set throws 
     driver->set_site_elevation(42.0);
     CHECK(driver->get_site_elevation() == 42.0);
 }
+
+#ifndef _WIN32
+// FakeSynScanHandset in ConformU mode (#2692): the handset wire answered from FakeMountMotionModel, driven by a clock
+// the case advances. The cases talk to the responder directly, as test_ioptron_fake_motion_mode.cpp does.
+namespace {
+
+using std::chrono::seconds;
+
+using ModelledHandset = alpacacore::test::HcMotionRig<alpacacore::test::FakeSynScanHandset>;
+
+}  // namespace
+
+TEST_CASE("FakeSynScanHandset ConformU mode: a GOTO reports slewing and the target only after its travel time",
+          "[synscan][fake][mount-model][unit]") {
+    ModelledHandset rig;
+    REQUIRE(rig.handset.motion() != nullptr);
+    rig.ask(std::string("T") + '\x02');
+    const double aim_ra = std::fmod(rig.handset.motion()->lst_hours() + 1.0, 24.0);
+    const double dec_before = rig.dec_degrees();
+    REQUIRE(rig.ask("r" + ModelledHandset::pair_of(aim_ra * 15.0, -30.0)) == "#");
+
+    CHECK(rig.slewing());
+    rig.advance(seconds(5));
+    CHECK(rig.slewing());
+    const double mid = rig.dec_degrees();
+    CHECK(mid != Catch::Approx(dec_before).margin(0.5));
+    CHECK(mid != Catch::Approx(-30.0).margin(0.5));  // on its way, not there
+
+    rig.advance(seconds(60));
+    CHECK_FALSE(rig.slewing());
+    CHECK(rig.dec_degrees() == Catch::Approx(-30.0).margin(1e-3));
+    CHECK(ModelledHandset::ra_gap_hours(rig.ra_hours(), aim_ra) == Catch::Approx(0.0).margin(1e-4));
+}
+
+TEST_CASE("FakeSynScanHandset ConformU mode: a Sync re-labels the reported position",
+          "[synscan][fake][mount-model][unit]") {
+    ModelledHandset rig;
+    const double dec_before = rig.dec_degrees();
+    REQUIRE(rig.ask("s" + ModelledHandset::pair_of(90.0, 40.0)) == "#");  // 6 h, +40 degrees
+    CHECK(rig.dec_degrees() != Catch::Approx(dec_before).margin(1.0));
+    CHECK(rig.dec_degrees() == Catch::Approx(40.0).margin(1e-3));
+    CHECK(rig.ra_hours() == Catch::Approx(6.0).margin(1e-4));
+    CHECK_FALSE(rig.slewing());  // a sync moves nothing
+}
+
+TEST_CASE("FakeSynScanHandset ConformU mode: tracking holds RA and stopped tracking lets it drift east",
+          "[synscan][fake][mount-model][unit]") {
+    ModelledHandset rig;
+    rig.ask("s" + ModelledHandset::pair_of(90.0, 40.0));
+    rig.ask(std::string("T") + '\x02');
+    CHECK(rig.ask("t") == std::string(1, '\x02') + "#");
+    rig.advance(seconds(600));
+    CHECK(rig.ra_hours() == Catch::Approx(6.0).margin(1e-4));  // tracking: the sky position holds
+
+    REQUIRE(rig.ask(std::string("T") + '\0') == "#");
+    CHECK(rig.ask("t") == std::string(1, '\0') + "#");
+    rig.advance(seconds(600));
+    // An hour of sidereal time is 1.00274 hours of RA east; 600 s is 600 * 360.98564736629 / 86400 degrees.
+    CHECK(rig.ra_hours() == Catch::Approx(6.0 + 600.0 * 360.98564736629 / 86400.0 / 15.0).margin(1e-3));
+}
+
+TEST_CASE("FakeSynScanHandset ConformU mode: a variable-rate move moves its axis and replaces tracking",
+          "[synscan][fake][mount-model][unit]") {
+    ModelledHandset rig;
+    rig.ask("s" + ModelledHandset::pair_of(90.0, 40.0));
+    rig.ask(std::string("T") + '\x02');
+    // Dec at 600"/s (scaled by 4: 2400 = 0x0960), positive (code 6). The mount points west ('W', OTA east of the pier),
+    // where the Dec motor runs the other way (the driver sends code 7 for north there), so code 6 runs Dec south.
+    const std::string dec_north = std::string("P\x03\x11\x06\x09\x60\0\0", 8);
+    REQUIRE(rig.ask(dec_north) == "#");
+    rig.advance(seconds(10));
+    REQUIRE(rig.ask("p") == "W#");
+    CHECK(rig.dec_degrees() == Catch::Approx(40.0 - 600.0 * 10.0 / 3600.0).margin(1e-2));
+    rig.ask(std::string("P\x03\x11\x06\0\0\0\0", 8));
+    const double stopped = rig.dec_degrees();
+    rig.advance(seconds(10));
+    CHECK(rig.dec_degrees() == Catch::Approx(stopped).margin(1e-6));
+
+    // An RA variable-rate move replaces tracking: the handset's mode reads 0 until a T write.
+    rig.ask(std::string("P\x03\x10\x07\0\x04\0\0", 8));
+    CHECK(rig.ask("t") == std::string(1, '\0') + "#");
+}
+
+TEST_CASE("FakeSynScanHandset ConformU mode: a fixed-rate move runs its axis at its sidereal multiple",
+          "[synscan][fake][mount-model][unit]") {
+    ModelledHandset rig;
+    rig.ask("s" + ModelledHandset::pair_of(90.0, 40.0));
+    rig.ask(std::string("T") + '\x02');
+    constexpr double kSiderealDegPerSec = 360.98564736629 / 86400.0;
+    // Fixed rate 3 (8x sidereal) on the Dec motor, positive (code 36).
+    REQUIRE(rig.ask(std::string("P\x02\x11\x24\x03\0\0\0", 8)) == "#");
+    rig.advance(seconds(10));
+    CHECK(rig.dec_degrees() == Catch::Approx(40.0 + 8.0 * kSiderealDegPerSec * 10.0).margin(1e-3));
+    REQUIRE(rig.ask(std::string("P\x02\x11\x25\0\0\0\0", 8)) == "#");  // rate 0: the stop
+    const double stopped = rig.dec_degrees();
+    rig.advance(seconds(10));
+    CHECK(rig.dec_degrees() == Catch::Approx(stopped).margin(1e-6));
+}
+#endif

@@ -3547,7 +3547,10 @@ function updateIfrConfigFields() {
 function updateRemoteAlpacaConfigFields() {
     const sections = {
         observingconditions: document.getElementById('remotealpaca-observingconditions-fields'),
-        safetymonitor: document.getElementById('remotealpaca-safetymonitor-fields')
+        safetymonitor: document.getElementById('remotealpaca-safetymonitor-fields'),
+        rotator: document.getElementById('remotealpaca-rotator-fields'),
+        filterwheel: document.getElementById('remotealpaca-filterwheel-fields'),
+        switch: document.getElementById('remotealpaca-switch-fields')
     };
     const deviceTypeSelect = document.getElementById('device-type');
     const deviceType = deviceTypeSelect ? normalizeDeviceType(deviceTypeSelect.value) : '';
@@ -5155,8 +5158,15 @@ document.getElementById('device-form').addEventListener('submit', async function
             deviceData.timeoutMs = timeoutMs;
         }
     } else if (deviceData.vendor === 'remotealpaca') {
-        // The fields of the shown sub-section: remoteAlpaca* (ObservingConditions) or remoteAlpacaSafety* (SafetyMonitor).
-        const prefix = normalizeDeviceType(deviceData.deviceType) === 'safetymonitor' ? 'remoteAlpacaSafety' : 'remoteAlpaca';
+        // The fields of the shown sub-section: remoteAlpaca* (ObservingConditions), remoteAlpacaSafety* (SafetyMonitor),
+        // remoteAlpacaRotator* (Rotator), remoteAlpacaFilterWheel* (FilterWheel) or remoteAlpacaSwitch* (Switch).
+        const remoteAlpacaPrefixes = {
+            safetymonitor: 'remoteAlpacaSafety',
+            rotator: 'remoteAlpacaRotator',
+            filterwheel: 'remoteAlpacaFilterWheel',
+            switch: 'remoteAlpacaSwitch'
+        };
+        const prefix = remoteAlpacaPrefixes[normalizeDeviceType(deviceData.deviceType)] || 'remoteAlpaca';
         deviceData.upstreamHost = (formData.get(`${prefix}Host`) || '').trim();
         const upstreamPort = readOptionalNumber(formData, `${prefix}Port`);
         if (upstreamPort !== null) {

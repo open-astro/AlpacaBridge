@@ -101,9 +101,12 @@ inline std::unique_ptr<CameraDriver> make_iguider_camera(int device_number) {
 #endif
 
 #ifdef FAKE_CONFORMU_QHY
+// Each exposure and guide pulse takes its length in real time, as on a camera: ControlQHYCCDGuide blocks for the
+// pulse, so IsPulseGuiding stays true for it (#2693).
 struct QhyCameraHost {
     FakeQHYSDK fake = FakeQHYSDK::with_one_camera("fake-qhy-0");
     LockedQHYSDK sdk{fake};
+    QhyCameraHost() { fake.set_timing_clock(&util::default_task_clock()); }
 };
 inline QhyCameraHost& qhy_camera_host() {
     static QhyCameraHost host;
@@ -116,7 +119,12 @@ inline std::unique_ptr<CameraDriver> make_qhy_camera(int device_number) {
 
 #ifdef FAKE_CONFORMU_PLAYERONE
 inline FakePlayerOneSDK& playerone_camera_sdk() {
+    // Each exposure takes its length in real time, as on a camera: POAImageReady turns true only after it (#2693).
     static FakePlayerOneSDK sdk;
+    [[maybe_unused]] static const bool timed = [] {
+        sdk.set_timing_clock(&util::default_task_clock());
+        return true;
+    }();
     return sdk;
 }
 inline std::unique_ptr<CameraDriver> make_playerone_camera(int device_number) {
@@ -159,7 +167,13 @@ inline std::unique_ptr<CameraDriver> make_altair_camera(int device_number) {
 
 #ifdef FAKE_CONFORMU_SVBONY
 inline FakeSVBSDK& svbony_camera_sdk() {
+    // Each exposure and guide pulse takes its length in real time, as on a camera: SVBGetVideoData delivers no frame
+    // before the exposure and SVBPulseGuide blocks for the pulse (#2693).
     static FakeSVBSDK sdk;
+    [[maybe_unused]] static const bool timed = [] {
+        sdk.set_timing_clock(&util::default_task_clock());
+        return true;
+    }();
     return sdk;
 }
 inline std::unique_ptr<CameraDriver> make_svbony_camera(int device_number) {
