@@ -1558,6 +1558,35 @@ TEST_CASE("Celestron MoveAxis - a rate command that throws still leaves the jog 
     driver->set_connected(false);
 }
 
+// #2651 review: a cap the slot refuses (no thread) leaves no jog running uncapped: MoveAxis stops the axis it just
+// started and fails.
+TEST_CASE("Celestron MoveAxis - a cap the slot cannot start stops the axis and fails the MoveAxis",
+          "[celestron][telescope][async][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    alpacacore::vendor::celestron::set_move_axis_cap_spawn_for_testing(
+        *driver, [](std::function<void()>) -> std::thread {
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        });
+
+    const int stops_before = axis_stop_count(*st, 0);
+    try {
+        driver->move_axis(0, 1.0);
+        FAIL("MoveAxis returned success although no cap limits the move");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("MoveAxis could not start its time limit") != std::string::npos);
+        CHECK(std::string(ex.what()).find("the axis was stopped") != std::string::npos);
+    }
+    CHECK(axis_stop_count(*st, 0) > stops_before);  // the axis just started is stopped
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
 // #2651: the cap stop is verified, and a mount that keeps moving through it is stopped 3 times, then Slewing raises the
 // kept error and nothing more goes out for this move.
 TEST_CASE("Celestron MoveAxis - a cap stop the mount ignores is sent 3 times and Slewing raises it",

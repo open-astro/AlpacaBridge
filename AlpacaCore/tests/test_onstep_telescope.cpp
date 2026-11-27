@@ -1267,6 +1267,34 @@ TEST_CASE("OnStep Telescope Driver - a MoveAxis whose re-send cannot start stops
     driver->set_connected(false);
 }
 
+// #2651 review: the same for the 60 s cap body. A cap the slot refuses leaves no jog running uncapped: MoveAxis stops
+// the axis it just started and fails.
+TEST_CASE("OnStep Telescope Driver - a MoveAxis whose cap cannot start stops the axis and fails",
+          "[onstep][telescope][unit]") {
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    alpacacore::vendor::onstep::set_move_axis_cap_spawn_for_testing(
+        *driver, [](const std::function<void()>&) -> std::thread {
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        });
+    fake.guide_active->store(true);
+    try {
+        driver->move_axis(0, 1.0);
+        FAIL("MoveAxis returned success although no cap limits the move");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("the axis was stopped") != std::string::npos);
+    }
+    CHECK(fake.logged(":Me#", 1));
+    CHECK(fake.logged(":Qe#", 1));
+    CHECK(fake.logged(":Qw#", 1));
+    fake.guide_active->store(false);  // the mount stopped
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
 // #1458: when the stop after a refused re-send fails too, the message says
 // so and Slewing stays true (#742): the mount may still be moving.
 TEST_CASE("OnStep Telescope Driver - a refused re-send whose stop fails too leaves Slewing true",

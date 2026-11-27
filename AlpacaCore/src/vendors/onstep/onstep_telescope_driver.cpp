@@ -2269,7 +2269,9 @@ public:
         // The new one supersedes it.
         lock.unlock();  // start() without mutex_: decision 0006 rule 4, async_operation.h rule 10
         try {
-            start_move_axis_resend();
+            // The re-send's start bumps the generation this call compares against below (#2651 review): without
+            // taking its token, a cap that cannot start after it found the move superseded and left it running.
+            generation = start_move_axis_resend();
             run_move_axis_cap_before_start_hook();
             start_move_axis_cap(axis);
         } catch (const AlpacaException& ex) {
@@ -2825,8 +2827,9 @@ private:
     // resend_within_altitude_limits_locked()). A failed read skips the tick.
     // A lost link ends the re-send; the #1241 path handles the link and the
     // firmware limit stops the mount, as before.
-    void start_move_axis_resend() {
-        move_axis_resend_.start([this](util::OperationContext& ctx) {
+    // The new body's token: the move generation once it started.
+    std::uint64_t start_move_axis_resend() {
+        return move_axis_resend_.start([this](util::OperationContext& ctx) {
             const auto wants_resend = [this](int axis) {
                 return manual_axis_slewing_[axis] && manual_axis_resend_[axis];
             };

@@ -3523,6 +3523,11 @@ public:
         pulse_ops_[1].set_spawn_for_testing(std::move(spawn));
     }
 
+    void set_move_axis_cap_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        move_axis_cap_[0].set_spawn_for_testing(spawn);
+        move_axis_cap_[1].set_spawn_for_testing(std::move(spawn));
+    }
+
 private:
     // Ends every pulse's state: the IsPulseGuiding windows and the position holds and corrections they armed
     // (decision 0022 rule 2). AbortSlew, connect, disconnect and claim_slew_locked() (the slews, Park, FindHome) call
@@ -5197,6 +5202,13 @@ void set_status_poll_spawn_for_testing(TelescopeDriver& driver,
 void set_pulse_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
     if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
         celestron->set_pulse_spawn_for_testing(std::move(spawn));
+    }
+}
+
+void set_move_axis_cap_spawn_for_testing(TelescopeDriver& driver,
+                                         std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
+        celestron->set_move_axis_cap_spawn_for_testing(std::move(spawn));
     }
 }
 

@@ -53,6 +53,10 @@ void set_status_poll_spawn_for_testing(TelescopeDriver& driver,
 /// Same for both pulse-guide slots (one per axis), so a case can make a chain start fail.
 void set_pulse_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
 
+/// Same for both MoveAxis cap slots (one per axis, issue #2651), so a case can make a cap body's start fail.
+void set_move_axis_cap_spawn_for_testing(TelescopeDriver& driver,
+                                         std::function<std::thread(std::function<void()>)> spawn);
+
 /// Test seams for the status poll (decision 0010). `driver` must come from the factories above; anything else is
 /// ignored (poll_status_now_for_testing returns false).
 /// Pauses (true) or resumes the poll body's own ticks; a direct tick below still runs. Returns once no body tick is in
