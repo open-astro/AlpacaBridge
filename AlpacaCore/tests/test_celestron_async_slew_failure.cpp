@@ -251,16 +251,17 @@ TEST_CASE("Celestron MoveAxis - failed dispatch preserves a stored slew error",
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
     REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10000));
 
+    // The controller takes the rate command and never answers it: a reply timeout, the link stays up (a reset
+    // connection is a lost link at once, decision 0009 rule 2a, #2718).
     st->reject_goto.store(false);
-    REQUIRE(server.drop_connections());
+    st->silent.store(true);
     try {
         driver->move_axis(0, 0.5);
         FAIL("MoveAxis returned although the controller did not answer");
     } catch (const alpacacore::AlpacaException& ex) {
-        CHECK(ex.error_code() == alpacacore::AlpacaError::NotConnected);
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
     }
-    // The reset connection is a lost link at once (decision 0009 rule 2a, #2718): Slewing answers NotConnected.
-    CHECK(read_slewing(*driver) == SlewingRead::ThrewOther);
+    CHECK(read_slewing(*driver) == SlewingRead::Threw);
     driver->set_connected(false);
 }
 

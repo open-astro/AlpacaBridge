@@ -790,7 +790,7 @@ TEST_CASE("iOptron Telescope Driver - target getters refuse on a latched fault (
     driver->set_connected(false);
 }
 
-TEST_CASE("iOptron Telescope Driver - AbortSlew whose stop fails on a latched fault keeps the latch (#728)",
+TEST_CASE("iOptron Telescope Driver - AbortSlew on a reset connection after a latched fault answers NotConnected (#728)",
           "[ioptron][telescope][unit][fake][fault]") {
     alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
@@ -2577,7 +2577,7 @@ TEST_CASE("iOptron hold window - MoveAxis inside a GOTO's hold ends the window",
 // Rule 2: a failed dispatch clears the window. The link is reset, so the synchronous slew's :SRA# write fails; over
 // TCP that is a lost link at once (decision 0009 rule 2a, #2718), so Slewing answers NotConnected: the 5 s window is
 // not served over it.
-TEST_CASE("iOptron hold window - a synchronous SlewToCoordinates whose dispatch fails leaves Slewing false",
+TEST_CASE("iOptron hold window - a synchronous SlewToCoordinates on a reset connection leaves Slewing NotConnected",
           "[ioptron][telescope][unit][fake][hold-window]") {
     FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
@@ -2595,7 +2595,7 @@ TEST_CASE("iOptron hold window - a synchronous SlewToCoordinates whose dispatch 
 // mount's system status 2 during a guide pulse would read as Slewing. The link is reset after the pulse; over TCP that
 // is a lost link at once (decision 0009 rule 2a, #2718), so both getters answer NotConnected and neither serves the
 // cached status 2 or the pulse window.
-TEST_CASE("iOptron hold window - a failed synchronous slew does not unmask a guide pulse",
+TEST_CASE("iOptron hold window - a synchronous slew on a reset connection does not serve a guide pulse",
           "[ioptron][telescope][unit][fake][hold-window][pulseguide]") {
     FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
@@ -2615,7 +2615,7 @@ TEST_CASE("iOptron hold window - a failed synchronous slew does not unmask a gui
 
 // Rule 2: a Park whose :MP1# cannot be written takes its window back. Over TCP the failed write is a lost link at once
 // (decision 0009 rule 2a, #2718): Park and Slewing answer NotConnected.
-TEST_CASE("iOptron hold window - a Park whose command fails leaves Slewing false",
+TEST_CASE("iOptron hold window - a Park on a reset connection leaves Slewing NotConnected",
           "[ioptron][telescope][unit][fake][hold-window]") {
     FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
@@ -3634,7 +3634,7 @@ TEST_CASE("iOptron hold window - each pulse holds the other axis and ends the ea
 // Rule 2: a PulseGuide whose command cannot be written leaves no pulse window. Over TCP the failed write is a lost
 // link at once (decision 0009 rule 2a, #2718), so IsPulseGuiding and the Dec read answer NotConnected: neither the
 // window nor a predicted position is served over it.
-TEST_CASE("iOptron hold window - a PulseGuide whose command fails leaves no pulse window",
+TEST_CASE("iOptron hold window - a PulseGuide on a reset connection serves no pulse window",
           "[ioptron][telescope][unit][fake][hold-window][pulseguide]") {
     FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());

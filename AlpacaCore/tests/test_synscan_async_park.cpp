@@ -708,7 +708,7 @@ TEST_CASE("SynScan async - Unpark during a park cancels it", "[synscan][telescop
 // after that fails).
 // Unpark must throw once the park task is joined, and Slewing must not read
 // false: the park slew may still be running.
-TEST_CASE("SynScan async - Unpark reports stops it could not send", "[synscan][telescope][async]") {
+TEST_CASE("SynScan async - Unpark over a lost link reports the stop and Slewing answers NotConnected", "[synscan][telescope][async]") {
     alpacacore::test::FakeTaskClock clock;
     auto st = make_handset(clock);
     alpacacore::test::FakeMountServer server(st->responder());
@@ -746,7 +746,7 @@ TEST_CASE("SynScan async - Unpark reports stops it could not send", "[synscan][t
 // drops) it stops the mount; those stops were swallowed and Slewing set false.
 // A stop that fails must be logged at ERROR, and Slewing must not read false
 // while the mount cannot be reached.
-TEST_CASE("SynScan async - a failed park logs the stops it could not send", "[synscan][telescope][async]") {
+TEST_CASE("SynScan async - a park over a lost link logs the stop it could not send and Slewing answers NotConnected", "[synscan][telescope][async]") {
     std::atomic<int> stop_errors{0};
     struct SinkGuard {
         alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();

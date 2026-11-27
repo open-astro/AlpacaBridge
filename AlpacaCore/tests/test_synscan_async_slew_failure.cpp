@@ -234,7 +234,7 @@ TEST_CASE("SynScan async - a GOTO the handset never acknowledges surfaces throug
     driver->set_connected(false);
 }
 
-TEST_CASE("SynScan MoveAxis - failed dispatch preserves a stored slew error",
+TEST_CASE("SynScan MoveAxis - a dispatch on a reset connection loses the link at once",
           "[synscan][telescope][async][slewfailure]") {
     auto st = make_handset();
     alpacacore::test::FakeMountServer server(st->responder());
@@ -1102,7 +1102,7 @@ TEST_CASE("SynScan hold window - the pulse window is armed before the guide rate
 // rule 2a, #2718), so the window is checked through the lost link: IsPulseGuiding answers NotConnected. An earlier RA
 // stop whose tracking restore timed out leaves the cached mode owed to the handset, so the pulse reads no `t` and the
 // rate command is its first exchange after the slewing gate's `L`.
-TEST_CASE("SynScan hold window - a failed pulse rate command leaves IsPulseGuiding false",
+TEST_CASE("SynScan hold window - a pulse rate command on a reset connection answers NotConnected",
           "[synscan][telescope][hold-window][pulseguiding]") {
     alpacacore::test::FakeTaskClock clock;
     auto st = make_handset(clock);
@@ -1584,7 +1584,7 @@ TEST_CASE("SynScan PulseGuide - a disconnect joins a pulse end that waits for it
 // #2263: a replacement no longer cuts the older pulse short; it supersedes it only once its own rate command has
 // landed. The link is reset before the replacement, so its rate command fails: the older RA pulse was not
 // superseded and gets no stop, its window is put back (IsPulseGuiding true) and its own end still stops the axis.
-TEST_CASE("SynScan hold window - a replacement whose rate command fails leaves the older pulse running",
+TEST_CASE("SynScan hold window - a replacement pulse over a lost link answers NotConnected and stops nothing",
           "[synscan][telescope][hold-window][pulseguiding][motion-owner]") {
     alpacacore::test::FakeTaskClock clock;
     auto st = make_handset(clock);
@@ -1617,7 +1617,7 @@ TEST_CASE("SynScan hold window - a replacement whose rate command fails leaves t
 // #2263: a moving MoveAxis supersedes the pulse on its axis only once its own rate has landed. Its send fails here
 // (the link is reset just before it), so the Dec pulse got no stop and still owns its window; the MoveAxis left the
 // axis reported as possibly moving, as a failed MoveAxis send always has.
-TEST_CASE("SynScan hold window - a MoveAxis whose send fails leaves the pulse on its axis running",
+TEST_CASE("SynScan hold window - a MoveAxis over a lost link answers NotConnected and stops no pulse",
           "[synscan][telescope][hold-window][pulseguiding][moveaxis][motion-owner]") {
     alpacacore::test::FakeTaskClock clock;
     auto st = make_handset(clock);
@@ -1704,7 +1704,7 @@ TEST_CASE("SynScan hold window - a refused Park leaves a running pulse alone (#2
 // on the cancel-GOTO, after the cut-short pulse's blind stop has landed, so the axis stops that follow fail. A reply
 // timeout on the cancel does not fail AbortSlew, so the hangup is the only failure here, and over TCP it is a lost
 // link at once (decision 0009 rule 2a, #2718): the getters answer NotConnected, not the cleared window.
-TEST_CASE("SynScan hold window - an AbortSlew whose stop fails clears the window of a pulse it cut short",
+TEST_CASE("SynScan hold window - an AbortSlew whose stop meets a lost link answers NotConnected",
           "[synscan][telescope][hold-window][pulseguiding][abort]") {
     alpacacore::test::FakeTaskClock clock;
     auto st = make_handset(clock);
@@ -2331,7 +2331,7 @@ TEST_CASE("SynScan SlewToCoordinates - a blocking GOTO past its deadline stops t
     driver->set_connected(false);
 }
 
-TEST_CASE("SynScan async - a deadline stop that fails says the mount may still be moving (#2412)",
+TEST_CASE("SynScan async - a deadline stop over a lost link answers NotConnected (#2412)",
           "[synscan][telescope][async][slewfailure][goto-safety]") {
     alpacacore::test::FakeTaskClock clock;
     auto st = make_handset(clock);
@@ -2517,7 +2517,7 @@ TEST_CASE("SynScan MoveAxis - a MoveAxis not renewed for 60 s is stopped and Sle
 // lost link at once (decision 0009 rule 2a, #2718), so the premise of a bound watching the axis over a live link
 // cannot arise: the start is refused as NotConnected, the link is gone and no bound body is spawned for the axis
 // (the link's loss ends any motion bound).
-TEST_CASE("SynScan MoveAxis - a start that threw is still bounded", "[synscan][telescope][goto-safety]") {
+TEST_CASE("SynScan MoveAxis - a start over a lost link spawns no bound", "[synscan][telescope][goto-safety]") {
     MoveAxisBoundRig rig;
     REQUIRE(rig.server.drop_connections());
     // Dec: an RA start reads the tracking mode first, and that read fails before any rate command is sent.
@@ -2551,7 +2551,7 @@ TEST_CASE("SynScan MoveAxis - a stop whose tracking restore failed is not bounde
 // lost link at once (decision 0009 rule 2a, #2718), so the call throws NotConnected, the link is gone and the cap's
 // own stop is never attempted over it (the bound that outlives a failed stop is the one in "a bound stop that fails
 // is not retried", where the cap's own write finds the dropped link).
-TEST_CASE("SynScan MoveAxis - a stop that threw leaves the axis bounded", "[synscan][telescope][goto-safety]") {
+TEST_CASE("SynScan MoveAxis - a stop over a lost link spawns no bound", "[synscan][telescope][goto-safety]") {
     MoveAxisBoundRig rig;
     rig.start_move(1);
     rig.advance(std::chrono::seconds(30));
