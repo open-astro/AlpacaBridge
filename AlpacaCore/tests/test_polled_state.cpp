@@ -482,3 +482,47 @@ TEST_CASE("PolledState - lose_link sets lost at once and the poll ends and calls
     rig.state->reset();
     CHECK_FALSE(rig.state->link_lost());
 }
+
+// Falsified by: polled_state.h:link_silent() compare only measured_at against kLinkStalenessBound.
+TEST_CASE("PolledState - a write landing in every poll does not latch link loss on a healthy device",
+          "[polled_state][unit]") {
+    Rig rig;
+    REQUIRE(rig.state->start());
+    rig.state->pause_for_testing(true);  // the poll thread idles; the test drives each cycle
+    int writes = 0;
+    rig.during = [&] { rig.state->write([&](Frame& f) { f.value = ++writes + 1000; }); };
+
+    for (auto elapsed = 0ms; elapsed < 40s; elapsed += 500ms) {
+        rig.state->poll_now_for_testing();  // the probe answers, the write lands mid-probe, the frame is dropped
+        INFO("task time " << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() << " ms");
+        REQUIRE_NOTHROW(rig.state->served());
+        REQUIRE_FALSE(rig.state->link_lost());
+        rig.clock.advance(500ms);
+    }
+    CHECK(rig.state->fault().empty());
+    CHECK(rig.lost_calls.load() == 0);
+    rig.state->stop_and_join();
+}
+
+// Falsified by: polled_state.h:poll_once() record the answered-probe time even when the probe throws.
+TEST_CASE("PolledState - a probe failing for the full loss bound still loses the link", "[polled_state][unit]") {
+    Rig rig;
+    REQUIRE(rig.state->start());
+    rig.state->pause_for_testing(true);
+    rig.fail = true;
+    for (auto elapsed = 0ms; elapsed < alpacacore::util::kLinkStalenessBound; elapsed += 500ms) {
+        rig.state->poll_now_for_testing();
+        CHECK_FALSE(rig.state->link_lost());
+        rig.clock.advance(500ms);
+    }
+    rig.state->poll_now_for_testing();
+    CHECK(rig.state->link_lost());
+    CHECK(rig.lost_calls.load() == 1);
+    try {
+        (void)rig.state->served();
+        FAIL("expected NotConnected");
+    } catch (const AlpacaException& ex) {
+        CHECK(ex.error_code() == AlpacaError::NotConnected);
+    }
+    rig.state->stop_and_join();
+}
