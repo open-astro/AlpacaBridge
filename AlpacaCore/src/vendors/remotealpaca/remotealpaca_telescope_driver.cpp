@@ -15,8 +15,8 @@
 // stays here:
 //
 // - The frame (decision 0010): RightAscension, Declination, Altitude, Azimuth, SiderealTime, UTCDate, Slewing,
-//   Tracking, AtPark, AtHome, SideOfPier and IsPulseGuiding, twelve GETs per poll. SiderealTime and UTCDate are served
-//   advanced by the frame's age: they are clocks, and the age is known.
+//   Tracking, AtPark, AtHome, SideOfPier and IsPulseGuiding, twelve GETs per poll. They are clocks: SiderealTime is
+//   served advanced by the frame's age, UTCDate through util::UtcOffset anchored where it was read (decision 0014).
 // - What the Connect reads once (Settings): the capabilities, CanMoveAxis and AxisRates per axis, the alignment, the
 //   optics, the site, the rates, the targets, DoesRefraction and SlewSettleTime. They change only by a write, so this
 //   server's writes write them through; a change another client makes upstream shows at the next Connect.
@@ -48,6 +48,7 @@
 #include <alpacacore/util/polled_state.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/telescope_command_gate.h>
+#include <alpacacore/util/utc_offset.h>
 #include <alpacacore/vendor/remotealpaca/remote_alpaca_client.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_telescope_driver.h>
 #include <alpacacore/version.h>
@@ -109,7 +110,7 @@ struct Frame {
     Answer<double> altitude;
     Answer<double> azimuth;
     Answer<double> sidereal_time;
-    Answer<TimePoint> utc_date;
+    Answer<util::UtcOffset> utc_date;  // the upstream's UTCDate, anchored on the task clock where it was read
     Answer<bool> slewing;
     Answer<bool> tracking;
     Answer<bool> at_park;
@@ -514,7 +515,7 @@ public:
         });
     }
 
-    // Clocks: the upstream's value advanced by the frame's age.
+    // SiderealTime: the upstream's value advanced by the frame's age on the task clock (decision 0005 rule 3).
     double get_sidereal_time() const override {
         return proxy_.with_connected([this](const Proxy::State& state) {
             const auto reading = state.served();
@@ -524,11 +525,11 @@ public:
         });
     }
 
+    // UTCDate (decision 0014): the upstream's value, or this server's write, plus the task-clock time since it was
+    // read or written (util::UtcOffset). The frame goes with every Connect and Disconnect, and the offset with it.
     TimePoint get_utc_date() const override {
         return proxy_.with_connected([this](const Proxy::State& state) {
-            const auto reading = state.served();
-            return reading.value.utc_date.get() +
-                   std::chrono::duration_cast<TimePoint::duration>(proxy_.clock().now() - reading.measured_at);
+            return *state.served().value.utc_date.get().current(proxy_.clock().now());
         });
     }
 
@@ -536,13 +537,9 @@ public:
         require_frame();
         run([this, utc](util::OperationContext& ctx) {
             proxy_.client().put("utcdate", {{"UTCDate", device_state_timestamp(utc)}});
-            write_through(ctx, [this, utc](Proxy::State& state) {
-                // Served as the stored value plus the frame's age, so the stored value is the write less that age.
-                const auto age = state.age().value_or(std::chrono::nanoseconds{0});
-                state.write([&](Frame& frame) {
-                    frame.utc_date = set_to(utc - std::chrono::duration_cast<TimePoint::duration>(age));
-                });
-            });
+            util::UtcOffset offset;
+            offset.set(utc, proxy_.clock().now());
+            write_frame(ctx, [offset](Frame& frame) { frame.utc_date = set_to(offset); });
         });
     }
 
@@ -1188,10 +1185,13 @@ private:
         frame.azimuth = answer_of([&] { return c.get_double("azimuth"); });
         frame.sidereal_time = answer_of([&] { return c.get_double("siderealtime"); });
         const Answer<std::string> utc = answer_of([&] { return c.get_string("utcdate"); });
+        const auto utc_read_at = proxy_.clock().now();  // the UTCDate's anchor: when the upstream answered it
         if (!utc.value) {
             frame.utc_date = {std::nullopt, utc.error_number, utc.error_message};
         } else if (const auto parsed = parse_utc(*utc.value)) {
-            frame.utc_date = set_to(*parsed);
+            util::UtcOffset offset;
+            offset.set(*parsed, utc_read_at);
+            frame.utc_date = set_to(offset);
         } else {
             frame.utc_date = {std::nullopt, AlpacaError::DriverException,
                               "Upstream UTCDate '" + *utc.value + "' is not an ISO 8601 UTC time"};

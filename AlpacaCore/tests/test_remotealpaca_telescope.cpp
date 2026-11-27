@@ -271,6 +271,33 @@ TEST_CASE("Remote Alpaca Telescope Driver - UTCDate and SiderealTime advance wit
     CHECK(t.get_utc_date() == alpacacore::test::parse_timestamp("2028-02-29T12:00:00.000Z"));
 }
 
+// Decision 0014: a UTCDate write is anchored on the task clock when it is written (util::UtcOffset), so it reads back
+// advanced by exactly the task-clock time since, whatever the frame's age was at the write; a poll then serves the
+// upstream's own clock again, anchored where it was read.
+TEST_CASE("Remote Alpaca Telescope Driver - a UTCDate write reads back advanced by task-clock time",
+          "[remotealpaca][telescope][unit]") {
+    Rig rig;
+    rig.connect();
+    auto& t = *rig.driver;
+    remote::set_poll_paused_for_testing(t, true);
+    rig.poll(std::chrono::seconds(15));  // the frame is 15 s old when the write lands (the loss bound is 30 s)
+    const auto written = alpacacore::test::parse_timestamp("2027-01-15T08:00:00.000Z");
+    t.set_utc_date(written);
+    CHECK(t.get_utc_date() == written);
+    rig.poll(std::chrono::seconds(7));
+    CHECK(t.get_utc_date() == written + std::chrono::seconds(7));
+    rig.clock.advance(std::chrono::milliseconds(250));
+    CHECK(t.get_utc_date() == written + std::chrono::milliseconds(7250));
+    // The next poll serves the upstream's clock, which took the write: its value, anchored where it was read.
+    remote::set_poll_paused_for_testing(t, false);
+    rig.poll();
+    CHECK(t.get_utc_date() == written);  // the scripted upstream's clock does not run
+    remote::set_poll_paused_for_testing(t, true);
+    rig.poll(std::chrono::seconds(2));
+    CHECK(t.get_utc_date() == written + std::chrono::seconds(2));
+    remote::set_poll_paused_for_testing(t, false);
+}
+
 TEST_CASE(
     "Remote Alpaca Telescope Driver - SlewToCoordinatesAsync is forwarded and Slewing and the targets read at once",
     "[remotealpaca][telescope][unit]") {
