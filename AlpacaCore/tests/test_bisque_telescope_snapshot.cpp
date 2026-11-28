@@ -722,7 +722,11 @@ TEST_CASE("Bisque snapshot - Name, Connected and RightAscension answer while Fin
     rig.mount.slew_complete_ms = 0;
     advance_until_done(rig, done, worker.get_id());
     worker.join();
-    // The control path read the mount after FindHome: a read right after sees it.
+    // FindHome returned at once (#2809); its body sets AtHome once TheSkyX's home loop answers.
+    const auto deadline = std::chrono::steady_clock::now() + seconds(10);
+    while (!rig.driver->get_at_home() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(5));
+    }
     CHECK(rig.driver->get_at_home());
 }
 
@@ -759,6 +763,11 @@ TEST_CASE("Bisque snapshot - a FindHome past the link-loss bound does not read a
     rig.mount.find_home_ms = 0;
     advance_until_done(rig, done, worker.get_id());
     worker.join();
+    // FindHome returned at once (#2809); its body polls IsSlewComplete on the task clock until the home ends.
+    for (int second = 0; second < 70 && !rig.driver->get_at_home(); ++second) {
+        rig.clock.advance(seconds(1));
+        REQUIRE(rig.clock.wait_for_woken_settled(seconds(5)));
+    }
     CHECK(rig.driver->get_at_home());
 }
 
@@ -924,6 +933,11 @@ TEST_CASE("Bisque snapshot - Connected and AtPark answer while a Park polls IsPa
     CHECK(timed([&] { (void)rig.driver->get_connected(); }) < milliseconds(500));
     CHECK(timed([&] { (void)rig.driver->get_at_park(); }) < milliseconds(500));
     worker.join();
+    // Park returned at once (#2809); its body sets AtPark once the held IsParked poll answers.
+    const auto parked_by = std::chrono::steady_clock::now() + seconds(10);
+    while (!rig.driver->get_at_park() && std::chrono::steady_clock::now() < parked_by) {
+        std::this_thread::sleep_for(milliseconds(5));
+    }
     CHECK(rig.driver->get_at_park());
 }
 
