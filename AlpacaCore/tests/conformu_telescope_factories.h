@@ -35,6 +35,12 @@
 #include "fake_mount_server.h"
 #include "fake_synscan_handset.h"
 #endif
+#ifdef FAKE_CONFORMU_BISQUE
+#include <alpacacore/vendor/bisque/bisque_telescope_driver.h>
+
+#include "fake_bisque_mount.h"
+#include "fake_mount_server.h"
+#endif
 #ifdef FAKE_CONFORMU_IOPTRON
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 
@@ -100,6 +106,28 @@ inline std::unique_ptr<TelescopeDriver> make_synscan_telescope(int device_number
     return vendor::synscan::create_synscan_telescope_with_site(device_number, connection,
                                                                vendor::synscan::SynScanVersion::V4, -33.856784,
                                                                151.215297, 42.0, /*sync_time_on_connect=*/true);
+}
+#endif
+
+#ifdef FAKE_CONFORMU_BISQUE
+// The TheSkyX responder in ConformU mode (#2697) behind a FakeMountServer on loopback TCP: a GOTO, a park and a home
+// take their travel time and a DirectGuide holds its reply for its move, as TheSkyX's synchronous MoveTelescope does.
+// The driver runs on the real task clock with the made-up Sydney Opera House site (never a real site). The mount is
+// declared first, so it outlives the server that holds its responder.
+struct BisqueHost {
+    FakeBisqueMount mount{FakeBisqueMount::conformu_motion_config()};
+    FakeMountServer server{mount.responder()};
+    BisqueHost() { mount.guide_holds_for_pulse = true; }
+};
+inline BisqueHost& bisque_mount() {
+    static BisqueHost host;
+    return host;
+}
+inline std::unique_ptr<TelescopeDriver> make_bisque_telescope(int device_number) {
+    vendor::bisque::ConnectionInfo connection;
+    connection.host = "127.0.0.1";
+    connection.tcp_port = bisque_mount().server.port();
+    return vendor::bisque::create_bisque_telescope_with_site(device_number, connection, -33.856784, 151.215297, 42.0);
 }
 #endif
 

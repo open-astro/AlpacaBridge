@@ -47,6 +47,8 @@ on:
       - "AlpacaCore/include/alpacacore/vendor/onstep/**"
       - "AlpacaCore/src/vendors/ioptron/**"
       - "AlpacaCore/include/alpacacore/vendor/ioptron/**"
+      - "AlpacaCore/src/vendors/bisque/**"
+      - "AlpacaCore/include/alpacacore/vendor/bisque/**"
       - "AlpacaCore/src/vendors/qhy/**"
       - "AlpacaCore/include/alpacacore/vendor/qhy/**"
       - "AlpacaCore/src/vendors/playerone/**"
@@ -81,6 +83,7 @@ on:
       - "AlpacaCore/tests/conformu_telescope_factories.h"
       - "AlpacaCore/tests/fake_ioptron_mount.h"
       - "AlpacaCore/tests/fake_mount_motion_model.h"
+      - "AlpacaCore/tests/fake_bisque_mount.h"
       - "AlpacaCore/tests/fake_ioptron_ieaf.h"
       - "AlpacaCore/tests/fake_ioptron_ifr.h"
       - "AlpacaCore/tests/fake_qhy_qfocuser.h"
@@ -238,14 +241,14 @@ jobs:
                          "playerone": "Player One", "svbony": "SVBONY",
                          "iguider": "iOptron", "gphoto": "GPhoto", "gemini": "Gemini", "touptek": "ToupTek",
                          "altair": "Altair", "remotealpaca": "Remote Alpaca",
-                         "wandererastro": "WandererAstro", "weewx": "WeeWX"}
+                         "wandererastro": "WandererAstro", "weewx": "WeeWX", "bisque": "Bisque"}
           # Test files that serve one vendor's rows only, beside its fake_<vendor>_*.h headers, or a few vendors' (a
           # tuple). A fake_*.h that is not named for a vendor counts as the vendor of the run row that names it:
           # fake_mount_server.h serves the ZWO, Celestron, SynScan and OnStep rows, so a change to it selects those
           # rows only by the row's own fake name.
           VENDOR_FILES = {"AlpacaCore/tests/onstep_controller_model.h": "onstep",
-                          "AlpacaCore/tests/conformu_telescope_factories.h": ("ioptron", "synscan", "celestron"),
-                          "AlpacaCore/tests/fake_mount_motion_model.h": ("ioptron", "synscan", "celestron"),
+                          "AlpacaCore/tests/conformu_telescope_factories.h": ("ioptron", "synscan", "celestron", "bisque"),
+                          "AlpacaCore/tests/fake_mount_motion_model.h": ("ioptron", "synscan", "celestron", "bisque"),
                           "AlpacaCore/tests/nexstar_hc_wire.h": ("synscan", "celestron"),
                           "AlpacaCore/tests/conformu_skywatcher_factory.h": "skywatcher",
                           "AlpacaCore/tests/skywatcher_fake_clock.h": "skywatcher",

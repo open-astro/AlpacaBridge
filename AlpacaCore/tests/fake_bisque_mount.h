@@ -12,16 +12,23 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
+
+#include "fake_mount_motion_model.h"
 
 namespace alpacacore::test {
 
@@ -81,11 +88,60 @@ namespace alpacacore::test {
  * `abort_ends_park` set, an Abort() that is not ignored also ends it (off by default: the #1838 cases let the park
  * finish after an AbortSlew).
  *
+ * ConformU mode (#2697, the fake ConformU row of #2078): built from a FakeMountMotionModel::Config, the same wire
+ * answers the motion commands and the reads from the shared motion model instead. A SlewToRaDec moves the position
+ * over its travel time and IsSlewComplete reads 0 until it lands; ParkAndDoNotDisconnect and FindHome slew to the
+ * model's park and home positions (a park or home in flight reads as a slew, IsParked reads true on arrival);
+ * Sync re-labels the position; SetTracking turns tracking on and off (off, RA drifts east); DoCommand(9) runs one axis
+ * at its open-loop rate until DoCommand(10); a DirectGuide MoveTelescope moves each axis by its arc seconds at
+ * kGuideRateSidereal; Abort() stops every motion; GetAzAlt, Pier Side and the UTC read come from the model and its
+ * clock. With `guide_holds_for_pulse` set (the fake ConformU host sets it), a DirectGuide holds its reply until the
+ * move is done, as TheSkyX's synchronous MoveTelescope (lAsynchronous = 0) does; off, it answers at once. Of the
+ * scripted default's knobs only mute, latency_ms and reject_connection apply in ConformU mode; the position, pier,
+ * *_ms delay, fail_* and on_* knobs do not.
+ *
+ * KNOWN PARITY GAPS of ConformU mode (what TheSkyX does and this fake does not): no horizon or slew limits (TheSkyX
+ * refuses a slew below its horizon); SetParkPosition is acknowledged and does not move the model's park position;
+ * a GOTO, a park or a home runs in a straight line at one rate, with no acceleration or settle.
+ *
  * Counters are atomics: the server's handler thread writes them while the
  * test thread reads.
  */
 class FakeBisqueMount {
 public:
+    /// The scripted default the driver cases use.
+    FakeBisqueMount() = default;
+    /// ConformU mode: answers from a FakeMountMotionModel built from @p motion (see the class comment).
+    explicit FakeBisqueMount(FakeMountMotionModel::Config motion)
+        : motion_(std::make_unique<FakeMountMotionModel>(std::move(motion))) {}
+    FakeBisqueMount(const FakeBisqueMount&) = delete;
+    FakeBisqueMount& operator=(const FakeBisqueMount&) = delete;
+
+    /// The motion model of a ConformU-mode mount; null for the scripted default.
+    FakeMountMotionModel* motion() const { return motion_.get(); }
+
+    /// The model setup of the fake ConformU row: the made-up Sydney Opera House site (never a real observing site),
+    /// a 4 degree/s GOTO (the fake's rate, not a measured Paramount one), home on the pole counterweight down and
+    /// park at hour angle -6 h on the equator, so a park and a home end in different places.
+    static FakeMountMotionModel::Config conformu_motion_config() {
+        FakeMountMotionModel::Config config;
+        config.latitude_degrees = -33.856784;
+        config.longitude_degrees = 151.215297;
+        config.slew_deg_per_s = 4.0;
+        config.home = {0.0, -90.0};
+        config.park = {-6.0, 0.0};
+        return config;
+    }
+
+    /// The DoCommand(9) open-loop rates by index, in multiples of sidereal: the nine presets of the INDI reference
+    /// driver the Bisque driver follows (bisque.instructions.md).
+    static constexpr double kOpenLoopRatesSidereal[] = {1.0, 2.0, 4.0, 8.0, 32.0, 64.0, 128.0, 256.0, 512.0};
+    /// The rate a ConformU-mode MoveTelescope moves each axis at, in multiples of sidereal.
+    static constexpr double kGuideRateSidereal = 0.5;
+
+    /// ConformU mode: a DirectGuide holds its reply until its move ends (real time; off by default).
+    std::atomic<bool> guide_holds_for_pulse{false};
+
     std::atomic<int> park_polls_needed{0};
     std::atomic<int> slew_polls_needed{0};
     std::atomic<int> fail_slew_polls{0};
@@ -175,6 +231,9 @@ private:
         if (has(command, "ConnectAndDoNotUnpark")) return reject_connection ? "0#" : "1#";
         if (mute) return "";
         if (latency_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(latency_ms.load()));
+        if (motion_) {
+            if (auto reply = answer_modelled(command)) return *reply;
+        }
         if (has(command, ".Abort()")) {
             ++abort_commands;
             note("Abort");
@@ -324,6 +383,152 @@ private:
         return "|No error. Error = 0.OK#";
     }
 
+    // ---- ConformU mode: the commands the motion model answers (#2697) ----
+
+    static std::string ok_reply(const std::string& value) { return "|No error. Error = 0." + value + "#"; }
+
+    // The arguments of `name(a, b` in @p command; false when they do not parse.
+    static bool args_of(const std::string& command, const char* name, double& a, double& b) {
+        const auto at = command.find(name);
+        if (at == std::string::npos) return false;
+        const std::string format = std::string(name) + "%lf, %lf";
+        return std::sscanf(command.c_str() + at, format.c_str(), &a, &b) == 2;
+    }
+
+    static std::string pair_reply(double a, double b) {
+        char text[96];
+        std::snprintf(text, sizeof(text), "%.9f,%.9f", a, b);
+        return ok_reply(text);
+    }
+
+    // DirectGuide MoveTelescope(dRa, dDec): each axis moves its arc seconds (RA in arc seconds of RA angle, east
+    // positive; Dec north positive) at kGuideRateSidereal. Returns how long the longer move runs.
+    std::chrono::milliseconds modelled_guide(double ra_arcsec, double dec_arcsec) {
+        using Axis = FakeMountMotionModel::Axis;
+        const double speed = kGuideRateSidereal * FakeMountMotionModel::kSiderealDegPerSec;
+        std::chrono::milliseconds longest{0};
+        const auto move = [&](Axis axis, double arcsec) {
+            if (arcsec == 0.0) return;
+            const double seconds = std::fabs(arcsec) / 3600.0 / speed;
+            const auto run = std::chrono::milliseconds(std::llround(seconds * 1000.0));
+            motion_->pulse(axis, arcsec > 0.0 ? speed : -speed, run);
+            longest = std::max(longest, run);
+        };
+        move(Axis::Ra, ra_arcsec);
+        move(Axis::Dec, dec_arcsec);
+        return longest;
+    }
+
+    // nullopt: the command is answered by the scripted branches below (the handshake, SetParkPosition, the rest).
+    std::optional<std::string> answer_modelled(const std::string& command) {
+        using Axis = FakeMountMotionModel::Axis;
+        const std::string ok = ok_reply("OK");
+        if (has(command, ".Abort()")) {
+            ++abort_commands;
+            note("Abort");
+            motion_->stop();
+            return ok;
+        }
+        if (has(command, "DoCommand(9,")) {
+            ++move_starts;
+            note("MoveStart");
+            int direction = -1;
+            int rate = -1;
+            constexpr int kRates = static_cast<int>(std::size(kOpenLoopRatesSidereal));
+            const char* args = command.c_str() + command.find("DoCommand(9,");
+            if (std::sscanf(args, "DoCommand(9,'%d|%d'", &direction, &rate) != 2 || direction < 0 || direction > 3 ||
+                rate < 0 || rate >= kRates) {
+                return ok_reply("TypeError: DoCommand(9) arguments are invalid");
+            }
+            // 0 North, 1 South (Dec), 2 East, 3 West (RA): sky directions, so east raises RA and north raises Dec.
+            const double deg_per_s = kOpenLoopRatesSidereal[rate] * FakeMountMotionModel::kSiderealDegPerSec;
+            motion_->move_axis(direction < 2 ? Axis::Dec : Axis::Ra,
+                               (direction == 0 || direction == 2) ? deg_per_s : -deg_per_s);
+            return ok;
+        }
+        if (has(command, "DoCommand(10,")) {  // stops the open-loop motion on both axes, not a GOTO
+            ++move_stops;
+            note("MoveStop");
+            motion_->move_axis(Axis::Ra, 0.0);
+            motion_->move_axis(Axis::Dec, 0.0);
+            return ok;
+        }
+        if (has(command, "sky6StarChart.DocumentProperty(5)") && has(command, "new Date().getTime()")) {
+            ++utc_reads;
+            const auto millis =
+                std::chrono::duration_cast<std::chrono::milliseconds>(motion_->now().time_since_epoch()).count();
+            return ok_reply(std::to_string(millis));
+        }
+        if (has(command, "FindHome")) {
+            ++find_home_commands;
+            motion_->go_home();
+            return ok;
+        }
+        if (has(command, "GetRaDec")) {
+            ++position_reads;
+            const auto state = motion_->state();
+            return pair_reply(state.ra_hours, state.dec_degrees);
+        }
+        if (has(command, "Pier Side")) return ok_reply(motion_->pier_side() == 1 ? "1" : "0");
+        if (has(command, "GetAzAlt")) {
+            ++altaz_reads;
+            return pair_reply(motion_->azimuth_degrees(), motion_->altitude_degrees());
+        }
+        if (has(command, "ParkAndDoNotDisconnect")) {
+            ++park_commands;
+            motion_->park();
+            return ok;
+        }
+        if (has(command, "IsParked")) {
+            note("IsParked");
+            return ok_reply(motion_->parked() ? "true" : "false");
+        }
+        if (has(command, "sky6RASCOMTele.Unpark()")) {
+            ++unpark_commands;
+            motion_->unpark();
+            return ok;
+        }
+        double a = 0.0;
+        double b = 0.0;
+        if (has(command, "Sync(")) {
+            if (!args_of(command, "Sync(", a, b)) return ok_reply("TypeError: Sync arguments are invalid");
+            motion_->set_position(a, b);
+            return ok;
+        }
+        if (has(command, "SlewToRaDec")) {
+            ++slew_commands;
+            note("SlewToRaDec");
+            if (!args_of(command, "SlewToRaDec(", a, b))
+                return ok_reply("TypeError: SlewToRaDec arguments are invalid");
+            (void)motion_->goto_radec(a, b);
+            return ok;
+        }
+        if (has(command, "IsSlewComplete")) {  // a park or a home in flight reads as a slew
+            ++slew_complete_queries;
+            return ok_reply(motion_->slewing() ? "0" : "1");
+        }
+        if (has(command, "DirectGuide")) {
+            ++guide_commands;
+            if (!args_of(command, "MoveTelescope(", a, b)) {
+                return ok_reply("TypeError: MoveTelescope arguments are invalid");
+            }
+            const auto run = modelled_guide(a, b);
+            if (guide_holds_for_pulse) std::this_thread::sleep_for(run);
+            return ok;
+        }
+        if (has(command, "SetTracking(")) {
+            int on = 0;
+            if (std::sscanf(command.c_str() + command.find("SetTracking("), "SetTracking(%d", &on) != 1) {
+                return ok_reply("TypeError: SetTracking arguments are invalid");
+            }
+            motion_->set_tracking(on != 0);
+            return ok;
+        }
+        if (has(command, "IsTracking")) return ok_reply(motion_->tracking() ? "1" : "0");
+        return std::nullopt;
+    }
+
+    std::unique_ptr<FakeMountMotionModel> motion_;  // ConformU mode only
     std::atomic<bool> parking_{false};
     mutable std::mutex ledger_mutex_;
     std::vector<std::string> ledger_;                       // under ledger_mutex_
