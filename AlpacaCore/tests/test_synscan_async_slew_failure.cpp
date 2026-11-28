@@ -1592,8 +1592,8 @@ TEST_CASE("SynScan PulseGuide - a disconnect joins a pulse end that waits for it
 // #2263: a replacement supersedes the older pulse only once its own rate command has landed. Here the handset hangs
 // up on a status read before the replacement, a lost link at once over TCP (decision 0009 rule 2a, #2718): the
 // replacement answers NotConnected, no stop of the older pulse reaches the handset, and the getters answer
-// NotConnected. The #2263 premise, a rate command that fails on a link that stays up, needs a follow-up send-failure
-// test seam.
+// NotConnected. The #2263 premise, a rate command that fails on a link that stays up, is the case "SynScan hold
+// window - a replacement whose rate command fails leaves the older pulse running".
 TEST_CASE("SynScan hold window - a replacement pulse over a lost link answers NotConnected and stops nothing",
           "[synscan][telescope][hold-window][pulseguiding][motion-owner]") {
     alpacacore::test::FakeTaskClock clock;
@@ -1627,7 +1627,8 @@ TEST_CASE("SynScan hold window - a replacement pulse over a lost link answers No
 // #2263: a moving MoveAxis supersedes the pulse on its axis only once its own rate has landed. Here the handset hangs
 // up on a status read before it, a lost link at once over TCP (decision 0009 rule 2a, #2718): the MoveAxis answers
 // NotConnected, no stop of the Dec pulse reaches the handset, and IsPulseGuiding answers NotConnected. The #2263
-// premise, a MoveAxis send that fails on a link that stays up, needs a follow-up send-failure test seam.
+// premise, a MoveAxis send that fails on a link that stays up, is the case "SynScan hold window - a MoveAxis whose
+// send fails leaves the pulse on its axis running".
 TEST_CASE("SynScan hold window - a MoveAxis over a lost link answers NotConnected and stops no pulse",
           "[synscan][telescope][hold-window][pulseguiding][moveaxis][motion-owner]") {
     alpacacore::test::FakeTaskClock clock;
@@ -1714,7 +1715,8 @@ TEST_CASE("SynScan hold window - a refused Park leaves a running pulse alone (#2
 // follow fail. A reply timeout on the cancel does not fail AbortSlew, so the hangup is the only failure here, and over
 // TCP it is a lost link at once (decision 0009 rule 2a, #2718): AbortSlew throws, Connected reads false, and
 // IsPulseGuiding and Tracking answer NotConnected. The cleared window and the owed restore (Tracking false) of an
-// AbortSlew whose stops fail on a link that stays up need a follow-up send-failure test seam.
+// AbortSlew whose stops fail on a link that stays up is the case "SynScan hold window - an AbortSlew whose stop
+// fails clears the window of a pulse it cut short".
 TEST_CASE("SynScan hold window - an AbortSlew whose stop meets a lost link answers NotConnected",
           "[synscan][telescope][hold-window][pulseguiding][abort]") {
     alpacacore::test::FakeTaskClock clock;

@@ -3719,7 +3719,7 @@ TEST_CASE("iOptron Telescope Driver - a disconnect inside the clock-sync start d
 // Over TCP a site command on a reset connection is a hangup, a lost link at once (decision 0009 rule 2a, #2718): the
 // first :SLA fails, Connected reads false, and a disconnect over the lost link joins at once without the clock moving.
 // The open-astro#1223 premise, a disconnect inside the 750 ms retry delay after a failed site command, cannot be built
-// over TCP any more and needs a follow-up send-failure test seam.
+// over TCP any more. That case is not built yet; the #2753 send-fault seam (IoptronSendFault) can build it.
 TEST_CASE(
     "iOptron Telescope Driver - a site command on a reset connection loses the link and a disconnect joins at once",
     "[ioptron][telescope][unit][fake][taskclock]") {
