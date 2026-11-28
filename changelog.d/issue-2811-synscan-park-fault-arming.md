@@ -1,0 +1,3 @@
+### Fixed (tests)
+
+- **SynScan Park tracking-stop case steps only with the Park body** (tests, issue #2811): "SynScan async - a Park tracking-stop failure persists through Slewing" stepped the fake clock whenever any thread was parked on it, and the status poll always is. On a busy arm64 board the 120 steps (30 s of virtual time) ran out before the Park body had sent its tracking stop, so the kept failure never surfaced (up to 11 of 240 runs with 24 copies at once). Each step now waits for the Park body's own thread, named through the slew spawn seam (a `ParkBodyThread` helper), and the case arms its fault before Park starts.

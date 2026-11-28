@@ -105,6 +105,33 @@ bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<b
     return pred();
 }
 
+// Names the Park body's thread through the slew spawn seam, so a stepping loop waits for the body's own wait on the
+// clock. The status poll is always parked on the clock, so a waiter count is met while the body is still sending its
+// GOTO, and virtual time then runs ahead of the body (#2561, #2811). Declare it before the driver: the driver joins the
+// body thread before this goes.
+class ParkBodyThread {
+public:
+    void install(alpacacore::TelescopeDriver& driver) {
+        alpacacore::vendor::synscan::set_slew_spawn_for_testing(driver, [this](std::function<void()> body) {
+            std::thread thread([this, body = std::move(body)] {
+                body();
+                ended_.store(true);
+            });
+            id_.store(thread.get_id());
+            return thread;
+        });
+    }
+
+    // Whether the body is parked on the clock, or has ended, within 5 s of real time.
+    bool parked(alpacacore::test::FakeTaskClock& clock) const {
+        return ended_.load() || clock.wait_for_waiter_thread(id_.load(), std::chrono::seconds(5));
+    }
+
+private:
+    std::atomic<std::thread::id> id_{};
+    std::atomic<bool> ended_{false};
+};
+
 }  // namespace
 
 TEST_CASE("SynScan - get_connected() answers at once while a connect is in flight", "[synscan][telescope][async]") {
@@ -968,18 +995,23 @@ TEST_CASE("SynScan async - a Park tracking-stop failure persists through Slewing
     auto st = make_handset(clock);
     alpacacore::test::FakeMountServer server(st->responder());
     REQUIRE(server.ok());
+    ParkBodyThread park_body;
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
         std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+    park_body.install(*driver);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
-    REQUIRE_NOTHROW(driver->park());
+    // Armed before the Park starts, so the first tracking stop the Park sends is refused (#2811).
     st->reject_tracking_stop.store(true);
+    REQUIRE_NOTHROW(driver->park());
     bool surfaced = false;
+    // Each step waits for the Park body's own wait: on a busy host a waiter count met by the status poll let the
+    // 120 steps run out before the body had sent its tracking stop (#2811).
     for (int i = 0; i < 120 && !surfaced; ++i) {
-        clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+        REQUIRE(park_body.parked(clock));
         clock.advance(std::chrono::milliseconds(250));
-        clock.wait_for_woken_settled(std::chrono::seconds(2));
+        REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
         try {
             (void)driver->get_slewing();
         } catch (const alpacacore::AlpacaException& ex) {
@@ -1138,6 +1170,14 @@ TEST_CASE("SynScan case B - already at park target still parks", "[park][synscan
     driver->set_connected(false);
 }
 
+// The mount is held 3 h of RA from where SetPark stored the park position, and the status poll has read it (a stale
+// or unread origin never allows the far-miss repeat, #2763).
+void move_mount_away(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver,
+                     FakeSynScanHandset& st) {
+    st.set_position("20000000,00000000#");
+    REQUIRE(advance_until(clock, [&] { return std::abs(driver.get_right_ascension() - 3.0) < 0.01; }));
+}
+
 // #1105: the park GOTO runs no landing refinement, so the handset's far miss gets one repeat GOTO here.
 TEST_CASE("SynScan - a park GOTO the handset ends 49 arcmin off is repeated once and parks", "[park][synscan]") {
     alpacacore::test::FakeTaskClock clock;
@@ -1149,6 +1189,7 @@ TEST_CASE("SynScan - a park GOTO the handset ends 49 arcmin off is repeated once
     const auto wall = std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)};
     alpacacore::vendor::synscan::set_sidereal_wall_clock_for_testing(*driver, [wall] { return wall; });
     driver->set_park();
+    move_mount_away(clock, *driver, *st);
     st->miss_gotos.store(1);
     driver->park();
     REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
@@ -1167,6 +1208,7 @@ TEST_CASE("SynScan - a park that misses by 49 arcmin twice fails", "[park][synsc
     const auto wall = std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)};
     alpacacore::vendor::synscan::set_sidereal_wall_clock_for_testing(*driver, [wall] { return wall; });
     driver->set_park();
+    move_mount_away(clock, *driver, *st);
     st->miss_gotos.store(2);
     driver->park();
     REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
@@ -1226,5 +1268,74 @@ TEST_CASE("SynScan - a park whose position check cannot read the mount fails wit
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
     }
     CHECK(st->goto_count.load() == 1);
+    driver->set_connected(false);
+}
+
+// #2763: a park GOTO the handset refused (acknowledged, the mount never moved) or that a limit stopped half way is
+// never repeated: the park fails and Slewing raises.
+TEST_CASE("SynScan - a park GOTO the mount never moves for, or a limit stops half way, is not repeated",
+          "[park][synscan][goto-safety]") {
+    for (const bool refused : {true, false}) {
+        alpacacore::test::FakeTaskClock clock;
+        auto st = make_handset(clock);
+        alpacacore::test::FakeMountServer server(st->responder());
+        REQUIRE(server.ok());
+        auto driver = mk(server.port(), clock);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        const auto wall = std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)};
+        alpacacore::vendor::synscan::set_sidereal_wall_clock_for_testing(*driver, [wall] { return wall; });
+        driver->set_park();
+        move_mount_away(clock, *driver, *st);
+        if (refused) {
+            st->no_motion.store(true);
+        } else {
+            st->goto_fraction.store(0.5);
+        }
+        driver->park();
+        REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
+        try {
+            static_cast<void>(driver->get_slewing());
+            FAIL("Slewing must raise the failed Park");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+            CHECK(std::string(ex.what()).find("not repeated") != std::string::npos);
+        }
+        CHECK_FALSE(driver->get_at_park());
+        CHECK(st->goto_count.load() == 1);  // the ledger: one GOTO, no repeat
+        CHECK(st->goto_snapshot().size() == 1);
+        // The position: where the mount was held, or half way from there to the park position (RA 3 h -> 0 h).
+        const double ra = driver->get_right_ascension();
+        CHECK(std::abs(ra - (refused ? 3.0 : 1.5)) < 0.01);
+        driver->set_connected(false);
+    }
+}
+
+// #2763: a park GOTO a limit stops in the last quarter (90% of 45 degrees: 4.5 degrees short, far beyond the 1 degree
+// cap of the #1105 shape) is not repeated either.
+TEST_CASE("SynScan - a park GOTO a limit stops in the last quarter is not repeated", "[park][synscan][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = mk(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const auto wall = std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)};
+    alpacacore::vendor::synscan::set_sidereal_wall_clock_for_testing(*driver, [wall] { return wall; });
+    driver->set_park();
+    move_mount_away(clock, *driver, *st);
+    st->goto_fraction.store(0.9);
+    driver->park();
+    REQUIRE(advance_until(clock, [&] { return alpacacore::test::park_done(*driver); }));
+    try {
+        static_cast<void>(driver->get_slewing());
+        FAIL("Slewing must raise the failed Park");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("not repeated") != std::string::npos);
+    }
+    CHECK_FALSE(driver->get_at_park());
+    CHECK(st->goto_count.load() == 1);  // the ledger: one GOTO, no repeat
+    CHECK(st->goto_snapshot().size() == 1);
+    CHECK(std::abs(driver->get_right_ascension() - 0.3) < 0.01);  // 3 h -> 0 h, stopped at 90%
     driver->set_connected(false);
 }

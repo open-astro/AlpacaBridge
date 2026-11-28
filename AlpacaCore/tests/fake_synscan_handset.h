@@ -156,6 +156,9 @@ public:
     std::atomic<int> drift_reads{0};
     /// The next N precise GOTOs land kMissCounts RA counts past their aim.
     std::atomic<int> miss_gotos{0};
+    /// A GOTO that lands ends this fraction of the way from the held position to its aim: a limit stopped it (#2763).
+    /// 1.0 is a normal GOTO.
+    std::atomic<double> goto_fraction{1.0};
     /// Every GOTO goes unanswered (the wrapper times out and throws) and sets goto_held (#742: the test's cue).
     std::atomic<bool> reject_goto{false};
     std::atomic<bool> goto_held{false};
@@ -291,6 +294,20 @@ private:
     void land(const std::string& chunk) {
         std::string aim = aim_of(chunk);
         if (aim.empty()) return;
+        if (goto_fraction.load() < 1.0 && position_.size() >= 17 && position_[8] == ',') {
+            const std::string start = position_;
+            const auto part = [&](std::size_t at) {
+                const auto from = static_cast<std::uint32_t>(std::stoul(start.substr(at, 8), nullptr, 16));
+                const auto to = static_cast<std::uint32_t>(std::stoul(aim.substr(at, 8), nullptr, 16));
+                const auto travel = static_cast<std::int32_t>(to - from);
+                char out[9];
+                std::snprintf(out, sizeof out, "%08X",
+                              static_cast<unsigned>(
+                                  from + static_cast<std::uint32_t>(std::lround(travel * goto_fraction.load()))));
+                return std::string(out);
+            };
+            aim = part(0) + "," + part(9) + "#";
+        }
         if (miss_gotos.load() > 0 && aim.size() == 18) {
             miss_gotos.fetch_sub(1);
             char ra[9];
