@@ -406,8 +406,8 @@
   },
   {
     "vendor": "remotealpaca",
-    "deviceType": "dome",
-    "displayName": "Remote Alpaca Dome",
+    "deviceType": "covercalibrator",
+    "displayName": "Remote Alpaca Cover Calibrator",
     "vendorLabel": "Remote Alpaca",
     "available": true,
     "buildOption": "ALPACACORE_ENABLE_REMOTEALPACA",
@@ -420,8 +420,8 @@
   },
   {
     "vendor": "remotealpaca",
-    "deviceType": "covercalibrator",
-    "displayName": "Remote Alpaca Cover Calibrator",
+    "deviceType": "dome",
+    "displayName": "Remote Alpaca Dome",
     "vendorLabel": "Remote Alpaca",
     "available": true,
     "buildOption": "ALPACACORE_ENABLE_REMOTEALPACA",
