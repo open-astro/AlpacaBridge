@@ -728,6 +728,8 @@ public:
             check_link_locked();
             check_not_parked("FindHome");
             begin_motion_command_locked();
+            // Supersedes a running Park body under mutex_, before this call sets its flags (decision 0006 rule 3).
+            motion_generation_.bump();
             leave_home_locked();
             homing_ = true;  // Slewing reads true until the body ends; a motion start or a stop clears it
         }
@@ -771,6 +773,7 @@ public:
                 std::lock_guard<std::mutex> lock(mutex_);
                 check_link_locked();
                 begin_motion_command_locked();
+                motion_generation_.bump();  // supersedes a running Park or FindHome body first (0006 rule 3)
                 parking_ = true;
                 leave_home_locked();  // a park moves the mount off home (#2461)
                 epoch = ++park_epoch_;
@@ -1241,6 +1244,11 @@ public:
     void set_stop_sent_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(test_hook_mutex_);
         stop_sent_hook_ = std::move(hook);
+    }
+
+    void set_motion_start_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(test_hook_mutex_);
+        motion_start_hook_ = std::move(hook);
     }
 
 private:
@@ -2052,6 +2060,12 @@ private:
     // Starts a Park or FindHome body on motion_op_. Call without mutex_ held (AsyncOperation rule 10). A refused start
     // runs `undo` under mutex_ and rethrows, so the command's flag does not stay set with no body to clear it.
     void start_motion_body(std::function<void(util::OperationContext&)> body, const std::function<void()>& undo) {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(test_hook_mutex_);
+            hook = motion_start_hook_;
+        }
+        if (hook) hook();
         try {
             motion_op_.start(std::move(body));
         } catch (...) {
@@ -2277,6 +2291,7 @@ private:
     std::mutex test_hook_mutex_;                // leaf; never held while the hook runs
     std::function<void()> slew_complete_hook_;  // guarded by test_hook_mutex_
     std::function<void()> stop_sent_hook_;      // guarded by test_hook_mutex_
+    std::function<void()> motion_start_hook_;   // guarded by test_hook_mutex_
 
     double site_latitude_ = 0.0;
     double site_longitude_ = 0.0;
@@ -2357,6 +2372,12 @@ void set_slew_complete_hook_for_testing(TelescopeDriver& driver, std::function<v
 void set_stop_sent_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* bisque = dynamic_cast<BisqueTelescopeDriver*>(&driver)) {
         bisque->set_stop_sent_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_motion_start_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* bisque = dynamic_cast<BisqueTelescopeDriver*>(&driver)) {
+        bisque->set_motion_start_hook_for_testing(std::move(hook));
     }
 }
 

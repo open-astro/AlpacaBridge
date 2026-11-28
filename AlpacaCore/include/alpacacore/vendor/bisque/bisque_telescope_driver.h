@@ -57,5 +57,8 @@ void set_slew_complete_hook_for_testing(TelescopeDriver& driver, std::function<v
 /// AbortSlew's first stop), before the driver takes its state lock again; only the initiator lock is held. An empty
 /// hook removes it.
 void set_stop_sent_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Runs `hook` on the Park or FindHome caller after the command's state write, before its body starts on the
+/// operation slot; no driver lock is held. An empty hook removes it.
+void set_motion_start_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 } // namespace alpacacore::vendor::bisque
