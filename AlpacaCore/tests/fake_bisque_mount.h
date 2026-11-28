@@ -46,6 +46,7 @@ namespace alpacacore::test {
  * IsParked and IsSlewComplete replies by that many real milliseconds (on top of `latency_ms`), as a TheSkyX stuck in
  * one call. `find_home_ms` is how long a FindHome runs: after an asynchronous one IsSlewComplete answers 0 until it has
  * passed; any other FindHome holds its reply that long, as TheSkyX's in-script home loop holds the link.
+ * `set_tracking_commands` counts the SetTracking commands the fake answers.
  *
  * Sync(ra, dec) moves the position the fake reports to the synced coordinates. With `land_on_target` set, a
  * SlewToRaDec also moves it there once the slew reports complete, as a mount arriving on its target does (off by
@@ -120,6 +121,7 @@ public:
     std::atomic<int> latency_ms{0};
     std::atomic<int> find_home_ms{0};
     std::atomic<int> set_tracking_ms{0};
+    std::atomic<int> set_tracking_commands{0};
     std::atomic<int> position_ms{0};
     std::atomic<int> is_parked_ms{0};
     std::atomic<int> slew_complete_ms{0};
@@ -219,8 +221,11 @@ private:
             }
             return "|No error. Error = 0.OK#";
         }
-        if (has(command, "SetTracking") && set_tracking_ms.load() > 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(set_tracking_ms.load()));
+        if (has(command, "SetTracking")) {
+            ++set_tracking_commands;
+            if (set_tracking_ms.load() > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(set_tracking_ms.load()));
+            }
         }
         if (has(command, "GetRaDec")) {
             if (on_position_read) on_position_read();

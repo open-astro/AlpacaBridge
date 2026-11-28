@@ -17,8 +17,6 @@
 // on_host_clock_changed() once the host clock is trusted or steps. These cases force the trust answer through the
 // ClientUtcWarning probe seam and wait on the driver's task clock (FakeTaskClock), never on a sleep.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/host_clock_trust.h>
@@ -769,5 +767,3 @@ TEST_CASE("SynScan host clock - a stepped call held in real time does not age th
     // not the call): a bounded rate would still latch the loss on a call held for 13 s.
     CHECK(rig.clock.now() - start < milliseconds(50));
 }
-
-#endif  // !_WIN32

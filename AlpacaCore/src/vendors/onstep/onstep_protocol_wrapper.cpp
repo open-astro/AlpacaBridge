@@ -41,6 +41,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 #include <limits>
 #include <map>
@@ -49,10 +50,6 @@
 #include <set>
 #include <sstream>
 #include <thread>
-
-#ifndef _WIN32
-#include <filesystem>
-#endif
 
 namespace alpacacore::vendor::onstep {
 
@@ -329,7 +326,6 @@ std::string probe_query(util::SerialLink& link, const char* cmd, int budget_ms) 
 // is logged at DEBUG: the port belongs to a connected device or another
 // scan is still probing it).
 std::string probe_onstep_port(const std::string& port_path, std::string& version) {
-#ifndef _WIN32
     std::string error;
     util::SerialLink link = util::SerialLink::open(
         port_path, util::SerialClaimKind::Probe, kSerialOwner,
@@ -358,14 +354,9 @@ std::string probe_onstep_port(const std::string& port_path, std::string& version
         ALPACA_LOG_DEBUG("OnStep",
                          "Probe attempt " + std::to_string(attempt + 1) + " got no OnStep identity from " + port_path);
     }
-#else
-    (void)port_path;
-    (void)version;
-#endif
     return "";
 }
 
-#ifndef _WIN32
 // The raw /dev/ttyUSB*//dev/ttyACM* fallback below has no by-id symlink name
 // to filter on, so without this check it would open EVERY serial device on
 // the box -- unrelated FTDI dongles, GPS receivers, or a flat panel/focuser
@@ -401,7 +392,6 @@ std::vector<std::string> list_dev_nodes_with_prefix(const std::string& prefix) {
     std::sort(results.begin(), results.end());
     return results;
 }
-#endif
 
 // Never destroyed: a link still held at exit disconnects from its destructor,
 // after function-local statics built later than it are gone.
@@ -456,13 +446,11 @@ std::string link_key(const ConnectionInfo& info) {
     if (info.type == ConnectionType::Network) {
         return "tcp:" + info.host + ":" + std::to_string(info.tcp_port);
     }
-#ifndef _WIN32
     std::error_code ec;
     const auto canonical = std::filesystem::canonical(info.port_path, ec);
     if (!ec) {
         return "serial:" + canonical.string();
     }
-#endif
     return "serial:" + info.port_path;
 }
 
@@ -499,7 +487,6 @@ bool is_onstepx_version(const std::string& version) {
 std::vector<OnStepPortInfo> enumerate_onstep_ports() {
     std::vector<OnStepPortInfo> results;
 
-#ifndef _WIN32
     // Resolved (canonical) paths already probed via by-id, so the raw-node
     // pass below never re-opens a port the by-id pass already tried.
     std::set<std::string> probed;
@@ -584,7 +571,6 @@ std::vector<OnStepPortInfo> enumerate_onstep_ports() {
             consider(resolved, "");
         }
     }
-#endif
 
     return results;
 }

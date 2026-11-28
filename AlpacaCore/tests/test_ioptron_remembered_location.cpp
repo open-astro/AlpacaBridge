@@ -16,8 +16,6 @@
 // handshake before the full sweep. A configured address is used as given and
 // never stored.
 
-#ifndef _WIN32
-
 #include <alpacacore/util/device_location_store.h>
 #include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
@@ -178,5 +176,3 @@ TEST_CASE("iOptron - a configured address never reads or writes the location sto
     CHECK(DeviceLocationStore::load(kKey) == "127.0.0.1:1");  // unchanged
     driver->set_connected(false);
 }
-
-#endif  // _WIN32

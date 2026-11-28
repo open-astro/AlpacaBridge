@@ -36,7 +36,6 @@
 // that hangs up loses the link at once too (#2220) instead of a timeout. Its drain after a blind command still waits at
 // least one read slice for a stray ack, as the old loop's first read did, and on a line that never goes quiet it ends
 // at its 2 s cap (#1449).
-#ifndef _WIN32
 
 #include <alpacacore/util/error_handling.h>
 
@@ -847,5 +846,3 @@ TEST_CASE("OnStep mount - a reply that starts after the timeout is still a timeo
     CHECK(result.first.find("Timeout waiting for OnStep response") != std::string::npos);
 }
 #endif
-
-#endif  // _WIN32

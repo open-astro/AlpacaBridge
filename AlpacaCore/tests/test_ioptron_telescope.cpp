@@ -41,15 +41,11 @@
 #include <vector>
 
 #include "catch2_compat.h"
-#include "driver_rig.h"
-
-#ifndef _WIN32
 #include "concurrency_stress.h"
-#include "fake_mount_server.h"
-#include "fake_task_clock.h"
-#endif
 #include "connect_hold_gate.h"
+#include "driver_rig.h"
 #include "fake_ioptron_mount.h"
+#include "fake_mount_server.h"
 #include "fake_pty_write.h"
 #include "fake_task_clock.h"
 #include "gps_status_check.h"
@@ -244,7 +240,6 @@ TEST_CASE("iOptron Telescope Driver - ASCOM Error Codes", "[ioptron][telescope][
     require_alpaca_error([&]() { (void)driver->get_azimuth(); }, alpacacore::AlpacaError::NotConnected);
 }
 
-#ifndef _WIN32
 // ---------------------------------------------------------------------------
 // GOTO final-approach RA trim over a scripted loopback mount (see
 // fake_ioptron_mount.h). The fake lands every GOTO 12 arcsec east of the
@@ -1391,10 +1386,6 @@ TEST_CASE("iOptron Link - a hangup during a poll read while latched loses the li
     require_lost(*driver, "serial link lost (hangup)");
 }
 
-#endif  // !_WIN32
-
-#ifndef _WIN32
-
 // ── The client-clock disagreement warning (#409) ─────────────────────────────
 
 TEST_CASE("iOptron Telescope Driver - a far-off client UTCDate is logged once per connection on a disciplined host",
@@ -2068,8 +2059,6 @@ TEST_CASE("iOptron Telescope Driver - non-finite site latitude and longitude are
     }
     driver->set_connected(false);
 }
-
-#endif  // _WIN32
 
 // Issue #995: the mount's serial link is held exclusively while connected and
 // released on disconnect. connect() over serial only opens and configures the

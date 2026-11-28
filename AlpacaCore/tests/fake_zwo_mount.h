@@ -28,8 +28,6 @@
 // Real-time knobs (hold_reply, set_reply_delay, delay_next) model transport latency,
 // not a driver timer; they never read the TaskClock.
 
-#ifndef _WIN32
-
 #include <alpacacore/util/task_clock.h>
 
 #include <algorithm>
@@ -705,5 +703,3 @@ private:
 };
 
 }  // namespace alpacacore::test
-
-#endif  // !_WIN32

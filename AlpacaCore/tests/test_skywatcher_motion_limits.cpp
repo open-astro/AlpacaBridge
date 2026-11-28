@@ -29,8 +29,6 @@
 // The live guard (436b) cases at the end drive the axes across a limit and
 // expect the driver to stop the motion on its own.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/motion_limits.h>
@@ -1353,5 +1351,3 @@ TEST_CASE("SkyWatcher limits - Tracking on during a duty worker join still start
     sw::set_duty_before_exit_stop_hook_for_testing(*driver, nullptr);
     driver->set_connected(false);
 }
-
-#endif  // _WIN32

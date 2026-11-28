@@ -26,8 +26,6 @@
 // caller's business; the default reply is not sufficient for every driver's
 // handshake or operational thread path.
 
-#ifndef _WIN32
-
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -327,5 +325,3 @@ private:
 };
 
 }  // namespace alpacacore::test
-
-#endif  // !_WIN32

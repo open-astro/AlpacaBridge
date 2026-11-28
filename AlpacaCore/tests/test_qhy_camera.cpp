@@ -3267,9 +3267,11 @@ TEST_CASE("QHY Camera Driver - an exposure the SDK still reports running is read
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
     TeardownGuard guard{clock, driver};
     driver->set_connected(true);
+    const auto waits = clock.wait_count();
     driver->start_exposure(2.0, true);
-    // The body has armed and is polling, so the exposure end is fixed on the task clock.
-    REQUIRE(wait_until([&] { return fake.call_count("get_exposure_remaining") > 0; }));
+    // The body has armed and waits in its poll: the exposure end is fixed on the task clock, so the advance wakes it.
+    REQUIRE(clock.wait_for_wait_count(waits + 1, std::chrono::seconds(5)));
+    CHECK(fake.call_count("get_exposure_remaining") > 0);
     CHECK(fake.call_count("get_single_frame") == 0);
     clock.advance(seconds(3));  // past the requested exposure, short of the watchdog
 

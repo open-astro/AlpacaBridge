@@ -17,8 +17,6 @@
 // neighbours. Cases live in deferred_connect_cases.h; this file supplies the
 // fake and the seam.
 
-#ifndef _WIN32
-
 #include <alpacacore/vendor/qhy/qhy_cfw3_filterwheel_driver.h>
 
 #include <memory>
@@ -88,5 +86,3 @@ TEST_CASE("QHYCFW3 filter wheel auto-detect - the production factory constructs 
         CHECK_FALSE(driver->get_connected());
     }
 }
-
-#endif  // _WIN32

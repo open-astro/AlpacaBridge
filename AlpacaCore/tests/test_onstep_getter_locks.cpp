@@ -20,8 +20,6 @@
 // Decision 0005: the budget is wall time spent in a getter, not a driver
 // timeout; no case waits on a task-clock deadline.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
@@ -821,5 +819,3 @@ TEST_CASE("OnStep getters - a getter during a clean disconnect's close reads as 
     CHECK(slewing_error == alpacacore::AlpacaError::NotConnected);
     CHECK_FALSE(rig.driver->get_connected());
 }
-
-#endif  // !_WIN32

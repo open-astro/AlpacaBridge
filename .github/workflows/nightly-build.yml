@@ -430,10 +430,26 @@ jobs:
           sbom-path: dist/sbom.spdx.json
 
       - name: Move the nightly-build tag
+        id: tag
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # GitHub refuses (403) a GITHUB_TOKEN ref write whose commit has other
+          # .github/workflows files than the default branch's tip: the token
+          # cannot hold the workflows permission. A merge that changed a workflow
+          # during this run moves the tip, so skip publishing; the tag stays on
+          # the last published commit and the next run builds the new tip.
+          workflows_at() {
+            gh api "repos/${GITHUB_REPOSITORY}/contents/.github?ref=$1" \
+              --jq '.[] | select(.name == "workflows") | .sha'
+          }
+          tip="$(gh api "repos/${GITHUB_REPOSITORY}" --jq .default_branch)"
+          if [ "$(workflows_at "${GITHUB_SHA}")" != "$(workflows_at "${tip}")" ]; then
+            echo "::warning::${tip} changed a workflow since ${GITHUB_SHA}; not publishing this build."
+            echo "moved=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
           if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/nightly-build" >/dev/null 2>&1; then
             gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/nightly-build" \
               -f sha="${GITHUB_SHA}" -F force=true >/dev/null
@@ -442,8 +458,10 @@ jobs:
               -f ref=refs/tags/nightly-build -f sha="${GITHUB_SHA}" >/dev/null
           fi
           echo "nightly-build -> ${GITHUB_SHA}"
+          echo "moved=true" >> "${GITHUB_OUTPUT}"
 
       - name: Publish the nightly pre-release
+        if: steps.tag.outputs.moved == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION_STR: ${{ steps.version.outputs.version }}

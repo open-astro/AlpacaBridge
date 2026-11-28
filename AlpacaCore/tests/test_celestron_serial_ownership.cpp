@@ -14,7 +14,6 @@
 // handset: the connected link holds its port through SerialLink, a connect to
 // a port another device holds is refused with the holder's name, and a port
 // another program retunes cannot hang a command or disconnect.
-#ifndef _WIN32
 
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
@@ -64,5 +63,3 @@ TEST_CASE("Celestron serial - a command on a retuned port times out and the line
     cases::retuned_port_times_out_and_recovers(wrapper, serial_info(device.slave_path()), device,
                                                [&] { (void)wrapper.send_command("V", true, 300); });
 }
-
-#endif  // _WIN32

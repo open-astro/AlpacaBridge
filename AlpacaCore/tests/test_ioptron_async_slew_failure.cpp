@@ -18,8 +18,6 @@
 // contract: the next Slewing read must return an Alpaca error instead
 // (contract reference in test_skywatcher_async_slew_failure.cpp).
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
@@ -1022,5 +1020,3 @@ TEST_CASE("iOptron goto-safety - a synchronous GOTO whose position never settles
     mount.set_position_drift_per_read(0.0);
     driver->set_connected(false);
 }
-
-#endif  // _WIN32

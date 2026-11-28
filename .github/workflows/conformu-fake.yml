@@ -10,8 +10,8 @@
 # serial motor board since slice 2, five focusers since slice 3, three filter
 # wheels since slice 4, two cameras since slice 5, three rotators, the Gemini
 # Pro flat panel, the OnStepX, iOptron iMate, Gemini PDH and ToupTek StellaVita
-# switches, the ZWO, ToupTek, Altair, QHY and Player One cameras and the
-# remotealpaca ObservingConditions since slice 6; a row runs
+# switches, the ZWO, ToupTek, Altair, QHY, Player One and SVBONY cameras and the
+# remotealpaca and WeeWX ObservingConditions since slice 6; a row runs
 # only when its fake can pass ConformU on merit, and every other roster row is
 # pending with its reason),
 # one matrix job per row,
@@ -49,6 +49,8 @@ on:
       - "AlpacaCore/include/alpacacore/vendor/qhy/**"
       - "AlpacaCore/src/vendors/playerone/**"
       - "AlpacaCore/include/alpacacore/vendor/playerone/**"
+      - "AlpacaCore/src/vendors/svbony/**"
+      - "AlpacaCore/include/alpacacore/vendor/svbony/**"
       - "AlpacaCore/src/vendors/touptek/**"
       - "AlpacaCore/include/alpacacore/vendor/touptek/**"
       - "AlpacaCore/src/vendors/gemini/**"
@@ -60,6 +62,8 @@ on:
       - "scripts/build_bundled_gphoto.sh"
       - "AlpacaCore/src/vendors/remotealpaca/**"
       - "AlpacaCore/include/alpacacore/vendor/remotealpaca/**"
+      - "AlpacaCore/src/vendors/weewx/**"
+      - "AlpacaCore/include/alpacacore/vendor/weewx/**"
       # The fakes, clocks and ConformU factories that fake_conformu_server
       # includes.
       - "AlpacaCore/tests/fake_skywatcher_*.h"
@@ -87,6 +91,7 @@ on:
       - "AlpacaCore/tests/fake_qhy_sdk.h"
       - "AlpacaCore/tests/locked_qhy_sdk.h"
       - "AlpacaCore/tests/fake_playerone_sdk.h"
+      - "AlpacaCore/tests/fake_svbony_sdk.h"
       - "AlpacaCore/tests/conformu_rotator_factories.h"
       - "AlpacaCore/tests/conformu_covercalibrator_factories.h"
       - "AlpacaCore/tests/fake_zwo_caa_sdk.h"
@@ -214,10 +219,10 @@ jobs:
           SOURCE_DIRS = {"ifr": ["ioptron"], "iguider": ["ioptron"], "altair": ["altair", "touptek"]}
           REPORT_DIRS = {"skywatcher": "Sky-Watcher", "zwo": "ZWO", "onstep": "OnStep", "ioptron": "iOptron",
                          "ifr": "iOptron", "celestron": "Celestron", "synscan": "SynScan", "qhy": "QHY",
-                         "playerone": "Player One",
+                         "playerone": "Player One", "svbony": "SVBONY",
                          "iguider": "iOptron", "gphoto": "GPhoto", "gemini": "Gemini", "touptek": "ToupTek",
                          "altair": "Altair", "remotealpaca": "Remote Alpaca",
-                         "wandererastro": "WandererAstro"}
+                         "wandererastro": "WandererAstro", "weewx": "WeeWX"}
           # Test files that serve one vendor's rows only, beside its fake_<vendor>_*.h headers, or a few vendors' (a
           # tuple). A fake_*.h that is not named for a vendor counts as the vendor of the run row that names it:
           # fake_mount_server.h serves the ZWO, Celestron, SynScan and OnStep rows, so a change to it selects those
@@ -232,9 +237,9 @@ jobs:
                           "AlpacaCore/tests/locked_gphoto_sdk.h": "gphoto",
                           "AlpacaCore/tests/fake_raw_decoder.h": "gphoto",
                           "AlpacaCore/tests/locked_qhy_sdk.h": "qhy",
-                          "AlpacaCore/tests/fake_timed_completion.h": ("qhy", "playerone"),
+                          "AlpacaCore/tests/fake_timed_completion.h": ("qhy", "playerone", "svbony"),
                           "scripts/build_bundled_gphoto.sh": "gphoto",
-                          "AlpacaCore/tests/conformu_observingconditions_factories.h": "remotealpaca",
+                          "AlpacaCore/tests/conformu_observingconditions_factories.h": ("remotealpaca", "weewx"),
                           "AlpacaCore/tests/alpaca_upstream_script.h": "remotealpaca"}
           changed_path = os.path.join(os.environ["RUNNER_TEMP"], "changed.txt")
           changed = None

@@ -17,8 +17,6 @@
 // The state poll (#2491) waits its ticks on the same task clock, so every case pauses it (a paused poll parks and skips
 // its cycles) and waits for two waiters: the poll and the body.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/host_clock_trust.h>
 #include <alpacacore/util/logging.h>
@@ -1031,5 +1029,3 @@ TEST_CASE("iOptron Telescope Driver - a host clock change racing a disconnect le
     }
     CHECK(mount.count(":SUT") == 0);
 }
-
-#endif  // _WIN32

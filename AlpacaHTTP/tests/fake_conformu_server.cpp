@@ -306,6 +306,12 @@ const std::vector<ConformuHost> kHosts = {
      "AlpacaUpstreamScript over FakeHttpClient (a scripted upstream Alpaca ObservingConditions device, in process)",
      [] { return true; }, driver_of(cu::make_remotealpaca_observingconditions)},
 #endif
+#ifdef FAKE_CONFORMU_WEEWX
+    {"weewx", "observingconditions", "fake_http_client.h", alpacacore::DeviceType::ObservingConditions, "weewx-fake",
+     "WeeWX Observing Conditions (fake feed, test only)", "ALPACACORE_ENABLE_WEEWX",
+     "FakeHttpClient (a scripted WeeWX JSON feed with seven sensors, in process)", [] { return true; },
+     driver_of(cu::make_weewx_observingconditions)},
+#endif
 #ifdef FAKE_CONFORMU_GPHOTO
     {"gphoto", "camera", "fake_gphoto_sdk.h", alpacacore::DeviceType::Camera, "gphoto-fake",
      "GPhoto camera (fake libgphoto2, test only)", "ALPACACORE_ENABLE_GPHOTO",

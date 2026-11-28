@@ -15,8 +15,6 @@
 // FakeZwoMount and FakeTaskClock::advance() and never sleeps on the clock under test; a wait
 // that fell back to the host clock would not move when the test advances, and the case fails.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
@@ -1877,5 +1875,3 @@ TEST_CASE("ZWO telescope clock - a slew after Unpark is allowed at once and refu
                              AlpacaError::InvalidWhileParked);
     }
 }
-
-#endif  // !_WIN32

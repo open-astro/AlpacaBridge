@@ -3809,15 +3809,10 @@ private:
     static LocalTimeInfo compute_local_timezone_info(std::time_t now) {
         LocalTimeInfo info;
         std::tm local_tm {};
-        std::tm utc_tm {};
-#if defined(_WIN32)
-        localtime_s(&local_tm, &now);
-        gmtime_s(&utc_tm, &now);
-#else
+        std::tm utc_tm{};
         // Reentrant: the clock-sync body runs on its own thread (std::localtime / std::gmtime share one buffer).
         localtime_r(&now, &local_tm);
         gmtime_r(&now, &utc_tm);
-#endif
         std::time_t local_time = std::mktime(&local_tm);
         std::time_t utc_interpreted_as_local = std::mktime(&utc_tm);
         double offset_seconds = std::difftime(local_time, utc_interpreted_as_local);
@@ -3908,11 +3903,7 @@ private:
     static std::string format_utc(std::chrono::system_clock::time_point utc) {
         const std::time_t t = std::chrono::system_clock::to_time_t(utc);
         std::tm tm{};
-#if defined(_WIN32)
-        if (gmtime_s(&tm, &t) != 0) return "unknown";
-#else
         if (gmtime_r(&t, &tm) == nullptr) return "unknown";
-#endif
         char text[32];
         if (std::strftime(text, sizeof text, "%Y-%m-%dT%H:%M:%SZ", &tm) == 0) return "unknown";
         return text;

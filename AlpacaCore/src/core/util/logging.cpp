@@ -43,13 +43,9 @@ namespace {
         auto time_t = std::chrono::system_clock::to_time_t(now);
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             now.time_since_epoch()) % 1000;
-        
+
         std::tm local_tm{};
-#if defined(_WIN32)
-        localtime_s(&local_tm, &time_t);
-#else
         localtime_r(&time_t, &local_tm);
-#endif
         std::lock_guard<std::mutex> lock(g_log_mutex);
         std::cerr << std::put_time(&local_tm, "%Y-%m-%d %H:%M:%S")
                   << "." << std::setfill('0') << std::setw(3) << ms.count()

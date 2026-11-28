@@ -14,8 +14,6 @@
 // drive respond_to() on a hand-advanced clock; the driver case runs the real telescope driver over the fake's TCP
 // port. The scripted default keeps its old answers (pinned in the first case).
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 
@@ -367,5 +365,3 @@ TEST_CASE("iOptron motion owner - MoveAxis on one axis leaves a guide pulse on t
         driver->set_connected(false);
     }
 }
-
-#endif  // !_WIN32

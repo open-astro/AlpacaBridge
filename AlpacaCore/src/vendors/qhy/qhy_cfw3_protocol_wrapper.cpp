@@ -25,6 +25,11 @@
 #include <alpacacore/util/serial_read.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/qhy/qhy_cfw3_protocol_wrapper.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <termios.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
@@ -38,14 +43,6 @@
 #include <thread>
 #include <utility>
 #include <vector>
-
-#ifndef _WIN32
-#include <errno.h>
-#include <fcntl.h>
-#include <poll.h>
-#include <termios.h>
-#include <unistd.h>
-#endif
 
 namespace alpacacore::vendor::qhy {
 
@@ -81,7 +78,6 @@ std::string printable(const std::string& raw) {
     return out;
 }
 
-#ifndef _WIN32
 // 9600 8N1 raw. HUPCL is left as the port has it: the wheel resets on the
 // DTR edge of the OPEN, and clearing HUPCL did not prevent that (see
 // connect()). The fd stays non-blocking (SerialLink); reads go through
@@ -144,7 +140,6 @@ std::optional<int> wait_for_boot_byte(util::SerialLink& link, int timeout_ms, bo
     }
     return position;
 }
-#endif
 
 }  // namespace
 
@@ -165,7 +160,6 @@ std::optional<int> cfw3_parse_slot(char reply) {
 // The probe claim (#1202) is held for exactly the probe: a port a connected
 // device holds is refused before it is opened (DEBUG log, "not found").
 static bool probe_port(const std::string& port_path, int boot_timeout_ms, Cfw3DeviceInfo& info) {
-#ifndef _WIN32
     std::string error;
     util::SerialLink link =
         util::SerialLink::open(port_path, util::SerialClaimKind::Probe, kSerialOwner, configure_tty, &error);
@@ -201,15 +195,8 @@ static bool probe_port(const std::string& port_path, int boot_timeout_ms, Cfw3De
     info.position = *pos;  // NOW is the fresher of the two; the boot byte only proves the reset happened
     (void)boot;
     return true;
-#else
-    (void)port_path;
-    (void)boot_timeout_ms;
-    (void)info;
-    return false;
-#endif
 }
 
-#ifndef _WIN32
 namespace {
 // The raw /dev/ttyUSBn fallback has no by-id name to filter on; restrict it
 // to the Silicon Labs CP210x class the wheel ships with so the scan never
@@ -220,12 +207,10 @@ bool raw_port_looks_like_cfw3_candidate(const std::string& port_path) {
     return alpacacore::util::usb_tty_descriptor_matches(*descriptor, cfw3_usb_tokens());
 }
 }  // namespace
-#endif
 
 std::vector<Cfw3PortInfo> enumerate_cfw3_ports(int boot_timeout_ms) {
     std::vector<Cfw3PortInfo> results;
 
-#ifndef _WIN32
     std::set<std::string> probed;
 
     struct Candidate {
@@ -323,9 +308,6 @@ std::vector<Cfw3PortInfo> enumerate_cfw3_ports(int boot_timeout_ms) {
                                      ")");
         results.push_back({c.path, c.name, infos[i]});
     }
-#else
-    (void)boot_timeout_ms;
-#endif
 
     return results;
 }
@@ -362,7 +344,6 @@ public:
         Cfw3DeviceInfo info;
         in_connect_ = true;
         try {
-#ifndef _WIN32
             if (held) {
                 // A reconnect can land while the wheel is still finishing the
                 // move the last session cancelled its wait on (PR #536 review).
@@ -392,7 +373,6 @@ public:
                                                   " ms; assuming the port did not reset it");
                 }
             }
-#endif
             // VRS is optional: firmware before 201409 answers none of the
             // three queries, and a wheel that answers MXP/NOW but not VRS
             // still works. MXP and NOW are required -- without them there is
@@ -430,16 +410,12 @@ public:
         } catch (...) {
             in_connect_ = false;
             close_port_locked();
-#ifndef _WIN32
             link_.clear_loss();  // a failed connect keeps no reason (the loss during it was not latched)
-#endif
             throw;
         }
         in_connect_ = false;
-#ifndef _WIN32
         // A loss seen inside the handshake failed it above; a connect that got here starts with a clear verdict.
         link_.clear_loss();
-#endif
         connected_ = true;
         ALPACA_LOG_INFO(kLogTag, "QHYCFW3 connected on " + config_.serial_port + " (" +
                                      std::to_string(info.slot_count) + " slots, firmware " +
@@ -455,13 +431,11 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         connected_ = false;
         clear_link_loss();
-#ifndef _WIN32
         if (serial_fd_ >= 0) {
             ALPACA_LOG_INFO(kLogTag, "QHYCFW3 disconnected; " + config_.serial_port +
                                          " stays open (and reserved) so the next connect skips the wheel's "
                                          "~17 s reset. Remove the device to release the port");
         }
-#endif
     }
 
     bool is_connected() const {
@@ -499,7 +473,6 @@ public:
             throw AlpacaException("Filter position out of range for the QHYCFW3 protocol (max 16 slots)",
                                   AlpacaError::InvalidValue);
         }
-#ifndef _WIN32
         if (serial_fd_ < 0) fail_link_locked();
         tcflush(serial_fd_, TCIFLUSH);
         write_locked(&*cmd, 1);
@@ -535,10 +508,6 @@ public:
         throw AlpacaException("QHYCFW3 did not report arrival at slot " + std::to_string(slot + 1) + " within " +
                                   std::to_string(config_.move_timeout_ms) + " ms",
                               AlpacaError::DriverException);
-#else
-        (void)cancel;
-        throw AlpacaException("QHYCFW3 driver is Linux-only", AlpacaError::DriverException);
-#endif
     }
 
 private:
@@ -554,7 +523,6 @@ private:
     // and with it the registry claim and TIOCEXCL, is held across logical
     // disconnects exactly as the fd is (see connect()).
     void open_port_locked() {
-#ifndef _WIN32
         std::string error;
         link_ = util::SerialLink::open(config_.serial_port, util::SerialClaimKind::Link, kSerialOwner, configure_tty,
                                        &error);
@@ -564,19 +532,14 @@ private:
         serial_fd_ = link_.fd();
         opened_port_config_ = config_.serial_port;
         tcflush(serial_fd_, TCIOFLUSH);
-#else
-        throw AlpacaException("QHYCFW3 driver is Linux-only", AlpacaError::DriverException);
-#endif
     }
 
     // Release the port for real: the alias and the held-port record first,
     // then the link (TIOCNXCL, close, registry claim).
     void close_port_locked() {
-#ifndef _WIN32
         serial_fd_ = -1;
         opened_port_config_.clear();
         link_.close();
-#endif
     }
 
     // The port is gone (unplug / re-enumeration): release the fd so a
@@ -598,7 +561,6 @@ private:
         throw AlpacaException("QHYCFW3 link lost on " + config_.serial_port, AlpacaError::NotConnected);
     }
 
-#ifndef _WIN32
     // A write the link judges lost (a hung-up tty, or EBADF on its fd: util::SerialLink, #2262) is a lost link;
     // any other failure stays a DriverException.
     void write_locked(const char* data, std::size_t len) {
@@ -615,12 +577,10 @@ private:
                                   AlpacaError::DriverException);
         }
     }
-#endif
 
     // Send a query and read its reply (up to `max_len` bytes, ending on line
     // idle). Empty when the wheel stayed silent for `timeout_ms`.
     std::string transact_locked(const char* cmd, std::size_t max_len, int timeout_ms) {
-#ifndef _WIN32
         if (serial_fd_ < 0) fail_link_locked();
         ALPACA_LOG_TRACE(kLogTag, std::string("QHYCFW3 command: ") + cmd);
         tcflush(serial_fd_, TCIFLUSH);
@@ -630,21 +590,13 @@ private:
         if (link_dead) fail_link_locked();
         ALPACA_LOG_TRACE(kLogTag, "QHYCFW3 reply: " + printable(reply));
         return reply;
-#else
-        (void)cmd;
-        (void)max_len;
-        (void)timeout_ms;
-        throw AlpacaException("QHYCFW3 driver is Linux-only", AlpacaError::DriverException);
-#endif
     }
 
     // A new Connect or a Disconnect ends the outage: drop the reason, the stamp (no #521 consumer yet) and the
     // link's own verdict (decision 0009 rule 5; the link is held across a logical disconnect).
     void clear_link_loss() {
         link_lost_.store(false);
-#ifndef _WIN32
         link_.clear_loss();
-#endif
         std::lock_guard<std::mutex> lock(fault_mutex_);
         link_fault_.clear();
         link_lost_at_.consume();
@@ -662,12 +614,10 @@ private:
     Cfw3ConnectionConfig config_;
     bool connected_ = false;
     std::atomic<bool> link_lost_{false};
-    bool in_connect_ = false;  // guarded by mutex_
-#ifndef _WIN32
+    bool in_connect_ = false;         // guarded by mutex_
     util::SerialLink link_;           // held across logical disconnects (see connect())
     int serial_fd_ = -1;              // link_.fd() while the link is open, else -1
     std::string opened_port_config_;  // config path the held link was opened from
-#endif
 };
 
 Cfw3ProtocolWrapper::Cfw3ProtocolWrapper(util::TaskClock& clock) : impl_(std::make_unique<Impl>(clock)) {}

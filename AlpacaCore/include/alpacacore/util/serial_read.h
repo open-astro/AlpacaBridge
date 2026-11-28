@@ -44,11 +44,6 @@
 // late '#' ends its own reply instead of answering the next command). It is
 // read-loop behaviour, not policy: the wrapper still turns the outcome into
 // its own exception or latch.
-//
-// POSIX-only, like serial_link.h; callers include it inside their existing
-// `#ifndef _WIN32` branches.
-
-#ifndef _WIN32
 
 #include <alpacacore/util/serial_link.h>
 #include <poll.h>
@@ -314,5 +309,3 @@ inline ReadResult read_until_socket(int socket_fd, const ReadSpec& spec,
 }
 
 }  // namespace alpacacore::util
-
-#endif  // _WIN32

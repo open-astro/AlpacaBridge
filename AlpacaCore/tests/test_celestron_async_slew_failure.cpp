@@ -16,8 +16,6 @@
 // and drop Slewing to false. The next Slewing read must return an Alpaca
 // error instead (contract reference in test_skywatcher_async_slew_failure.cpp).
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/motion_guards.h>
@@ -2911,5 +2909,3 @@ TEST_CASE("Celestron Sync - after the unbounded first Sync of an unaligned mount
     CHECK(st->command_count('s') + st->command_count('S') == 1);
     driver->set_connected(false);
 }
-
-#endif  // _WIN32

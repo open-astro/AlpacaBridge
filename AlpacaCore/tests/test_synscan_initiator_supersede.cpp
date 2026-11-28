@@ -21,8 +21,6 @@
 // and by returning soon after the hold ends. The two initiators that send nothing during a slew
 // (SlewToCoordinatesAsync, Park) must return inside the hold.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
@@ -491,5 +489,3 @@ TEST_CASE("SynScan initiator supersede - a UTCDate write cut by a disconnect rep
     write.join();
     CHECK(write_error.load() == alpacacore::AlpacaError::NotConnected);
 }
-
-#endif  // _WIN32

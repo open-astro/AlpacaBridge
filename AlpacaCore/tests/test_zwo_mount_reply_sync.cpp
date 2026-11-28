@@ -16,7 +16,6 @@
 // in-order like the real one: it handles one command at a time, so a slow
 // command's late reply is written before the next command is looked at. Each
 // case runs over a pty (serial) and over loopback TCP.
-#ifndef _WIN32
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
@@ -379,5 +378,3 @@ TEST_CASE("ZWO mount reply sync - a write ack in the late slice is still its rep
         CHECK(wrapper.send_command(":Sr02:30:00", false, kQueryTimeoutMs) == "1");
     });
 }
-
-#endif  // _WIN32

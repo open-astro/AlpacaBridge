@@ -23,6 +23,6 @@ target_include_directories(alpacacore_wandererastro PRIVATE
 target_link_libraries(alpacacore_wandererastro PRIVATE alpacacore)
 
 # WandererCover uses an ASCII serial protocol over a CH340 USB-serial link.
-# No external SDK is required — only standard POSIX/Win32 APIs and a reader thread.
+# No external SDK is required — only POSIX APIs and a reader thread.
 find_package(Threads REQUIRED)
 target_link_libraries(alpacacore_wandererastro PRIVATE Threads::Threads)

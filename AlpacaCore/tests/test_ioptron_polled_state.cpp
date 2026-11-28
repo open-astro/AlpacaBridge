@@ -18,8 +18,6 @@
 // advance() of one period. The wire timing the cases measure (the held reply, the getter budget) is real time:
 // decision 0005 leaves the I/O timeouts real.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_health.h>
@@ -925,5 +923,3 @@ TEST_CASE("iOptron polled state - a connect whose first reads fail still connect
         CHECK(sent(mount) == before);
     }
 }
-
-#endif  // _WIN32

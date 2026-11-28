@@ -33,13 +33,13 @@ playerone	filterwheel	fake_playerone_pw_sdk.h	run	4	AlpacaCore/conformu/Player O
 touptek	camera	fake_touptek_sdk.h	run	6	AlpacaCore/conformu/ToupTek/Fake/Fake-camera-fake_touptek_sdk-Linux-arm64.txt	-
 touptek	switch	fake_touptek_powerbox_sdk.h	run	6	AlpacaCore/conformu/ToupTek/Fake/Fake-switch-fake_touptek_powerbox_sdk-Linux-arm64.txt	-
 altair	camera	fake_touptek_sdk.h	run	6	AlpacaCore/conformu/Altair/Fake/Fake-camera-fake_touptek_sdk-Linux-arm64.txt	-
-svbony	camera	fake_svbony_sdk.h	pending	6	-	driver timing, not the fake: FakeSVBSDK now times each exposure and blocks pulse_guide for its pulse (#2693), and ConformU then passes every check, but the driver's PulseGuide is synchronous (it returns only after SVBPulseGuide), so each 2 s pulse misses the 1 s STANDARD target (ConformU: PulseGuide North, South, East and West, 2.002 s); runs once PulseGuide runs the SDK call in an AsyncOperation slot and returns at once, as the QHY camera does
+svbony	camera	fake_svbony_sdk.h	run	6	AlpacaCore/conformu/SVBONY/Fake/Fake-camera-fake_svbony_sdk-Linux-arm64.txt	-
 gphoto	camera	fake_gphoto_sdk.h	run	5	AlpacaCore/conformu/GPhoto/Fake/Fake-camera-fake_gphoto_sdk-Linux-arm64.txt	-
 wandererastro	covercalibrator	fake_serial_streamer.h	run	6	AlpacaCore/conformu/WandererAstro/Fake/Fake-covercalibrator-fake_serial_streamer-Linux-arm64.txt	-
 wandererastro	filterwheel	fake_serial_streamer.h	run	6	AlpacaCore/conformu/WandererAstro/Fake/Fake-filterwheel-fake_serial_streamer-Linux-arm64.txt	-
 wandererastro	switch	fake_serial_streamer.h	pending	6	-	ConformU time, not the fake: the row hosts and passes every check it reached in a 10-minute run, but ConformU steps each of the three 0-255 dew heater outputs through every value at four offsets with a 3.5 s pause per step (about an hour per output), so a full run takes about three hours against the 45-minute CI job limit; runs once the job limit or the step count allows it
 bisque	telescope	-	no-fake	6	-	no fake exists yet
-weewx	observingconditions	-	no-fake	6	-	no fake exists yet
+weewx	observingconditions	fake_http_client.h	run	6	AlpacaCore/conformu/WeeWX/Fake/Fake-observingconditions-fake_http_client-Linux-arm64.txt	-
 remotealpaca	observingconditions	fake_http_client.h	run	6	AlpacaCore/conformu/Remote Alpaca/Fake/Fake-observingconditions-fake_http_client-Linux-arm64.txt	-
 remotealpaca	safetymonitor	fake_http_client.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
 remotealpaca	rotator	fake_http_client.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
@@ -47,6 +47,7 @@ remotealpaca	filterwheel	fake_http_client.h	pending	6	-	not yet tried: slice 6 d
 remotealpaca	switch	fake_http_client.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
 remotealpaca	telescope	fake_http_client.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
 remotealpaca	focuser	fake_http_client.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
+remotealpaca	covercalibrator	fake_http_client.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
 zwo	switch	-dewheater	no-fake	6	-	no fake exists yet
 zwo	switch	-asiair	no-fake	6	-	no fake exists yet
 zwo	switch	-asiair_plus	no-fake	6	-	no fake exists yet

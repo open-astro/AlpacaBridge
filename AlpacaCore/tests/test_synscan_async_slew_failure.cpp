@@ -16,8 +16,6 @@
 // The next Slewing read must return an Alpaca error instead (see
 // test_skywatcher_async_slew_failure.cpp for the contract reference).
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
@@ -1154,8 +1152,6 @@ TEST_CASE("SynScan hold window - a SlewToCoordinates whose GOTO send fails leave
     driver->set_connected(false);
 }
 
-#endif  // _WIN32
-
 // The mode a stop restores is the one the handset held when the motion started, not the one cached at connect: a
 // keypad change in between must not be undone by AbortSlew, MoveAxis(0) or the end of an RA pulse.
 namespace {
@@ -1579,8 +1575,6 @@ TEST_CASE("SynScan PulseGuide - a disconnect joins a pulse end that waits for it
     disconnected.get();
     CHECK_FALSE(driver->get_connected());
 }
-
-#ifndef _WIN32
 
 // Decision 0022 rule 2 (#1836), a cancel clears the window: a pulse cut short by MoveAxis(axis, 0), a slew, Park or
 // AbortSlew keeps its window only while that canceller runs, as the RA guard against reading the `t` 0 its blind stop
@@ -3218,5 +3212,3 @@ TEST_CASE("SynScan V3 - a 16-bit GOTO that never comes to rest after the handset
     st->drift_counts.store(0);
     driver->set_connected(false);
 }
-
-#endif  // _WIN32

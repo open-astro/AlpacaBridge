@@ -25,8 +25,6 @@
 // a sawtooth, exact right after the tick and one second of RA (15") low just before the next. With `sawtooth` set
 // the fake reports RA that way, from its own epoch, so a test can sample the driver at a chosen phase.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
@@ -2082,8 +2080,6 @@ TEST_CASE("SynScan GOTO landing - the hunt waits for a poll tick that is inside 
     alpacacore::vendor::synscan::set_status_poll_after_sample_hook_for_testing(*driver, nullptr);
     driver->set_connected(false);
 }
-
-#endif  // !_WIN32
 
 namespace {
 

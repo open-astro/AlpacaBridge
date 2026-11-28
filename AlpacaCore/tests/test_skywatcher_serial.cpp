@@ -17,8 +17,6 @@
 // classification. The UDP loopback tests in test_skywatcher_async.cpp cannot
 // reach any of this.
 
-#ifndef _WIN32
-
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_port_registry.h>
@@ -1756,8 +1754,6 @@ TEST_CASE("SkyWatcher serial - the connected port is claimed, released on discon
     protocol.disconnect();
     CHECK_FALSE(alpacacore::util::is_serial_port_in_use(board.slave_path()));
 }
-
-#endif  // _WIN32
 
 // open-astro#602: the serial fake answered the Wave 100i's counts, timer and
 // features to every board, so an EQM-35 Pro advertised home-index sensors the

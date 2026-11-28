@@ -18,8 +18,6 @@
 // the re-sync's (and a MoveAxis re-send's), stepped with advance(). Each case sets the trust latch and the kernel
 // probe through HostClockTrustGuard, which restores both.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/host_clock_trust.h>
@@ -431,5 +429,3 @@ TEST_CASE("OnStep host clock - a re-sync gives up after the shared motion bound"
         log.contains("Host clock stepped by 24507000 ms; the mount kept moving, so its clock is left alone: the next "
                      "host clock change or a client UTCDate write sets the mount clock"));
 }
-
-#endif  // _WIN32

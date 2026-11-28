@@ -44,20 +44,17 @@
 #include <vector>
 
 #include "catch2_compat.h"
-#include "driver_rig.h"
-#include "gps_status_check.h"
-#include "sidereal_time_check.h"
-
-#ifndef _WIN32
 #include "concurrency_stress.h"
+#include "driver_rig.h"
 #include "fake_celestron_cgx_mount.h"
 #include "fake_celestron_handset.h"
 #include "fake_mount_server.h"
 #include "fake_pty_write.h"
 #include "fake_task_clock.h"
+#include "gps_status_check.h"
 #include "hc_motion_rig.h"
 #include "pty_responder.h"
-#endif
+#include "sidereal_time_check.h"
 
 using alpacacore::DeviceType;
 
@@ -68,7 +65,6 @@ using alpacacore::test::require_alpaca_error;
 using alpacacore::test::time_stamp_of;
 using alpacacore::test::timed;
 
-#ifndef _WIN32
 // A connected driver on a fake mount, for the members whose answer depends on being connected. The server is
 // declared first, so it outlives the driver. The canned position-pair reply keeps every fixed-length connect read
 // from waiting out its timeout (see test_celestron_concurrency_stress.cpp).
@@ -87,7 +83,6 @@ struct ConnectedFakeCelestron {
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     }
 };
-#endif
 
 } // namespace
 
@@ -135,7 +130,6 @@ TEST_CASE("Celestron Telescope Driver - Device metadata", "[celestron][telescope
     CHECK(driver->get_unique_id() == "Celestron_3");
 }
 
-#ifndef _WIN32
 TEST_CASE("Celestron serial backends - refuse a NexStar open of a CGX AUX port",
           "[celestron][telescope][protocol][unit]") {
     alpacacore::test::FakeCelestronCgxMount mount;
@@ -155,7 +149,6 @@ TEST_CASE("Celestron serial backends - refuse a NexStar open of a CGX AUX port",
     CHECK(nexstar.last_connect_error().find("Celestron CGX mount") != std::string::npos);
     CHECK(direct.is_connected());
 }
-#endif
 
 TEST_CASE("Celestron Telescope Driver - Disconnected Behavior", "[celestron][telescope][unit]") {
     alpacacore::vendor::celestron::ConnectionInfo conn;
@@ -257,7 +250,6 @@ TEST_CASE("Celestron Telescope Driver - Axis Rate Ranges", "[celestron][telescop
 
 // Reading a target back needs a connection (NotConnected precedes ValueNotSet, #2075), so the round trip runs on a
 // connected driver; the disconnected answer is pinned by the contract sweep and by the independence case below.
-#ifndef _WIN32
 TEST_CASE("Celestron Telescope Driver - Target Coordinate Persistence", "[celestron][telescope][unit]") {
     ConnectedFakeCelestron mount;
     auto& driver = mount.driver;
@@ -282,7 +274,6 @@ TEST_CASE("Celestron Telescope Driver - Target Coordinate Persistence", "[celest
     REQUIRE_NOTHROW(driver->set_target_declination(90.0));
     ALPACA_REQUIRE_APPROX(driver->get_target_declination(), 90.0);
 }
-#endif
 
 TEST_CASE("Celestron Telescope Driver - Site Property Validation", "[celestron][telescope][unit]") {
     alpacacore::vendor::celestron::ConnectionInfo conn;
@@ -388,7 +379,6 @@ TEST_CASE("Celestron Telescope Driver - the two target properties are independen
     require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->sync_to_target(); }, alpacacore::AlpacaError::NotConnected);
 
-#ifndef _WIN32
     ConnectedFakeCelestron mount;
     auto& connected = *mount.driver;
     // Neither written yet: both refuse.
@@ -411,10 +401,7 @@ TEST_CASE("Celestron Telescope Driver - the two target properties are independen
     connected.set_target_declination(-30.25);
     CHECK(connected.get_target_right_ascension() == 7.25);
     CHECK(connected.get_target_declination() == -30.25);
-#endif
 }
-
-#ifndef _WIN32
 
 // ── The client-clock disagreement warning (#409) ─────────────────────────────
 
@@ -636,24 +623,20 @@ TEST_CASE("Celestron Telescope Driver - non-finite input is rejected", "[celestr
 
     SECTION("TargetDeclination") {
         require_alpaca_error([&]() { driver->set_target_declination(nan); }, alpacacore::AlpacaError::InvalidValue);
-#ifndef _WIN32
         // The rejected write must leave the target unset: readable only on a connected driver (#2075).
         ConnectedFakeCelestron mount;
         require_alpaca_error([&]() { mount.driver->set_target_declination(nan); },
                              alpacacore::AlpacaError::InvalidValue);
         require_alpaca_error([&]() { (void)mount.driver->get_target_declination(); },
                              alpacacore::AlpacaError::ValueNotSet);
-#endif
     }
     SECTION("TargetRightAscension") {
         require_alpaca_error([&]() { driver->set_target_right_ascension(nan); }, alpacacore::AlpacaError::InvalidValue);
-#ifndef _WIN32
         ConnectedFakeCelestron mount;
         require_alpaca_error([&]() { mount.driver->set_target_right_ascension(nan); },
                              alpacacore::AlpacaError::InvalidValue);
         require_alpaca_error([&]() { (void)mount.driver->get_target_right_ascension(); },
                              alpacacore::AlpacaError::ValueNotSet);
-#endif
     }
     SECTION("SiteElevation") {
         require_alpaca_error([&]() { driver->set_site_elevation(nan); }, alpacacore::AlpacaError::InvalidValue);
@@ -853,8 +836,6 @@ TEST_CASE("Celestron Telescope Driver - AbortSlew reports a stop it could not se
     driver->set_connected(false);
 }
 
-#endif  // _WIN32
-
 // #1298: the LST helper cut UTC to whole seconds.
 TEST_CASE("Celestron Telescope Driver - SiderealTime follows the clock to under a second",
           "[celestron][telescope][unit]") {
@@ -864,8 +845,6 @@ TEST_CASE("Celestron Telescope Driver - SiderealTime follows the clock to under 
     auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
     alpacacore::test::check_sidereal_time_follows_the_clock(*driver);
 }
-
-#ifndef _WIN32
 
 // Getters and DeviceState served from the polled snapshot (decision 0010, Celestron adoption; link-loss policy of
 // decision 0009). The driver runs on a FakeTaskClock, so its status poll runs only when a case advances the clock,
@@ -2891,10 +2870,6 @@ TEST_CASE("Celestron Link - over TCP a hangup is a lost link at once",
     driver->set_connected(false);
 }
 
-#endif  // _WIN32
-
-#ifndef _WIN32
-
 // ── #1478 spec-audit items ───────────────────────────────────────────────────
 
 TEST_CASE("Celestron spec audit - DestinationSideOfPier rejects out-of-range RA and Dec",
@@ -3031,9 +3006,6 @@ TEST_CASE("Celestron spec audit - PulseGuide rejects a bad direction or duration
     require_alpaca_error([&] { driver->pulse_guide(0, 25501); }, alpacacore::AlpacaError::InvalidValue);
 }
 
-#endif  // _WIN32
-
-#ifndef _WIN32
 namespace {
 
 // 24-bit signed fraction of a full rotation, as the GPS module reports a latitude or longitude.
@@ -3156,9 +3128,7 @@ TEST_CASE("Celestron snapshot - findhomeissensorsearch needs a home-switch model
     require_alpaca_error([&] { (void)driver->action("findhomeissensorsearch", ""); },
                          alpacacore::AlpacaError::NotConnected);
 }
-#endif
 
-#ifndef _WIN32
 // FakeCelestronHandset in ConformU mode (#2692): the NexStar hand-controller wire answered from FakeMountMotionModel.
 // The cases talk to the responder directly, on a clock they advance (hc_motion_rig.h).
 namespace {
@@ -3298,4 +3268,3 @@ TEST_CASE("Celestron Telescope Driver - enabling Tracking while parked is refuse
     REQUIRE(driver->get_at_park());
     require_alpaca_error([&] { driver->set_tracking(true); }, alpacacore::AlpacaError::InvalidOperation);
 }
-#endif

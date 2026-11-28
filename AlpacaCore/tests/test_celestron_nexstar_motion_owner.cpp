@@ -11,7 +11,6 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 //
 // Motion-owner follow-ups (issue #2467): tests that pin the #2263 motion-claim table for this driver.
-#ifndef _WIN32
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
@@ -247,5 +246,3 @@ TEST_CASE("Celestron motion owner - a pulse chunk is not sent once a newer comma
     }
     CHECK(hook_calls.load() == 1);
 }
-
-#endif  // !_WIN32

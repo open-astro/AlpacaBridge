@@ -21,8 +21,6 @@
 // and pulse before it storms or destroys. Operations racing a disconnect are
 // EXPECTED to throw; what must never happen is a crash, hang, or TSan report.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
@@ -264,5 +262,3 @@ TEST_CASE("Celestron telescope - destruction mid-operation (slew/pulse threads l
         CHECK(pulses.running() == 0);
     }
 }
-
-#endif  // !_WIN32

@@ -15,9 +15,12 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/util/serial_read.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_box_protocol_wrapper.h>
+#include <errno.h>
+#include <termios.h>
 
 #include <atomic>
 #include <chrono>
@@ -33,12 +36,6 @@
 #include <vector>
 
 #include "wandererastro_serial_scan.h"
-
-#ifndef _WIN32
-#include <alpacacore/util/serial_link.h>
-#include <errno.h>
-#include <termios.h>
-#endif
 
 namespace alpacacore::vendor::wandererastro {
 
@@ -76,7 +73,6 @@ double magnus_dew_point(double temp_c, double humidity_pct) {
     return (237.7 * gamma) / (17.27 - gamma);
 }
 
-#ifndef _WIN32
 // A read error that ends the connected link's read loop: the one serial rule (util::SerialLink, #2262: EIO, ENXIO,
 // ENODEV, EBADF). The connected paths feed it to serial_link_.note_error(), which keeps the verdict on the link.
 bool is_hangup_errno(int err) { return util::is_serial_loss_errno(err); }
@@ -284,14 +280,12 @@ bool raw_port_looks_like_box_candidate(const std::string& port_path) {
     if (!descriptor) return false;
     return alpacacore::util::usb_tty_descriptor_matches(*descriptor, wandererbox_usb_tokens());
 }
-#endif  // _WIN32
 
 }  // namespace
 
 std::vector<BoxPortInfo> enumerate_wandererbox_ports() {
     std::vector<BoxPortInfo> results;
 
-#ifndef _WIN32
     // Resolved (canonical) paths already probed via by-id, so the raw-node
     // pass below never re-opens a port the by-id pass already tried.
     std::set<std::string> probed;
@@ -358,7 +352,6 @@ std::vector<BoxPortInfo> enumerate_wandererbox_ports() {
             results.push_back(info);
         }
     }
-#endif
 
     return results;
 }
@@ -370,10 +363,6 @@ public:
     ~Impl() { disconnect(); }
 
     std::string connect(const BoxConnectionConfig& config) {
-#ifdef _WIN32
-        (void)config;
-        throw AlpacaException("WandererBox serial support is POSIX-only", AlpacaError::DriverException);
-#else
         std::lock_guard<std::mutex> lock(io_mutex_);
         if (connected_) {
             throw AlpacaException("WandererBox already connected; call disconnect() first",
@@ -422,7 +411,6 @@ public:
         ALPACA_LOG_INFO("WandererAstro", "Connected to " + state->model + " (firmware " +
                                              std::to_string(state->firmware_version) + ") on " + config_.serial_port);
         return state->model;
-#endif
     }
 
     void disconnect() {
@@ -443,9 +431,7 @@ public:
             link_.reset(clock_.now());
             loss_reason_.clear();  // decision 0009 point 5: a Disconnect clears the loss reason
         }
-#ifndef _WIN32
         close_serial_locked();  // a no-op after a lost link: the reader released the port
-#endif
         link_lost_.store(false);
     }
 
@@ -532,7 +518,6 @@ private:
         }
     }
 
-#ifndef _WIN32
     // Decision 0009 point 3 (issue #1988): the port is gone. Caller holds
     // io_mutex_ and connected_ is true. The cached state and firmware date are
     // cleared before link_lost_ is stored, both under state_mutex_, where the
@@ -563,10 +548,8 @@ private:
             lose_link_locked(reason);
         }
     }
-#endif
 
     void send_command(const std::string& code) {
-#ifndef _WIN32
         std::lock_guard<std::mutex> lock(io_mutex_);
         ensure_connected_locked();
         const std::string payload = code + "\n";
@@ -580,10 +563,6 @@ private:
             }
             throw AlpacaException("Serial write failed: " + util::errno_string(err), AlpacaError::DriverException);
         }
-#else
-        (void)code;
-        throw AlpacaException("WandererBox serial support is POSIX-only", AlpacaError::DriverException);
-#endif
     }
 
     static std::string format_firmware_date(int fw) {
@@ -601,7 +580,6 @@ private:
         return buf;
     }
 
-#ifndef _WIN32
     // Consume the controller's continuous status stream: a rolling token
     // stream resynchronising on the identity token, collecting 22 fields per
     // frame and committing each complete, well-formed frame to the cache.
@@ -712,7 +690,6 @@ private:
         }
         return false;
     }
-#endif
 
     void stop_reader() {
         reader_running_.store(false);
@@ -721,7 +698,6 @@ private:
         }
     }
 
-#ifndef _WIN32
     void open_serial_locked() {
         // SerialLink claims the port before it opens it (a port another
         // connected device holds is refused untouched, a scan's probe is waited
@@ -738,7 +714,6 @@ private:
     void close_serial_locked() {
         serial_link_.close();  // releases the port's claim with the fd
     }
-#endif
 
     mutable std::mutex io_mutex_;     // guards serial fd + connected_/config_
     mutable std::mutex state_mutex_;  // guards state_ + firmware_date_
@@ -758,9 +733,7 @@ private:
     std::atomic<bool> reader_running_{false};
     std::thread reader_thread_;
 
-#ifndef _WIN32
     util::SerialLink serial_link_;  // the claimed, exclusively held port; guarded by io_mutex_
-#endif
 };
 
 // --- WandererBoxProtocolWrapper public interface forwarding ---

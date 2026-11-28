@@ -18,8 +18,6 @@
 // own baud, VMIN=1/VTIME=0) under the CFW3's move wait is restored and cannot
 // hang Disconnect.
 
-#ifndef _WIN32
-
 #include <alpacacore/catalog/builtin_catalog.h>
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/util/error_handling.h>
@@ -220,5 +218,3 @@ TEST_CASE("QHY Q-Focuser catalog - the configured maxStep reaches the connected 
     CHECK(fake.count("\"cmd_id\":6,\"tar\":30000}") == 1);
     driver->set_connected(false);
 }
-
-#endif  // _WIN32

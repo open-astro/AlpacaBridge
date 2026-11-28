@@ -12,8 +12,6 @@
 
 #pragma once
 
-#ifndef _WIN32
-
 #include <alpacacore/vendor/celestron/celestron_cgx_protocol.h>
 #include <poll.h>
 #include <unistd.h>
@@ -351,5 +349,3 @@ private:
 };
 
 }  // namespace alpacacore::test
-
-#endif  // _WIN32

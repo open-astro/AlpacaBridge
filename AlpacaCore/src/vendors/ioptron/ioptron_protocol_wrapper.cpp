@@ -14,6 +14,9 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/serial_link.h>
+#include <alpacacore/util/serial_port_registry.h>
+#include <alpacacore/util/serial_read.h>
 #include <alpacacore/util/units.h>
 #include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
 #include <arpa/inet.h>
@@ -37,20 +40,12 @@
 #include <cmath>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
 #include <iomanip>
-#include <limits>
 #include <mutex>
 #include <sstream>
 #include <thread>
 #include <unordered_set>
-
-#ifndef _WIN32
-#include <alpacacore/util/serial_link.h>
-#include <alpacacore/util/serial_port_registry.h>
-#include <alpacacore/util/serial_read.h>
-
-#include <filesystem>
-#endif
 
 namespace alpacacore::vendor::ioptron {
 
@@ -84,20 +79,17 @@ constexpr std::chrono::milliseconds kPulseGuideAckWait{20};
 // the read slice over TCP: the window of the old byte-at-a-time recv() loop.
 constexpr int kSocketTimeoutMs = 200;
 
-#ifndef _WIN32
 // 8N1 raw at @p speed. The mount reads through tty_read(), so VMIN/VTIME
 // are not set here (SerialLink keeps the fd non-blocking).
 util::SerialLineConfigure mount_line(speed_t speed) {
     return [speed](struct termios& tty) { util::make_raw_8n1(tty, speed); };
 }
-#endif
 
 // Probe a serial port for an iOptron mount by sending :MountInfo# and checking
 // for a valid 4-digit model code response.
 // iOptron returns exactly 4 ASCII digits with no '#' terminator.
 // Returns the model code (e.g. "0025") on success, empty string on failure.
 std::string probe_ioptron_port(const std::string& port_path) {
-#ifndef _WIN32
     // The probe claim waits out another scan's probe of this port (the iEAF
     // and iEFW scans match the same Prolific adapters) and is held until this
     // function returns.
@@ -134,17 +126,12 @@ std::string probe_ioptron_port(const std::string& port_path) {
     }
 
     return "";
-#else
-    (void)port_path;
-    return "";
-#endif
 }
 
 // Probe a TCP host:port for an iOptron mount by sending :MountInfo# over a
 // non-blocking socket with a short timeout. Returns the 4-digit model code on
 // success, empty string on failure.
 std::string probe_ioptron_network(const std::string& host, int port, int timeout_ms = 1500) {
-#ifndef _WIN32
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         return "";
@@ -250,12 +237,6 @@ std::string probe_ioptron_network(const std::string& host, int port, int timeout
     }
 
     return "";
-#else
-    (void)host;
-    (void)port;
-    (void)timeout_ms;
-    return "";
-#endif
 }
 
 struct LocalSubnet {
@@ -267,7 +248,6 @@ struct LocalSubnet {
 
 std::vector<LocalSubnet> get_local_subnets() {
     std::vector<LocalSubnet> subnets;
-#ifndef _WIN32
     struct ifaddrs* ifaddr = nullptr;
     if (getifaddrs(&ifaddr) != 0) {
         return subnets;
@@ -307,7 +287,6 @@ std::vector<LocalSubnet> get_local_subnets() {
     }
 
     freeifaddrs(ifaddr);
-#endif
     return subnets;
 }
 
@@ -330,7 +309,6 @@ static constexpr KnownIOptronAddress KNOWN_IOPTRON_ADDRESSES[] = {
 // Read default gateway for a given interface from /proc/net/route.
 // Returns the gateway IP in host byte order, or 0 if not found.
 uint32_t get_interface_gateway(const std::string& iface_name) {
-#ifndef _WIN32
     FILE* fp = fopen("/proc/net/route", "r");
     if (!fp) {
         return 0;
@@ -355,13 +333,9 @@ uint32_t get_interface_gateway(const std::string& iface_name) {
     }
 
     fclose(fp);
-#else
-    (void)iface_name;
-#endif
     return 0;
 }
 
-#ifndef _WIN32
 // The raw /dev/ttyUSBn fallback below has no by-id symlink name to filter
 // on, so without this check it would open EVERY serial device on the box --
 // unrelated FTDI dongles, GPS receivers, or a mount controller sharing the
@@ -372,7 +346,6 @@ bool raw_port_looks_like_ioptron_candidate(const std::string& port_path) {
     if (!descriptor) return false;
     return alpacacore::util::usb_tty_descriptor_matches(*descriptor, ioptron_mount_usb_tokens());
 }
-#endif  // _WIN32
 
 } // anonymous namespace
 
@@ -443,7 +416,6 @@ std::string model_code_to_name(const std::string& code) {
     return "";
 }
 
-#ifndef _WIN32
 namespace {
 // A port another connected device holds is never opened. One the connected
 // iOptron mount holds keeps its place in the list (no probe, model unknown),
@@ -467,7 +439,6 @@ bool skip_or_count_held_port(const std::string& resolved, const std::string& nam
     return false;
 }
 }  // namespace
-#endif
 
 namespace {
 iOptronScanHooks& scan_hooks() {
@@ -492,7 +463,6 @@ std::vector<iOptronPortInfo> enumerate_ioptron_ports() {
     if (const auto& enumerate = scan_hooks().enumerate_ports) return enumerate();
     std::vector<iOptronPortInfo> results;
 
-#ifndef _WIN32
     // Resolved (canonical) paths already probed via by-id, so the raw-node
     // pass below never re-opens a port the by-id pass already tried.
     std::unordered_set<std::string> probed;
@@ -574,7 +544,6 @@ std::vector<iOptronPortInfo> enumerate_ioptron_ports() {
             results.push_back({resolved, "", code});
         }
     }
-#endif
 
     return results;
 }
@@ -593,7 +562,6 @@ std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts() {
     if (const auto& enumerate = scan_hooks().enumerate_hosts) return enumerate();
     std::vector<iOptronNetworkHostInfo> results;
 
-#ifndef _WIN32
     static constexpr int PROBE_PORTS[] = {8899, 4030};
     static constexpr int NUM_PROBE_PORTS = 2;
     static constexpr int CONNECT_BATCH_SIZE = 256;
@@ -859,7 +827,6 @@ std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts() {
         }
         results = std::move(deduped);
     }
-#endif
 
     return results;
 }
@@ -1050,18 +1017,12 @@ public:
         const bool reply_overdue = reply_overdue_;
         reply_overdue_ = false;
         if (connection_type_ == ConnectionType::Serial) {
-#ifndef _WIN32
             if (link_) {
                 if (reply_overdue) {
                     drain_serial_stale(late_reply_drain_ms());
                 }
                 tcflush(link_.fd(), TCIFLUSH);
             }
-#else
-            if (serial_handle_ != INVALID_HANDLE_VALUE) {
-                PurgeComm(serial_handle_, PURGE_RXCLEAR);
-            }
-#endif
         } else {
             drain_network_stale(reply_overdue ? late_reply_drain_ms() : 0);
         }
@@ -1143,7 +1104,6 @@ public:
     // all drained. A silent mount is the expected "no ack" for a blind command;
     // a hangup is not silence: it loses the link like any other read.
     void drain_serial_stale(int wait_ms) {
-#ifndef _WIN32
         util::ReadSpec spec;
         spec.stop = util::ReadSpec::Stop::IdleGap;
         spec.idle_gap = std::chrono::milliseconds(100);
@@ -1157,13 +1117,9 @@ public:
         if (r.outcome == util::ReadOutcome::LinkDead) {
             throw_link_lost(r.err);
         }
-#else
-        (void)wait_ms;
-#endif
     }
 
     void drain_network_stale(int wait_ms) {
-#ifndef _WIN32
         struct pollfd pfd{};
         pfd.fd = socket_fd_;
         pfd.events = POLLIN;
@@ -1181,24 +1137,6 @@ public:
             }
             wait_ms = 0;
         }
-#else
-        fd_set readfds;
-        FD_ZERO(&readfds);
-        FD_SET(socket_handle_, &readfds);
-        timeval tv{};
-        tv.tv_sec = 0;
-        tv.tv_usec = wait_ms * 1000;
-        while (true) {
-            int ret = select(0, &readfds, nullptr, nullptr, &tv);
-            if (ret <= 0) break;
-            char ch;
-            int n = recv(socket_handle_, &ch, 1, 0);
-            if (n <= 0) break;
-            tv.tv_usec = 0;
-            FD_ZERO(&readfds);
-            FD_SET(socket_handle_, &readfds);
-        }
-#endif
     }
 
     void flush_input() {
@@ -1207,15 +1145,9 @@ public:
             return;
         }
         if (connection_type_ == ConnectionType::Serial) {
-#ifndef _WIN32
             if (link_) {
                 tcflush(link_.fd(), TCIFLUSH);
             }
-#else
-            if (serial_handle_ != INVALID_HANDLE_VALUE) {
-                PurgeComm(serial_handle_, PURGE_RXCLEAR);
-            }
-#endif
         } else {
             // Up to 16 stale bytes, each waited for one read slice (the old
             // 200 ms receive timeout per byte): a quiet slice ends it, so a
@@ -1234,57 +1166,8 @@ public:
 
 private:
     bool connect_serial(const std::string& port_path, int baud_rate) {
-        ALPACA_LOG_INFO("iOptron", "connect_serial() called with port: [" + port_path + "], baud: " + std::to_string(baud_rate));
-#ifdef _WIN32
-        ALPACA_LOG_INFO("iOptron", "Windows serial port path");
-        // Windows serial port
-        std::wstring wport_path(port_path.begin(), port_path.end());
-        serial_handle_ = CreateFileW(
-            wport_path.c_str(),
-            GENERIC_READ | GENERIC_WRITE,
-            0,
-            nullptr,
-            OPEN_EXISTING,
-            0,
-            nullptr
-        );
-        
-        if (serial_handle_ == INVALID_HANDLE_VALUE) {
-            return false;
-        }
-        
-        DCB dcb = {0};
-        dcb.DCBlength = sizeof(DCB);
-        if (!GetCommState(serial_handle_, &dcb)) {
-            CloseHandle(serial_handle_);
-            serial_handle_ = INVALID_HANDLE_VALUE;
-            return false;
-        }
-        
-        dcb.BaudRate = baud_rate;
-        dcb.ByteSize = 8;
-        dcb.Parity = NOPARITY;
-        dcb.StopBits = ONESTOPBIT;
-        dcb.fDtrControl = DTR_CONTROL_ENABLE;
-        dcb.fRtsControl = RTS_CONTROL_ENABLE;
-        
-        if (!SetCommState(serial_handle_, &dcb)) {
-            CloseHandle(serial_handle_);
-            serial_handle_ = INVALID_HANDLE_VALUE;
-            return false;
-        }
-        
-        // Set timeouts
-        COMMTIMEOUTS timeouts = {0};
-        timeouts.ReadIntervalTimeout = 50;
-        timeouts.ReadTotalTimeoutConstant = 100;
-        timeouts.ReadTotalTimeoutMultiplier = 10;
-        timeouts.WriteTotalTimeoutConstant = 100;
-        timeouts.WriteTotalTimeoutMultiplier = 10;
-        SetCommTimeouts(serial_handle_, &timeouts);
-        
-        return true;
-#else
+        ALPACA_LOG_INFO("iOptron",
+                        "connect_serial() called with port: [" + port_path + "], baud: " + std::to_string(baud_rate));
         // Linux/macOS serial port
         ALPACA_LOG_INFO("iOptron", "Opening serial port: [" + port_path + "]");
         
@@ -1316,18 +1199,11 @@ private:
             return false;
         }
         ALPACA_LOG_INFO("iOptron", "Serial port configured successfully");
-        
+
         return true;
-#endif
     }
-    
+
     void disconnect_serial() {
-#ifdef _WIN32
-        if (serial_handle_ != INVALID_HANDLE_VALUE) {
-            CloseHandle(serial_handle_);
-            serial_handle_ = INVALID_HANDLE_VALUE;
-        }
-#else
         if (link_) {
             const int fd = link_.fd();
             // Let any queued TX bytes reach the mount and discard unread RX
@@ -1344,57 +1220,10 @@ private:
             tcflush(fd, TCIFLUSH);
             link_.close();  // releases TIOCEXCL and the registry claim
         }
-#endif
     }
-    
+
     bool connect_network(const std::string& host, int port) {
         ALPACA_LOG_INFO("iOptron", "connect_network() called with host: [" + host + "], port: " + std::to_string(port));
-#ifdef _WIN32
-        if (port < 0 || port > static_cast<int>(std::numeric_limits<u_short>::max())) {
-            ALPACA_LOG_ERROR("iOptron", "Network port out of range: " + std::to_string(port));
-            return false;
-        }
-        const u_short port_value = static_cast<u_short>(port);
-        socket_handle_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (socket_handle_ == INVALID_SOCKET) {
-            return false;
-        }
-        
-        sockaddr_in addr{};
-        std::memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port_value);
-        
-        // Resolve hostname
-        addrinfo hints{};
-        std::memset(&hints, 0, sizeof(hints));
-        hints.ai_family = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-        addrinfo* result = nullptr;
-        
-        if (getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0) {
-            closesocket(socket_handle_);
-            socket_handle_ = INVALID_SOCKET;
-            return false;
-        }
-        
-        addr.sin_addr = ((sockaddr_in*)result->ai_addr)->sin_addr;
-        freeaddrinfo(result);
-        
-        if (::connect(socket_handle_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
-            closesocket(socket_handle_);
-            socket_handle_ = INVALID_SOCKET;
-            return false;
-        }
-
-        configure_network_timeouts();
-        
-        // Set socket to blocking mode
-        u_long mode = 0;
-        ioctlsocket(socket_handle_, FIONBIO, &mode);
-        
-        return true;
-#else
         constexpr int kConnectTimeoutMs = 7000;
         socket_fd_ = socket(AF_INET, SOCK_STREAM, 0);
         if (socket_fd_ < 0) {
@@ -1407,7 +1236,7 @@ private:
         addr.sin_port = htons(port);
 
         // Resolve hostname — getaddrinfo is the reentrant replacement for
-        // gethostbyname (mirrors the Windows branch above).
+        // gethostbyname.
         addrinfo hints{};
         std::memset(&hints, 0, sizeof(hints));
         hints.ai_family = AF_INET;
@@ -1460,23 +1289,15 @@ private:
         configure_network_timeouts();
 
         return true;
-#endif
     }
-    
+
     void disconnect_network() {
-#ifdef _WIN32
-        if (socket_handle_ != INVALID_SOCKET) {
-            closesocket(socket_handle_);
-            socket_handle_ = INVALID_SOCKET;
-        }
-#else
         if (socket_fd_ >= 0) {
             close(socket_fd_);
             socket_fd_ = -1;
         }
-#endif
     }
-    
+
     bool write_data(const std::string& data) {
         if (connection_type_ == ConnectionType::Serial) {
             return write_serial(data);
@@ -1484,71 +1305,26 @@ private:
             return write_network(data);
         }
     }
-    
+
     bool write_serial(const std::string& data) {
-#ifdef _WIN32
-        const auto data_size = data.size();
-        if (data_size > std::numeric_limits<DWORD>::max()) {
-            return false;
-        }
-        // Loop until the whole payload is written so a short WriteFile (which can
-        // return TRUE with bytes_written < requested under backpressure) can't
-        // drop trailing bytes and corrupt framing (mirrors POSIX write_all).
-        std::size_t total = 0;
-        while (total < data_size) {
-            DWORD bytes_written = 0;
-            if (!WriteFile(serial_handle_, data.c_str() + total, static_cast<DWORD>(data_size - total), &bytes_written,
-                           nullptr) ||
-                bytes_written == 0) {
-                return false;
-            }
-            total += bytes_written;
-        }
-        return true;
-#else
         return link_.write_all(data);  // the util::SerialLink verdict judges a failure (#2262); errno is kept
-#endif
     }
 
     bool write_network(const std::string& data) {
-#ifdef _WIN32
-        const auto data_size = data.size();
-        if (data_size > static_cast<size_t>(std::numeric_limits<int>::max())) {
-            return false;
-        }
-        // Loop over short sends so partial bytes can't corrupt the next command's
-        // framing (mirrors the POSIX send_all path below).
-        std::size_t total = 0;
-        while (total < data_size) {
-            int bytes_sent = send(socket_handle_, data.c_str() + total, static_cast<int>(data_size - total), 0);
-            if (bytes_sent <= 0) {
-                return false;
-            }
-            total += static_cast<std::size_t>(bytes_sent);
-        }
-        return true;
-#else
         // MSG_NOSIGNAL: a peer disconnect mid-send must not deliver SIGPIPE and
         // kill the server. send_all loops over short sends so partial bytes
         // can't corrupt the next command's framing on this connection.
         return util::send_all(socket_fd_, data.c_str(), data.length(), MSG_NOSIGNAL);
-#endif
     }
 
     // One reply read for both transports: util::read_until on the tty or
     // util::read_until_socket on the TCP fd. The wait is poll()-bounded, so the
     // old 10 ms pacing sleep is gone.
     util::ReadResult read_reply(const util::ReadSpec& spec, std::chrono::steady_clock::time_point deadline) {
-#ifndef _WIN32
         if (connection_type_ == ConnectionType::Serial) {
             return util::read_until(link_, spec, deadline);
         }
         return util::read_until_socket(socket_fd_, spec, deadline);
-#else
-        (void)spec;
-        (void)deadline;
-        throw AlpacaException("iOptron mount reads are Linux-only");
-#endif
     }
 
     // A hangup on a read (decision 0009 rule 2a): the port is gone over serial, the peer closed or reset the stream
@@ -1564,15 +1340,11 @@ private:
     // ECONNRESET, ENOTCONN, EBADF, ENOTSOCK). A write timeout, EHOSTUNREACH or ENETUNREACH is not: that stays a failed
     // exchange for the fault latch.
     void fail_link_if_gone_locked(int err) {
-#ifndef _WIN32
         if (connection_type_ == ConnectionType::Serial ? link_.lost() : util::socket_hangup_errno(err)) {
             fail_link_locked(std::string("iOptron mount ") +
                              (connection_type_ == ConnectionType::Serial ? "serial" : "network") +
                              " link lost (write): " + util::errno_string(err));
         }
-#else
-        (void)err;
-#endif
     }
 
     // Decision 0009 rule 2a: release the port so a replugged mount can be reopened, latch link_lost_ for the driver
@@ -1649,22 +1421,12 @@ private:
 
     void configure_network_timeouts() {
         int nodelay = 1;
-#ifdef _WIN32
-        DWORD timeout = kSocketTimeoutMs;
-        setsockopt(socket_handle_, SOL_SOCKET, SO_RCVTIMEO,
-                   reinterpret_cast<const char*>(&timeout), sizeof(timeout));
-        setsockopt(socket_handle_, SOL_SOCKET, SO_SNDTIMEO,
-                   reinterpret_cast<const char*>(&timeout), sizeof(timeout));
-        setsockopt(socket_handle_, IPPROTO_TCP, TCP_NODELAY,
-                   reinterpret_cast<const char*>(&nodelay), sizeof(nodelay));
-#else
         timeval timeout{};
         timeout.tv_sec = 0;
         timeout.tv_usec = kSocketTimeoutMs * 1000;
         setsockopt(socket_fd_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         setsockopt(socket_fd_, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
         setsockopt(socket_fd_, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
-#endif
     }
 
 public:
@@ -1729,14 +1491,9 @@ private:
     std::string fault_;
     ConnectionType connection_type_;
     ConnectionInfo connection_info_;
-    
-#ifdef _WIN32
-    HANDLE serial_handle_;
-    SOCKET socket_handle_;
-#else
+
     util::SerialLink link_;
     int socket_fd_;
-#endif
     std::string last_connect_error_;  // operator-facing reason the last connect failed (guarded by mutex_)
 };
 

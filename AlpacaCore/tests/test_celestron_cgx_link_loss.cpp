@@ -16,8 +16,6 @@
 // real time a muted poll costs is its 500 ms AUX timeout. Mirrors run_staleness_scenario in
 // test_skywatcher_link_loss.cpp.
 
-#ifndef _WIN32
-
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/serial_io.h>
@@ -512,5 +510,3 @@ TEST_CASE("Celestron CGX link loss - a Connect after a loss during a GoTo stops 
     CHECK(rig.mount->axis_physical_position(0x10) == 0);
     CHECK(rig.mount->axis_physical_position(0x11) == 0);
 }
-
-#endif  // !_WIN32

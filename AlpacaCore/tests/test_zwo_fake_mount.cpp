@@ -14,8 +14,6 @@
 // the driver's wrapper expects before any driver test relies on it. These cases talk to it
 // over its socket with a raw client, so they pin the fake, not the driver.
 
-#ifndef _WIN32
-
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -349,5 +347,3 @@ TEST_CASE("FakeZwoMount - drop_link and reset_connections close the link and a n
     Client third{rig.mount.port()};
     CHECK(third.ask(":GVP#") == "AM5N#");
 }
-
-#endif  // !_WIN32

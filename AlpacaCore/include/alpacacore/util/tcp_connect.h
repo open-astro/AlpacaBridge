@@ -18,8 +18,6 @@
 // TCP timeout (~127 s) while the wrapper holds its lock. The result is a plain file descriptor: the caller owns it and
 // does its own I/O (decision 0013 section 7).
 
-#ifndef _WIN32
-
 #include <alpacacore/util/serial_io.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -252,5 +250,3 @@ inline TcpConnectResult connect_tcp(const std::string& host, int port, int timeo
 }
 
 }  // namespace alpacacore::util
-
-#endif  // !_WIN32

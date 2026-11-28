@@ -11,7 +11,6 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 //
 // Motion-owner follow-ups (issue #2467): tests that pin the #2263 motion-claim table for this driver.
-#ifndef _WIN32
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
@@ -227,5 +226,3 @@ TEST_CASE("SynScan PulseGuide - a replacement pulse supersedes the older one bef
         CHECK(rig.driver->get_is_pulse_guiding());
     }
 }
-
-#endif  // !_WIN32

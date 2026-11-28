@@ -36,8 +36,6 @@
 //
 // POSIX-only, like the serial scans it serves.
 
-#ifndef _WIN32
-
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
@@ -147,5 +145,3 @@ inline bool port_answers_synscan_echo(const std::string& port_path, int timeout_
 }
 
 }  // namespace alpacacore::util
-
-#endif  // !_WIN32
