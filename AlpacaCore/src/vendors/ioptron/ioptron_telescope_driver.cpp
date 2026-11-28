@@ -54,6 +54,7 @@
 #include <sstream>
 #include <thread>
 #include <type_traits>
+#include <utility>
 
 namespace alpacacore::vendor::ioptron {
 
@@ -1086,6 +1087,7 @@ public:
             protocol.stop_tracking();
         }
         write_tracking_locked(tracking);
+        stop_verify_restore_tracking_.reset();  // #2762: the client's write wins over a bound stop's pending restore
         if (axis_move_active_primary_ || axis_move_active_secondary_) {
             tracking_state_before_move_ = tracking;
         } else {
@@ -1228,8 +1230,9 @@ public:
             return normalize_side_of_pier_value(frame.side_of_pier);
         }
         const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
-        const double synced_ra = util::wrap_hours(frame.ra_hours + sync_offset_ra_hours_);
-        const double hour_angle = util::shortest_ra_delta_hours(lst, synced_ra);
+        // The mount's own frame: the pier side follows where the mount points, not the Sync-shifted RA clients see
+        // (#2761).
+        const double hour_angle = util::shortest_ra_delta_hours(lst, frame.ra_hours);
         return util::pier_side_for_hour_angle(hour_angle);
     }
 
@@ -1249,7 +1252,9 @@ public:
 
                                           const double lst = util::local_sidereal_hours(current_utc_time_locked(),
                                                                                         site_longitude_cached_);
-                                          const double hour_angle = util::shortest_ra_delta_hours(lst, ra);
+                                          // The RA the GOTO sends, in the mount's frame (#2761).
+                                          const double hour_angle = util::shortest_ra_delta_hours(
+                                              lst, util::wrap_hours(ra - sync_offset_ra_hours_));
 
                                           return util::pier_side_for_hour_angle(hour_angle);
                                       });
@@ -1907,6 +1912,8 @@ public:
 
     void abort_slew() override {
         std::lock_guard<std::mutex> handoff_lock(slew_handoff_mutex_);
+        // The stop check (#2760) starts once the locks below are released: declared first, destroyed last.
+        const StopVerifyStarter start_stop_verify_after{*this};
         // open-astro#768: fence the async slew dispatch first, so no :MS1#
         // can reach the mount after the stop below. Runs without mutex_ held
         // (the dispatch body takes it), like every other reap site. Taking
@@ -1946,13 +1953,7 @@ public:
         // returns Tracking to its state before the motion. The firmware reports tracking off for a whole GOTO and
         // :Q# leaves it as it is, so a stopped GOTO would otherwise stay untracked. An Alt/Az slew needs Tracking
         // off (#1377) and Park and FindHome end without it, so those are left as the stop leaves them.
-        std::optional<bool> restore_tracking;
-        if (slew_in_progress_ && equatorial_slew_) {
-            restore_tracking = true;
-        } else if ((axis_move_active_primary_ || axis_move_active_secondary_) &&
-                   tracking_state_before_move_.has_value()) {
-            restore_tracking = tracking_state_before_move_;
-        }
+        const std::optional<bool> restore_tracking = tracking_to_restore_after_stop_locked();
         slew_in_progress_ = false;
         equatorial_slew_ = false;
         note_unlanded_zero_search_locked();
@@ -1966,6 +1967,9 @@ public:
         if (parked) {
             throw AlpacaException("AbortSlew is not allowed while parked", AlpacaError::InvalidWhileParked);
         }
+        // Issue #2760: every stop that went out is checked, whatever the flags say: an earlier AbortSlew or a status
+        // read that lied "stopped" has cleared them, and the reap above ended that check.
+        request_stop_verify_locked();
         if (restore_tracking.has_value()) {
             try {
                 if (*restore_tracking) {
@@ -2702,6 +2706,9 @@ private:
     // the fault latch; the probe throws only fixed text and never logs a mount reply (CWE-117, AlpacaCore has no
     // escaper).
     std::optional<PolledFrame> probe() {
+        // The 300 s bound stop the landing gate may send below asks for a stop check (#2760), started once the
+        // operation lock is released: declared first, destroyed last.
+        const StopVerifyStarter start_stop_verify_after{*this};
         struct PollThread {
             explicit PollThread(const iOptronTelescopeDriver* self) { tl_state_poll_driver = self; }
             ~PollThread() { tl_state_poll_driver = nullptr; }
@@ -3419,7 +3426,10 @@ private:
     // has its own slot (move_axis_cap_).
     void start_motion_bound_watchdog() {
         try {
-            motion_bound_watchdog_.start([this](util::OperationContext& ctx) { run_motion_bound_watchdog(ctx); });
+            motion_bound_watchdog_.start([this](util::OperationContext& ctx) {
+                run_motion_bound_watchdog(ctx);
+                start_pending_stop_verify();  // the cap stop it sent asks for a check, started with no lock held
+            });
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN("iOptron", std::string("Motion bound watchdog could not start: ") + e.what());
         }
@@ -3484,6 +3494,8 @@ private:
             last_slew_error_ = failure + ", and stopping the mount failed: " + e.what();
             stop_failed = true;
         }
+        // Issue #2762: Tracking comes back as AbortSlew leaves it (#2000), once the stop check has verified the stop.
+        const std::optional<bool> restore_tracking = tracking_to_restore_after_stop_locked();
         slew_in_progress_ = false;
         equatorial_slew_ = false;
         axis_move_active_primary_ = false;
@@ -3498,7 +3510,139 @@ private:
         } else {
             ALPACA_LOG_INFO("iOptron", last_slew_error_);
         }
+        request_stop_verify_locked(restore_tracking);
         return true;
+    }
+
+    // Issue #2000, #2762: the Tracking a stop restores, read before the motion flags are cleared: on after an
+    // equatorial GOTO, the pre-move state after a MoveAxis, nothing otherwise (Alt/Az slew, Park, FindHome, idle).
+    std::optional<bool> tracking_to_restore_after_stop_locked() const {
+        if (slew_in_progress_ && equatorial_slew_) return true;
+        if (axis_move_active_primary_ || axis_move_active_secondary_) return tracking_state_before_move_;
+        return std::nullopt;
+    }
+
+    // Issue #2760: a stop that went out (AbortSlew's, the 300 s bound's) is not a stopped mount, so the stop check
+    // follows it. Under mutex_ this only notes the request; the caller starts the check with no driver lock held
+    // (start_pending_stop_verify(), decision 0006 rule 4). The check observes both axes as they stand now
+    // (util::MotionOwner::observe()): a newer claim (a GOTO, Park, FindHome, MoveAxis) or a stop (AbortSlew,
+    // MoveAxis(axis, 0), a disconnect) ends it. The MoveAxis cap verifies its own stop (run_move_axis_cap()).
+    void request_stop_verify_locked(std::optional<bool> restore_tracking = std::nullopt) const {
+        stop_verify_claim_ = motion_owner_.observe(util::MotionOwner::kBothAxes);
+        stop_verify_restore_tracking_ = restore_tracking;
+        stop_verify_pending_.store(true);
+    }
+
+    // Starts the stop check a locked stop asked for. Call with no driver lock held. A start the slot refuses is
+    // logged: the stop went out, and the check is the safety net on top of it.
+    void start_pending_stop_verify() const noexcept {
+        if (!stop_verify_pending_.load()) return;
+        util::MotionClaim claim;
+        try {
+            {
+                StateLock lock(lock_gate_, StateLock::Mode::State);
+                if (!stop_verify_pending_.exchange(false) || !connected_) return;
+                claim = stop_verify_claim_;
+            }
+            stop_verify_.start([this, claim](util::OperationContext& ctx) { run_stop_verify(ctx, claim); });
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("iOptron", std::string("The stop check did not start: ") + e.what());
+        } catch (...) {
+            ALPACA_LOG_WARN("iOptron", "The stop check did not start: unknown exception");
+        }
+    }
+
+    // Starts the pending stop check when a scope that held the driver locks has ended.
+    struct StopVerifyStarter {
+        const iOptronTelescopeDriver& driver;
+        ~StopVerifyStarter() { driver.start_pending_stop_verify(); }
+    };
+
+    // The body of the stop check (#2760, the shared util::run_verified_stop): the stop already went out, so the first
+    // send_stop is skipped. Every 250 ms the mount's status and position are read; the stop is verified when the
+    // status shows no motion and two position reads 500 ms apart agree within 30 arcsec, and sent again (:Q# with
+    // :qR#/:qD#) when a 1 s round ends unverified, 3 stops in all. One that never verifies leaves
+    // util::kStopNotVerifiedText for Slewing, until the next command or a reconnect clears it. Every hook takes the
+    // operation lock for its own exchange only. The body ends, sending nothing more, as soon as it is cancelled (a
+    // disconnect, an AbortSlew that reaps it) or a newer claim or stop reached either axis.
+    void run_stop_verify(util::OperationContext& ctx, util::MotionClaim claim) const {
+        const auto owns_locked = [&] {
+            if (connected_ && !link_lost() && ctx.stop_reason() == util::StopReason::None &&
+                motion_owner_.stop_reason(claim) == util::StopReason::None) {
+                return true;
+            }
+            stop_verify_.cancel();  // ends the body at its next check; never blocks
+            return false;
+        };
+        bool first_stop_already_sent = true;
+        util::StopVerifyHooks hooks;
+        hooks.send_stop = [&] {
+            if (std::exchange(first_stop_already_sent, false)) return;
+            StateLock lock(lock_gate_);
+            if (!owns_locked()) return;
+            const Wire protocol = wire();
+            protocol.stop_slewing();
+            protocol.send_command_blind(":qR#");
+            protocol.send_command_blind(":qD#");
+        };
+        hooks.read_status = [&]() -> std::optional<util::MotionStatusReading> {
+            StateLock lock(lock_gate_);
+            if (!owns_locked()) return std::nullopt;
+            const bool moving = wire().get_status().is_slewing;
+            return util::MotionStatusReading{moving, clock_.now()};
+        };
+        hooks.read_position = [&]() -> std::optional<util::PositionReading> {
+            StateLock lock(lock_gate_);
+            if (!owns_locked()) return std::nullopt;
+            const Position position = wire().get_position();
+            return util::PositionReading{{position.ra_hours, position.dec_degrees}, clock_.now()};
+        };
+        try {
+            if (util::run_verified_stop(ctx, clock_, hooks)) {
+                ALPACA_LOG_DEBUG("iOptron", "The stop is verified");
+                restore_tracking_after_stop(ctx, claim);
+            }
+        } catch (const AlpacaException& e) {
+            StateLock lock(lock_gate_, StateLock::Mode::State);
+            if (connected_ && motion_owner_.stop_reason(claim) == util::StopReason::None &&
+                ctx.stop_reason() == util::StopReason::None) {
+                last_slew_error_ = e.what();
+                ALPACA_LOG_WARN("iOptron", last_slew_error_);
+            }
+        }
+    }
+
+    // Issue #2762: after a verified 300 s bound stop, Tracking is set back as AbortSlew sets it (#2000), unless a
+    // client wrote Tracking meanwhile (set_tracking() clears the pending restore). A failure joins the stored bound
+    // error that Slewing raises; a lost link is the relink's to report.
+    void restore_tracking_after_stop(util::OperationContext& ctx, const util::MotionClaim& claim) const {
+        StateLock lock(lock_gate_);
+        if (!stop_verify_restore_tracking_.has_value() || !connected_ || link_lost() ||
+            ctx.stop_reason() != util::StopReason::None || motion_owner_.stop_reason(claim) != util::StopReason::None) {
+            return;
+        }
+        const bool tracking = stop_verify_restore_tracking_.value();
+        stop_verify_restore_tracking_.reset();
+        try {
+            const Wire protocol = wire();
+            if (tracking) {
+                protocol.start_tracking();
+            } else {
+                protocol.stop_tracking();
+            }
+        } catch (const std::exception& e) {
+            if (link_lost()) return;
+            last_slew_error_ +=
+                std::string(last_slew_error_.empty() ? "" : "; ") + "Tracking could not be restored: " + e.what();
+            ALPACA_LOG_WARN("iOptron", last_slew_error_);
+            return;
+        }
+        // The mount is stopped: the frame that serves the read-back window must not keep the GOTO's status.
+        write_tracking_locked(tracking);
+        polled_.write([tracking](PolledFrame& frame) {
+            frame.status.is_slewing = false;
+            frame.status.system_status = tracking ? 1 : 0;
+        });
     }
 
     // Cancel and join the motion bound watchdog. Without mutex_ held; under transition_mutex_ or in the destructor.
@@ -4181,7 +4325,11 @@ private:
     // its reapers to be serialized across the whole join.
     // open-astro#768: only the stop paths (abort, disconnect, the destructor) fence the dispatch through this; a
     // motion command supersedes it (rule 3).
-    void reap_slew_dispatch() { slew_.cancel_all_and_join(); }
+    // Also ends the stop check (#2760): an AbortSlew or a disconnect owns the mount, so no resend may follow.
+    void reap_slew_dispatch() {
+        slew_.cancel_all_and_join();
+        stop_verify_.cancel_all_and_join();
+    }
 
     // Starts `body` on the slew slot after the initiator published its state
     // and claimed both axes (`claim`). Call without mutex_ held, under
@@ -4470,6 +4618,11 @@ private:
     mutable bool axis_move_active_primary_ = false;
     mutable bool axis_move_active_secondary_ = false;
     mutable std::optional<bool> tracking_state_before_move_{};
+    mutable std::optional<bool> stop_verify_restore_tracking_{};  // under mutex_; the Tracking a bound stop restores
+    // Issue #2760: a stop that went out asked for a check (request_stop_verify_locked()); the flag is read without a
+    // lock, the observed claim under mutex_.
+    mutable std::atomic<bool> stop_verify_pending_{false};
+    mutable util::MotionClaim stop_verify_claim_{};
     mutable std::chrono::steady_clock::time_point park_override_until_{};
     // HAE29C wedged-park finalizer state — see park()/finalize_wedged_park_locked().
     mutable bool park_finalize_pending_ = false;
@@ -4648,6 +4801,10 @@ private:
     mutable std::array<util::AsyncOperation, 2> move_axis_cap_{
         {{"iOptron MoveAxis cap 0", move_axis_cap_generation_[0], clock_},
          {"iOptron MoveAxis cap 1", move_axis_cap_generation_[1], clock_}}};
+    // Issue #2760: the check that a stop stopped the mount (run_stop_verify()); its own generation. A newer claim or
+    // stop on either axis ends it (its observed claim). Declared after everything the body touches.
+    util::OperationGeneration stop_verify_slot_generation_;
+    mutable util::AsyncOperation stop_verify_{"iOptron stop check", stop_verify_slot_generation_, clock_};
 };
 
 // Factory function implementation

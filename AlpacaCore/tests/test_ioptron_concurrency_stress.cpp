@@ -259,6 +259,55 @@ TEST_CASE("iOptron telescope - destruction mid-operation (slew/pulse threads liv
     }
 }
 
+// Issue #2760: AbortSlew's stop check (a slot body that reads the mount and resends :Q#) races new GOTOs, other
+// AbortSlews and getters on the real task clock, then a last AbortSlew over a mount that ignores its first stop still
+// ends with the mount stopped.
+TEST_CASE("iOptron telescope - AbortSlew during a slew races the stop check",
+          "[ioptron][telescope][stress][goto-safety]") {
+    alpacacore::test::FakeIoptronMount mount("0012", 0.0);
+    REQUIRE(mount.ok());
+    mount.ignore_stops(1);
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, ioptron_endpoint(mount.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::InvalidValue,
+                                            alpacacore::AlpacaError::InvalidOperation,
+                                            alpacacore::AlpacaError::DriverException};
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 3; ++t) {
+        threads.emplace_back([&, t] {
+            for (int i = 0; i < 15; ++i) {
+                guard([&] { driver->slew_to_coordinates_async(5.0 + 0.1 * t, 20.0); });
+                guard([&] { driver->abort_slew(); });
+                guard([&] { static_cast<void>(driver->get_slewing()); });
+            }
+        });
+    }
+    for (auto& thread : threads) thread.join();
+
+    // The storm may leave a kept failure or a running GOTO; one more AbortSlew over a mount that misses its first
+    // stop must verify (the check polls every 250 ms: 3 s is the bound on a stop the second :Q# lands).
+    mount.ignore_stops(1);
+    const int gotos_before = mount.count(":MS1#");
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(7.0, 20.0));
+    // The GOTO is on the wire before the AbortSlew, so the mount runs and the ignored stop needs the check.
+    const auto sent_by = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (mount.count(":MS1#") == gotos_before && std::chrono::steady_clock::now() < sent_by) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(mount.moving());
+    REQUIRE_NOTHROW(driver->abort_slew());
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+    while (mount.moving() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    CHECK_FALSE(mount.moving());
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+}
+
 // iEFW filter wheel and iEAF focuser stress (#271, #1068): these are separate
 // serial devices from the mount above (each on its own Prolific USB-serial
 // bridge). Both run CONNECTED over a pty fake: the driver opens the pty slave

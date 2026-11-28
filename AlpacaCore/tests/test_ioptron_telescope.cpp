@@ -2423,6 +2423,24 @@ struct HeldSlewBody {
     ~HeldSlewBody() { release(); }
 };
 
+// Issue #2760: AbortSlew and the 300 s bound stop are followed by a stop check that polls on the task clock every
+// 250 ms. Steps the fake clock that way, letting every woken body settle, until done() or
+// `limit` of virtual time has passed: one big advance() would show the check a single read and make it send :Q#
+// again.
+bool advance_verify_until(FakeTaskClock& clock, const std::function<bool()>& done,
+                          std::chrono::seconds limit = std::chrono::seconds(8)) {
+    for (auto spent = std::chrono::milliseconds(0); spent <= limit; spent += std::chrono::milliseconds(250)) {
+        if (done()) return true;
+        const auto waits = clock.wait_count();
+        clock.advance(std::chrono::milliseconds(250));
+        clock.wait_for_woken_settled(std::chrono::seconds(5));
+        // The check reads the mount over real I/O between its waits: give it the turn to wait again (or to end)
+        // before the next step, or the steps would pass while it is still reading.
+        clock.wait_for_wait_count(waits + 1, std::chrono::milliseconds(50));
+    }
+    return done();
+}
+
 constexpr double kGuideRateDegPerSec = 0.5 * 360.0 / 86164.0905;  // the driver's default guide rate
 
 }  // namespace
@@ -3205,7 +3223,9 @@ TEST_CASE("iOptron zero search - AbortSlew and a reconnect end the search before
     driver->abort_slew();
     CHECK(mount.count(":Q#") == 1);
     mount.set_system_status(0);  // the stop
-    advance_polling(clock, std::chrono::seconds(1));
+    // Its stop check verifies (about 1 s of virtual time from when its body started waiting) and ends.
+    CHECK(advance_verify_until(clock, [] { return false; }, std::chrono::seconds(3)) == false);
+    CHECK(mount.count(":Q#") == 1);
     CHECK_FALSE(driver->get_slewing());  // status 0 is the mount's own answer again
     advance_polling(clock, std::chrono::seconds(130));
     CHECK_NOTHROW(driver->get_slewing());
@@ -4864,8 +4884,42 @@ TEST_CASE("iOptron async landing gate - a mount that never settles is stopped at
     poll_ticks(clock, 2);
     CHECK(driver->get_slewing());
     advance_polling(clock, std::chrono::seconds(300));
+    // The bound's text, or, once the stop check (#2760) has resent its stops to a position that never reads still,
+    // the check's own failure.
+    const std::string failure = slewing_failure(*driver);
+    CHECK((contains(failure, "did not settle within 300 s") || contains(failure, "still reports motion")));
+    CHECK(mount.count(":Q#") >= 1);
+    CHECK(mount.count(":Q#") <= 3);  // the bound's stop and at most two resends
+    driver->set_connected(false);
+}
+
+// Issue #2760: the landing gate's own 300 s stop (sent by the state poll, not the watchdog) is verified too.
+TEST_CASE("iOptron async landing gate - a 300 s bound stop the mount ignored once is sent again",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/300.0);
+    REQUIRE(mount.ok());
+    mount.status_lies_until_stable();  // reads stopped while the position runs: the landing gate holds it
+    mount.ignore_stops(1);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    age_past_connect_grace(clock);
+    io::set_motion_bound_watchdog_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+
+    const int restores_before = mount.count(":ST1#");
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
+    REQUIRE(wait_for_goto_dispatch(mount));
+    advance_polling(clock, std::chrono::seconds(6));
+    CHECK(driver->get_slewing());
+    poll_ticks(clock, 3);
+    CHECK(driver->get_slewing());
+    advance_polling(clock, std::chrono::seconds(300));  // the state poll runs the landing gate to its bound
     CHECK(contains(slewing_failure(*driver), "did not settle within 300 s"));
-    CHECK(mount.count(":Q#") == 1);
+    REQUIRE(mount.count(":Q#") >= 1);  // the stop check may already have sent its resend while the clock ran on
+    CHECK(advance_verify_until(clock, [&] { return mount.count(":Q#") >= 2; }));
+    // Issue #2762: the equatorial GOTO's verified stop ends with Tracking on.
+    CHECK(advance_verify_until(clock, [&] { return mount.count(":ST1#") == restores_before + 1; }));
     driver->set_connected(false);
 }
 
@@ -4958,6 +5012,104 @@ TEST_CASE("iOptron motion bound - an async GOTO whose status cannot be read at 3
     io::poll_state_now_for_testing(*driver);  // the paused poll's frame is 300 s old: one tick refreshes it
     CHECK(contains(slewing_failure(*driver), "status could not be read at its 300 s bound"));
     CHECK(mount.count(":Q#") == 1);
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron motion bound - a 300 s cap stop the mount ignored once is sent again and verified",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.ignore_stops(1);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    age_past_connect_grace(clock);
+    MotionBoundThread watchdog;
+    watchdog.attach(*driver);
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
+    REQUIRE(wait_for_goto_dispatch(mount));
+    REQUIRE(mount.moving());
+    REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
+    clock.advance(std::chrono::seconds(301));
+    REQUIRE(wait_until([&] { return mount.count(":Q#") == 1; }));
+    CHECK(advance_verify_until(clock, [&] { return !mount.moving(); }));
+    CHECK(advance_verify_until(clock, [&] { return false; }, std::chrono::seconds(4)) == false);
+    CHECK(mount.count(":Q#") == 2);
+    CHECK_FALSE(mount.moving());
+    CHECK(contains(slewing_failure(*driver), "did not end within 300 s"));
+    driver->set_connected(false);
+}
+
+// Issue #2762: the async GOTO's 300 s bound stop restores Tracking the way AbortSlew does (#2000), once the stop check
+// has verified the stop. FakeIoptronMount::set_goto_tracks_off models the HAE29C: :Q# leaves tracking off. (The
+// MoveAxis cap restores Tracking itself, #2651.)
+namespace {
+
+int last_command_index(const FakeIoptronMount& mount, const std::string& prefix) {
+    const auto commands = mount.commands();
+    for (int i = static_cast<int>(commands.size()) - 1; i >= 0; --i) {
+        if (commands[static_cast<std::size_t>(i)].rfind(prefix, 0) == 0) return i;
+    }
+    return -1;
+}
+
+}  // namespace
+
+// Review of #2821: a client's Tracking write while the stop check runs wins over the pending restore.
+// Falsified by: ioptron_telescope_driver.cpp set_tracking() not clearing stop_verify_restore_tracking_.
+TEST_CASE("iOptron motion bound - a Tracking write before the 300 s bound stop verifies cancels the restore",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_goto_tracks_off(true);
+    mount.ignore_stops(1);  // the first round does not verify, so the write lands inside the check
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    age_past_connect_grace(clock);
+    MotionBoundThread watchdog;
+    watchdog.attach(*driver);
+    driver->set_tracking(true);
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
+    REQUIRE(wait_for_goto_dispatch(mount));
+    REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
+    clock.advance(std::chrono::seconds(301));
+    REQUIRE(wait_until([&] { return mount.count(":Q#") == 1; }));
+    driver->set_tracking(false);  // another client turns Tracking off before the stop is verified
+    const int restores_before = mount.count(":ST1#");
+    CHECK(advance_verify_until(clock, [&] { return !mount.moving(); }));
+    CHECK(advance_verify_until(clock, [&] { return false; }, std::chrono::seconds(4)) == false);
+    CHECK(mount.count(":Q#") == 2);
+    CHECK(mount.count(":ST1#") == restores_before);
+    CHECK_FALSE(driver->get_tracking());
+    driver->set_connected(false);
+}
+
+// Falsified by: ioptron_telescope_driver.cpp stop_bounded_motion_locked() not handing restore_tracking to
+// request_stop_verify_locked().
+TEST_CASE("iOptron motion bound - a slew-bound stop of an equatorial GOTO leaves Tracking on",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_goto_tracks_off(true);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    age_past_connect_grace(clock);
+    MotionBoundThread watchdog;
+    watchdog.attach(*driver);
+    driver->set_tracking(true);
+    const int restores_before = mount.count(":ST1#");
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
+    REQUIRE(wait_for_goto_dispatch(mount));  // the fake reports status 2 (slewing, not tracking) until :Q#
+    REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
+    clock.advance(std::chrono::seconds(301));
+    REQUIRE(wait_until([&] { return mount.count(":Q#") == 1; }));
+    CHECK(advance_verify_until(clock, [&] { return mount.count(":ST1#") == restores_before + 1; }));
+    CHECK(last_command_index(mount, ":ST1#") > last_command_index(mount, ":Q#"));
+    CHECK(contains(slewing_failure(*driver), "did not end within 300 s"));
+    driver->abort_slew();
+    CHECK(driver->get_tracking());
     driver->set_connected(false);
 }
 
@@ -5235,5 +5387,86 @@ TEST_CASE(
     driver->pulse_guide(3, 3000);
     CHECK(mount.count(":Z") == pulses + 2);
     CHECK(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}
+
+// Issue #2761: after a Sync the mount's physical frame is what decides the pier side it uses. SideOfPier names the
+// side of the mount's own position, and DestinationSideOfPier the side of the RA the GOTO sends (the client RA less
+// the Sync offset). Both used to mix the two frames, so a +1 h Sync near the meridian named the wrong side.
+namespace {
+
+constexpr double kPierSiteLatitude = -33.856784;
+constexpr double kPierSiteLongitude = 151.215297;
+// The driver's pointing clock: SetUTCDate pins it, so the hour angles below do not depend on the host clock.
+const auto kPierUtc = std::chrono::system_clock::from_time_t(1700000000);
+
+// The RA, in hours, of the last ":SRA" the mount received (the RA the GOTO sent).
+double last_sent_ra_hours(const FakeIoptronMount& mount) {
+    const auto sent = mount.commands();
+    for (auto it = sent.rbegin(); it != sent.rend(); ++it) {
+        if (it->rfind(":SRA", 0) == 0) return std::atoll(it->substr(4, 9).c_str()) / (15.0 * 3600.0 * 100.0);
+    }
+    return -1.0;
+}
+
+int physical_side_for_ra(double ra_hours) {
+    const double lst = alpacacore::util::local_sidereal_hours(kPierUtc, kPierSiteLongitude);
+    return alpacacore::util::pier_side_for_hour_angle(alpacacore::util::shortest_ra_delta_hours(lst, ra_hours));
+}
+
+}  // namespace
+
+TEST_CASE("iOptron SideOfPier - after a +1 h Sync it names the side of the mount's own position",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_gps(0, kPierSiteLatitude, kPierSiteLongitude);
+    const double lst = alpacacore::util::local_sidereal_hours(kPierUtc, kPierSiteLongitude);
+    const double physical_ra = alpacacore::util::wrap_hours(lst - 0.5);  // hour angle +0.5 h: pier east (0)
+    mount.set_position(physical_ra, 20.0);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    driver->set_utc_date(kPierUtc);
+
+    driver->sync_to_coordinates(alpacacore::util::wrap_hours(physical_ra + 1.0), 20.0);  // synced frame: HA -0.5
+    age_past_connect_grace(clock);
+    poll_ticks(clock, 2);
+
+    REQUIRE(physical_side_for_ra(physical_ra) == 0);
+    CHECK(driver->get_side_of_pier() == 0);
+    CHECK(mount.count(":MS1#") == 0);  // nothing moved: the answer is the mount's position as it stands
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron DestinationSideOfPier - after a +1 h Sync it names the side the GOTO lands on",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_gps(0, kPierSiteLatitude, kPierSiteLongitude);
+    const double lst = alpacacore::util::local_sidereal_hours(kPierUtc, kPierSiteLongitude);
+    const double start_ra = alpacacore::util::wrap_hours(lst - 3.0);
+    mount.set_position(start_ra, 20.0);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    driver->set_utc_date(kPierUtc);
+    driver->sync_to_coordinates(alpacacore::util::wrap_hours(start_ra + 1.0), 20.0);  // offset +1 h
+
+    // Client RA at hour angle -0.5 h (west, 1) in the synced frame; the mount's frame is 1 h earlier: HA +0.5 (0).
+    const double client_ra = alpacacore::util::wrap_hours(lst + 0.5);
+    const int destination = driver->get_destination_side_of_pier(client_ra, 20.0);
+
+    driver->slew_to_coordinates_async(client_ra, 20.0);
+    REQUIRE(wait_for_goto_dispatch(mount));
+    const double sent_ra = last_sent_ra_hours(mount);  // the ledger: the RA the GOTO sent
+    CHECK(sent_ra == Catch::Approx(alpacacore::util::wrap_hours(client_ra - 1.0)).margin(1e-4));
+    advance_polling(clock, std::chrono::seconds(31));
+    REQUIRE_FALSE(driver->get_slewing());
+    advance_polling(clock, std::chrono::seconds(31));
+
+    CHECK(mount.ra_hours() == Catch::Approx(sent_ra).margin(1e-4));  // the fake's position: it landed there
+    const int landed = physical_side_for_ra(mount.ra_hours());
+    CHECK(landed == 0);
+    CHECK(destination == landed);
+    CHECK(driver->get_side_of_pier() == landed);
     driver->set_connected(false);
 }

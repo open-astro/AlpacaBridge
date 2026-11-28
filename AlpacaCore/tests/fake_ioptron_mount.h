@@ -186,6 +186,27 @@ public:
     /// changes no status, as before, and a case sets the status it needs with set_system_status().
     void set_park_lands(bool on) { park_lands_.store(on); }
 
+    /// Issue #2760: the next @p n ":Q#" are received and counted but stop nothing, as a mount that misses a stop. From
+    /// the first call on the fake models motion: an accepted GOTO (":MS1#", ":MS2#") or an arrow command (":mw#",
+    /// ":me#", ":ms#", ":mn#") makes it run, ":GLS#" then reports slewing and each ":GEP#" read moves the RA by
+    /// kRunningStepUnits (far past the 30 arcsec a still mount may differ by), until a ":Q#" that is not ignored stops
+    /// it. ":qR#" and ":qD#" stop nothing (they end arrow motion on a real mount, not a GOTO).
+    void ignore_stops(int n) {
+        motion_modelled_.store(true);
+        ignored_stops_.store(n);
+    }
+
+    /// Issue #2760, a HAE29C over Wi-Fi: while the modelled mount runs, ":GLS#" reports it stopped (status 1,
+    /// tracking), so only the position reads show the motion. Models motion too (see ignore_stops()).
+    void status_lies_until_stable(bool on = true) {
+        motion_modelled_.store(true);
+        status_lies_.store(on);
+    }
+
+    /// Whether the modelled mount is running (never true unless ignore_stops() or status_lies_until_stable() was
+    /// called).
+    bool moving() const { return moving_.load(); }
+
     /// Issue #2186, HAE29C firmware: a ":Z" pulse-guide command makes the ":GLS" system status read 3 (auto-guiding)
     /// in place of 1 for the whole of the pulse. The fake has no pulse timer, so the status stays 3 until a test sets
     /// another with set_system_status(). Off by default: a pulse then changes no status, as before.
@@ -369,7 +390,8 @@ private:
             const long long lon = longitude_units_.load();
             std::snprintf(site, sizeof(site), "%c%08lld%08lld", lon < 0 ? '-' : '+', lon < 0 ? -lon : lon,
                           latitude_field_.load());
-            return std::string(site) + std::to_string(gps_status_.load()) + std::to_string(system_status_.load()) +
+            const int status = (moving_.load() && !status_lies_.load()) ? 2 : system_status_.load();
+            return std::string(site) + std::to_string(gps_status_.load()) + std::to_string(status) +
                    std::to_string(tracking_rate_digit_.load()) + "001#";
         }
         if (cmd == ":GUT#") {
@@ -394,7 +416,8 @@ private:
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (!position_reply_.empty()) return position_reply_;
             }
-            const long long ra = ra_units_.fetch_add(drift_units_.load()) + drift_units_.load();
+            const long long step = drift_units_.load() + (moving_.load() ? kRunningStepUnits : 0);
+            const long long ra = ra_units_.fetch_add(step) + step;
             const long long dec = dec_units_.load();
             return signed_eight(dec) + nine(ra) + std::to_string(pier_side_.load()) + "1#";
         }
@@ -429,6 +452,7 @@ private:
                 }
             }
             gep_failing_.store(fail_gep_after_goto_.exchange(0));
+            if (motion_modelled_.load()) moving_.store(true);
             if (motion_) {
                 // The mount slews over the travel time and tracks once it arrives (:GLS reads 2, then 1).
                 motion_->set_tracking(true);
@@ -445,6 +469,13 @@ private:
             // Issue #2420, HAE29C firmware: the zero sensor search is acked with a bare '1' and no '#', so a driver
             // that reads a '#'-terminated reply waits out its timeout. Its own branch, so a change to the generic
             // ":M" ack below cannot hand the search a '#' (issue #2432).
+            return "1";
+        }
+        if (cmd == ":Q#" && motion_modelled_.load()) {
+            int ignored = ignored_stops_.load();
+            while (ignored > 0 && !ignored_stops_.compare_exchange_weak(ignored, ignored - 1)) {
+            }
+            if (ignored <= 0) moving_.store(false);
             return "1";
         }
         if (goto_tracks_off_.load() && (cmd == ":Q#" || cmd == ":ST1#" || cmd == ":ST0#")) {
@@ -470,6 +501,7 @@ private:
             // Dec pulse polarity the driver assumes. The #2424 HAE29C rig check (2026-11-20, USB) confirmed this on
             // both pier sides.
             // No reply, as the firmware.
+            if (motion_modelled_.load()) moving_.store(true);
             if (cmd == ":mw#" || cmd == ":me#") {
                 ra_units_.fetch_add(cmd == ":mw#" ? kArrowStepUnits : -kArrowStepUnits);
             } else {
@@ -643,6 +675,11 @@ private:
     }
 
     static constexpr long long kArrowStepUnits = 60LL * 100LL;  // 60 arcsec in 0.01 arcsec units
+    static constexpr long long kRunningStepUnits = 300LL * 100LL;  // 300 arcsec per ":GEP#" read while running (#2760)
+    std::atomic<bool> motion_modelled_{false};
+    std::atomic<bool> moving_{false};
+    std::atomic<bool> status_lies_{false};
+    std::atomic<int> ignored_stops_{0};
     std::atomic<int> pier_side_{0};
     std::atomic<int> system_status_{1};
     std::atomic<int> tracking_rate_digit_{0};

@@ -21,6 +21,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <functional>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -293,4 +295,190 @@ TEST_CASE("iOptron AbortSlew - a parked mount still raises InvalidWhileParked fr
     CHECK(mount.count(":Q#") == stops_before + 1);
     CHECK(mount.count(":ST1#") == 0);
     driver->set_connected(false);
+}
+
+// Issue #2760: AbortSlew checks the mount stopped (the shared util::run_verified_stop): a still position pair 500 ms
+// apart and a status that shows no motion, polled every 250 ms on the task clock, with :Q# sent again as asked, three
+// in all within 3 s. FakeIoptronMount::ignore_stops() models a mount that misses stops: while it runs, :GLS# reports
+// slewing and every :GEP# read moves the RA by 300 arcsec.
+namespace {
+
+constexpr const char* kStopNotVerified = "AbortSlew: the mount still reports motion after 3 stops";
+
+// Steps the fake task clock by the 250 ms verify poll, letting every woken body settle, until done() or `limit` of
+// virtual time has passed.
+bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<bool()>& done,
+                   std::chrono::seconds limit = std::chrono::seconds(8)) {
+    for (auto spent = std::chrono::milliseconds(0); spent <= limit; spent += std::chrono::milliseconds(250)) {
+        if (done()) return true;
+        const auto waits = clock.wait_count();
+        clock.advance(std::chrono::milliseconds(250));
+        clock.wait_for_woken_settled(std::chrono::seconds(5));
+        // The check reads the mount over real I/O between its waits: give it the turn to wait again (or to end)
+        // before the next step, or the steps would pass while it is still reading.
+        clock.wait_for_wait_count(waits + 1, std::chrono::milliseconds(50));
+    }
+    return done();
+}
+
+void advance_for(alpacacore::test::FakeTaskClock& clock, std::chrono::seconds total) {
+    advance_until(clock, [] { return false; }, total);
+}
+
+std::string slewing_error(alpacacore::TelescopeDriver& driver) {
+    try {
+        (void)driver.get_slewing();
+        return "";
+    } catch (const alpacacore::AlpacaException& e) {
+        return e.what();
+    }
+}
+
+struct RunningMount {
+    alpacacore::test::FakeIoptronMount mount{"0012", 0.0};
+    alpacacore::test::FakeTaskClock clock;
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+    int q_before = 0;
+
+    // Connects and starts a GOTO the fake runs until a stop is honoured, then aborts it: the first :Q# is sent.
+    void start_and_abort() {
+        REQUIRE(mount.ok());
+        driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, endpoint(mount.port()), clock);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        driver->slew_to_coordinates_async(6.0, 45.0);
+        REQUIRE(wait_for_command(mount, ":MS1#", 1));
+        REQUIRE(mount.moving());
+        q_before = mount.count(":Q#");
+        driver->abort_slew();
+        REQUIRE(mount.count(":Q#") == q_before + 1);
+    }
+    int stops() const { return mount.count(":Q#") - q_before; }
+};
+
+}  // namespace
+
+// Falsified by: ioptron_telescope_driver.cpp abort_slew() sending one :Q# and no stop check (the mount runs on).
+TEST_CASE("iOptron AbortSlew - a stop the mount ignored once is sent again and verified",
+          "[ioptron][telescope][abort][unit][goto-safety]") {
+    RunningMount rig;
+    rig.mount.ignore_stops(1);
+    rig.start_and_abort();
+    CHECK(advance_until(rig.clock, [&] { return !rig.mount.moving(); }));
+    advance_for(rig.clock, std::chrono::seconds(4));
+    CHECK(rig.stops() == 2);
+    CHECK(rig.mount.count(":qR#") == 1);  // the resend carries the axis stops too
+    CHECK(rig.mount.count(":qD#") == 1);
+    CHECK_FALSE(rig.mount.moving());
+    const double stopped_ra = rig.mount.ra_hours();
+    advance_for(rig.clock, std::chrono::seconds(2));
+    CHECK(rig.mount.ra_hours() == stopped_ra);  // the position the fake holds no longer moves
+    CHECK(slewing_error(*rig.driver).empty());
+    rig.driver->set_connected(false);
+}
+
+// Falsified by: ioptron_telescope_driver.cpp abort_slew() not resending the stop (only one :Q# in all).
+TEST_CASE("iOptron AbortSlew - a mount that ignores two stops is stopped by the third",
+          "[ioptron][telescope][abort][unit][goto-safety]") {
+    RunningMount rig;
+    rig.mount.ignore_stops(2);
+    rig.start_and_abort();
+    CHECK(advance_until(rig.clock, [&] { return !rig.mount.moving(); }));
+    advance_for(rig.clock, std::chrono::seconds(4));
+    CHECK(rig.stops() == 3);
+    CHECK_FALSE(rig.mount.moving());
+    CHECK(slewing_error(*rig.driver).empty());  // verified: no failure kept
+    rig.driver->set_connected(false);
+}
+
+// Falsified by: ioptron_telescope_driver.cpp abort_slew() asking for the stop check only when it found a motion the
+// driver owned (a second AbortSlew finds none, and ends the first check).
+TEST_CASE("iOptron AbortSlew - a second AbortSlew keeps the stop check",
+          "[ioptron][telescope][abort][unit][goto-safety]") {
+    RunningMount rig;
+    rig.mount.status_lies_until_stable();
+    rig.mount.ignore_stops(10);
+    rig.start_and_abort();
+    rig.driver->abort_slew();
+    advance_for(rig.clock, std::chrono::seconds(6));
+    CHECK(rig.stops() >= 3);  // the second AbortSlew's stop is sent again
+    CHECK(rig.mount.moving());
+    CHECK(slewing_error(*rig.driver) == kStopNotVerified);
+    rig.driver->set_connected(false);
+}
+
+// Falsified by: ioptron_telescope_driver.cpp run_stop_verify() dropping the `generation == slew_operation_generation_`
+// terms (owns_locked and the catch): the old check would send :Q# into the client's MoveAxis.
+TEST_CASE("iOptron AbortSlew - a MoveAxis ends the stop check, which sends no more stops",
+          "[ioptron][telescope][abort][unit][goto-safety]") {
+    RunningMount rig;
+    rig.mount.ignore_stops(10);
+    rig.start_and_abort();
+    rig.driver->move_axis(0, rig.driver->get_axis_rate_ranges(0).front().first);
+    const int stops = rig.stops();
+    advance_for(rig.clock, std::chrono::seconds(5));
+    CHECK(rig.stops() == stops);  // no :Q# stops the client's move
+    CHECK(slewing_error(*rig.driver).empty());
+    rig.driver->set_connected(false);
+}
+
+// Falsified by: the same generation terms as the MoveAxis case; Park moves the generation too.
+TEST_CASE("iOptron AbortSlew - a Park ends the stop check, which sends no more stops",
+          "[ioptron][telescope][abort][unit][goto-safety]") {
+    RunningMount rig;
+    rig.mount.ignore_stops(10);
+    rig.start_and_abort();
+    rig.driver->park();
+    const int stops = rig.stops();
+    advance_for(rig.clock, std::chrono::seconds(5));
+    CHECK(rig.stops() == stops);
+    CHECK(slewing_error(*rig.driver).empty());
+    rig.driver->set_connected(false);
+}
+
+// Falsified by: ioptron_telescope_driver.cpp abort_slew() never raising the stop-not-verified failure for Slewing.
+TEST_CASE("iOptron AbortSlew - a mount that ignores every stop gets 3 :Q# and Slewing raises",
+          "[ioptron][telescope][abort][unit][goto-safety]") {
+    RunningMount rig;
+    rig.mount.ignore_stops(10);
+    rig.start_and_abort();
+    CHECK(advance_until(rig.clock, [&] { return !slewing_error(*rig.driver).empty(); }));
+    advance_for(rig.clock, std::chrono::seconds(4));
+    CHECK(rig.stops() == 3);  // never a fourth
+    CHECK(rig.mount.moving());
+    CHECK(slewing_error(*rig.driver) == kStopNotVerified);
+    CHECK(slewing_error(*rig.driver) == kStopNotVerified);  // kept until the next command
+    rig.driver->set_connected(false);
+}
+
+// Falsified by: ioptron_telescope_driver.cpp abort_slew() trusting a :GLS# status that shows no motion.
+TEST_CASE("iOptron AbortSlew - a status that lies stopped does not verify the stop, the position does",
+          "[ioptron][telescope][abort][unit][goto-safety]") {
+    RunningMount rig;
+    rig.mount.status_lies_until_stable();
+    rig.mount.ignore_stops(1);
+    rig.start_and_abort();
+    CHECK(advance_until(rig.clock, [&] { return !rig.mount.moving(); }));
+    advance_for(rig.clock, std::chrono::seconds(4));
+    CHECK(rig.stops() == 2);
+    CHECK_FALSE(rig.mount.moving());
+    CHECK(slewing_error(*rig.driver).empty());
+    rig.driver->set_connected(false);
+}
+
+// Falsified by: ioptron_telescope_driver.cpp not reaping the stop check when a new GOTO starts (a late :Q# would end
+// it).
+TEST_CASE("iOptron AbortSlew - a new GOTO ends the stop check, which sends no more stops",
+          "[ioptron][telescope][abort][unit][goto-safety]") {
+    RunningMount rig;
+    rig.mount.ignore_stops(10);
+    rig.start_and_abort();
+    REQUIRE(advance_until(rig.clock, [&] { return rig.stops() >= 2; }));
+    rig.driver->slew_to_coordinates_async(7.0, 45.0);
+    REQUIRE(wait_for_command(rig.mount, ":MS1#", 2));
+    const int stops = rig.stops();
+    advance_for(rig.clock, std::chrono::seconds(5));
+    CHECK(rig.stops() == stops);
+    CHECK(slewing_error(*rig.driver).empty());  // the old check's failure never reaches the new GOTO
+    rig.driver->set_connected(false);
 }
