@@ -1081,10 +1081,12 @@ public:
             // is replaced only after its last section, which holds no lock and sends nothing, so it returns at once.
             pulse_slot_.start([this](util::OperationContext& ctx) { drain_pulses(ctx); });
         } catch (...) {
-            // A refused start changes nothing. This call found no drain, so the queue holds only its own pulse.
+            // A refused start changes nothing. This call found no drain, so the queue holds only its own pulse. A loss
+            // that saw the flag left the handle to the drain, so the handle is closed here (#2748).
             std::lock_guard<std::mutex> lock(mutex_);
             pulse_queue_.clear();
             pulse_draining_.store(false);
+            close_lost_handle_locked(/*other_in_sdk=*/session_.busy());
             throw;
         }
     }
@@ -1499,22 +1501,31 @@ private:
         }
     }
 
-    // Closes the dead handle at the loss unless an exposure body may still be inside an SDK call on it; that body
-    // closes it on its way out (close_handle_after_body()). A loss that lands just as a body returns leaves the
-    // handle to the next Disconnect or Connect, the best effort decision 0009 point 3 allows. Requires mutex_.
+    // Closes the dead handle at the loss unless a body may still be inside an SDK call on it: an exposure body
+    // (session_.busy()) or the pulse drain, which may be inside SVBPulseGuide from the request that sets
+    // pulse_draining_ until the section that clears it (#2748). That body closes it on its way out
+    // (close_lost_handle_locked()). Requires mutex_.
     void close_handle_after_loss_locked() const {
-        if (session_.busy()) {
+        if (session_.busy() || pulse_draining_.load()) {
             return;
         }
         release_open(/*swallow_all=*/true);
     }
 
+    // Run under mutex_ by a body on its way out, after its last SDK call: closes the handle a loss left open, unless
+    // the other body may still be inside an SDK call on it (`other_in_sdk`), which then closes it on its way out. When
+    // both bodies leave together, one may see the other still running and the other see it gone, and the handle waits
+    // for the next Disconnect or Connect: the best effort decision 0009 point 3 allows.
+    void close_lost_handle_locked(bool other_in_sdk) const {
+        if (!other_in_sdk && !link_.is_open() && opened_.load()) {
+            release_open(/*swallow_all=*/true);
+        }
+    }
+
     // Run by every exposure body on its way out, after its last SDK call.
     void close_handle_after_body() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!link_.is_open() && opened_.load()) {
-            release_open(/*swallow_all=*/true);
-        }
+        close_lost_handle_locked(/*other_in_sdk=*/pulse_draining_.load());
     }
 
     // Closes the id this driver opened, if it has not been closed. A removal-class error (the camera is gone) is
@@ -1569,10 +1580,11 @@ private:
 
     // The pulse drain (#2735): sends the queued pulses in request order, one SVBPulseGuide call at a time with no
     // driver lock held. pulse_guide() starts it when it finds no drain (pulse_draining_); the drain clears that flag
-    // in the section where it finds the queue empty, and from there sends nothing and writes nothing. A cancelled
-    // drain (close_pulses()) leaves the queue and the flag to the close, and sends nothing more. No drain is
-    // superseded while it has pulses to send; a superseded one has already left its last section (decision 0006
-    // rule 6). Each pulse the drain sends writes its result to pulse_failure_, so it is the newest sent pulse's.
+    // in the section where it finds the queue empty, and in that section it also closes the handle a loss left open
+    // while it ran (#2748); after it, it sends nothing and writes nothing. A cancelled drain (close_pulses()) leaves
+    // the queue, the flag and the handle to the close, and sends nothing more. No drain is superseded while it has
+    // pulses to send; a superseded one has already left its last section (decision 0006 rule 6). Each pulse the drain
+    // sends writes its result to pulse_failure_, so it is the newest sent pulse's.
     void drain_pulses(util::OperationContext& ctx) {
         while (true) {
             QueuedPulse pulse;
@@ -1583,6 +1595,7 @@ private:
                 }
                 if (pulse_queue_.empty()) {
                     pulse_draining_.store(false);
+                    close_lost_handle_locked(/*other_in_sdk=*/session_.busy());
                     return;
                 }
                 pulse = pulse_queue_.front();
@@ -1612,7 +1625,8 @@ private:
 
     // Disconnect, a Connect and the destructor: refuse new pulses, join the drain and drop what it had queued. Called
     // without mutex_ (the drain takes it). A drain inside SVBPulseGuide, which takes no cancel, is waited for: at most
-    // its pulse, kDefaultMaxPulseGuideMs. A queued pulse sends nothing.
+    // its pulse, kDefaultMaxPulseGuideMs. A queued pulse sends nothing. A handle a loss left to the cancelled drain is
+    // closed by the caller, which closes the camera next (release_open()).
     void close_pulses() {
         {
             std::lock_guard<std::mutex> initiator(pulse_initiator_mutex_);
