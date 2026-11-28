@@ -170,10 +170,17 @@ branded Name, snapshot, poll and link rules as the ObservingConditions device, w
   outside 0 to `kMaxProxiedSwitches` (64), fails the Connect.
 - **Snapshot.** The frame is `GetSwitch` and `GetSwitchValue` of every switch, and `StateChangeComplete` of each switch
   whose `CanAsync` the Connect read true; a switch that is not asynchronous changes within its write, so its
-  `StateChangeComplete` is true. The poll is therefore two calls per switch (three for an asynchronous one), one at a
-  time on the client's mutex, which is why `MaxSwitch` is bounded. A stale frame is served; a latched fault refuses
-  it with `DriverException`. `DeviceState` is the switch base's, from the same getters, its `TimeStamp` the frame's
-  age (`device_state_age()`).
+  `StateChangeComplete` is true. A two-state switch (`MaxSwitchValue` one `SwitchStep` above `MinSwitchValue`, all
+  three read at Connect) has its `GetSwitch` derived from its `GetSwitchValue` (#2796): true at the maximum, false at
+  the minimum (ASCOM `SetSwitch`: on is `MaxSwitchValue`, off is `MinSwitchValue`), and the poll does not ask it. A
+  value between the ends or an upstream error on the value, and every multi-state switch (ASCOM leaves an intermediate
+  value's `GetSwitch` to the driver), ask the upstream's `GetSwitch`. The poll is therefore one call per two-state
+  switch and two per other switch, plus one for an asynchronous switch, one at a time on the client's mutex, which is
+  why `MaxSwitch` is bounded: at 64 switches, from 64 calls (a bank of synchronous two-state switches) to 192 (every
+  switch multi-state and asynchronous). A poll that takes longer than the poll period logs one WARN per Connect, with
+  the measured time and the switch count, on the task clock; the poll then skips the ticks it ran over. A stale frame
+  is served; a latched fault refuses it with `DriverException`. `DeviceState` is the switch base's, from the same
+  getters, its `TimeStamp` the frame's age (`device_state_age()`).
 - **Ids and values.** A negative id and a non-finite value are `InvalidValue` before the connection check; an id at or
   past `MaxSwitch` and a value outside the switch's range are `InvalidValue` after it, with nothing sent.
 - **Writes** (`SetSwitch`, `SetSwitchValue`, `SetAsync`, `SetAsyncValue`, `SetSwitchName`) are refused while the link
@@ -312,7 +319,8 @@ in `test_remotealpaca_concurrency_stress.cpp`) answer from `AlpacaUpstreamScript
 (`AlpacaCore/tests/alpaca_upstream_script.h`, a responder for `FakeHttpClient`; `Kind::SafetyMonitor` scripts a
 SafetyMonitor upstream, `Kind::Rotator` a Rotator whose moves run until `finish_move()` or a Halt, `Kind::FilterWheel`
 a FilterWheel whose Position write reads -1 until `finish_wheel_move()`, `Kind::Switch` a Switch keyed by `Id` whose
-asynchronous writes run until `finish_async()`, `Kind::Telescope` a German mount whose slews land at once or, with
+asynchronous writes run until `finish_async()` (`set_call_hook()` gives each upstream call a duration on the fake
+clock), `Kind::Telescope` a German mount whose slews land at once or, with
 `hold_motion(true)`, run until `finish_motion()` or AbortSlew, `Kind::Focuser` a Focuser whose Move runs until
 `finish_move()` or a Halt, `Kind::CoverCalibrator` a CoverCalibrator whose cover commands run until `finish_cover()` or
 a HaltCover and whose calibrator commands run until `finish_calibrator()`) with the poll on
