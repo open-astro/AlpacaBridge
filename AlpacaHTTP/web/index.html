@@ -1952,6 +1952,30 @@
                         <small>How often this server reads the other server, 1 to 60 seconds. Slewing, Azimuth and ShutterStatus are the values of the last read; a slew reads Slewing true and a shutter command Opening or Closing at once, and only a later read says the dome has stopped. AbortSlew is sent even while the reads fail.</small>
                     </div>
                   </div>
+                  <div id="remotealpaca-covercalibrator-fields" data-device-type="covercalibrator" style="display: none;">
+                    <h3>Remote Alpaca Cover Calibrator</h3>
+
+                    <div class="form-group">
+                        <label for="remotealpaca-cover-host">Upstream Host:</label>
+                        <input type="text" id="remotealpaca-cover-host" name="remoteAlpacaCoverHost" data-config-key="upstreamHost" maxlength="253" placeholder="192.168.1.20">
+                        <small>The host name or IP address of the other Alpaca server, with no http:// in front. It must not be this server.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-cover-port">Upstream Port:</label>
+                        <input type="number" id="remotealpaca-cover-port" name="remoteAlpacaCoverPort" data-config-key="upstreamPort" value="32323" min="1" max="65535">
+                        <small>The HTTP port of the other Alpaca server. The ASCOM Alpaca Simulators use 32323.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-cover-device-number">Upstream Device Number:</label>
+                        <input type="number" id="remotealpaca-cover-device-number" name="remoteAlpacaCoverDeviceNumber" data-config-key="upstreamDeviceNumber" value="0" min="0" max="2147483647">
+                        <small>The device number of the CoverCalibrator device on the other server, not on this one.</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="remotealpaca-cover-poll-period">Poll Period (seconds):</label>
+                        <input type="number" id="remotealpaca-cover-poll-period" name="remoteAlpacaCoverPollPeriod" data-config-key="pollPeriodSeconds" value="2" min="1" max="60">
+                        <small>How often this server reads the other server, 1 to 60 seconds. CoverState, CalibratorState and Brightness are the values of the last read; an open or close reads Moving at once, and CalibratorOn and CalibratorOff read NotReady until the next read. HaltCover is sent even while the reads fail.</small>
+                    </div>
+                  </div>
                 </div>
 
                 <!-- Gemini Configuration: Focuser (Automatic Astro Focuser Pro),

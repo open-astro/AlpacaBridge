@@ -12,15 +12,16 @@
 
 // The remotealpaca Switch proxied device (decision 0023, issue #1753 slice 5, #2709) over UpstreamProxy
 // (upstream_proxy.h), which holds every rule it shares with the other proxied devices. What is the Switch's own stays
-// here: the frame (GetSwitch, GetSwitchValue and, for an asynchronous switch, StateChangeComplete, per switch id), what
-// the Connect reads once (MaxSwitch and each switch's name, description, range, step, CanWrite and CanAsync), and the
-// writes.
+// here: the frame (GetSwitch, GetSwitchValue and, for an asynchronous switch, StateChangeComplete, per switch id; a
+// two-state switch's GetSwitch derived from its value, #2796), what the Connect reads once (MaxSwitch and each switch's
+// name, description, range, step, CanWrite and CanAsync), and the writes.
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/http_client.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/util/polled_state.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/remotealpaca/remote_alpaca_client.h>
@@ -28,6 +29,7 @@
 #include <alpacacore/version.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -97,6 +99,22 @@ struct Info {
     Answer<bool> can_async;  // false, not asked, for an upstream older than ISwitchV3
 
     bool polls_complete() const { return can_async.value.value_or(false); }
+
+    // Two states only: MaxSwitchValue one step above MinSwitchValue, all three read at Connect. ASCOM defines on as
+    // MaxSwitchValue and off as MinSwitchValue (SetSwitch), so such a switch's GetSwitch is exactly its value at the
+    // maximum. A multi-state switch's GetSwitch between its ends is the upstream's choice, and the poll asks it.
+    bool two_state() const {
+        return min.value && max.value && step.value && *max.value > *min.value &&
+               *step.value == *max.value - *min.value;
+    }
+};
+
+// What the poll measures of one switch, from what the Connect read.
+struct SwitchPlan {
+    bool complete = false;   // StateChangeComplete: CanAsync read true
+    bool two_state = false;  // Info::two_state()
+    double min = 0.0;
+    double max = 0.0;
 };
 
 // Where a switch that takes `value` puts it: the nearest step from the minimum, within the range (a device rounds a
@@ -430,28 +448,57 @@ private:
     }
 
     // One measurement of the upstream, with no driver lock held while it calls (decision 0016 rule 1): per switch
-    // GetSwitch and GetSwitchValue, and StateChangeComplete for an asynchronous one. Throws RemoteTransportError when a
-    // call gets no usable reply; an upstream error is kept in the frame. What to measure is what the last Connect read,
-    // copied under the state lock (only a Connect changes it, after it joined the poll).
+    // GetSwitchValue, GetSwitch unless it derives from the value (a two-state switch at either end of its range,
+    // #2796), and StateChangeComplete for an asynchronous one. Throws RemoteTransportError when a call gets no usable
+    // reply; an upstream error is kept in the frame. What to measure is what the last Connect read, copied under the
+    // state lock (only a Connect changes it, after it joined the poll). A poll longer than the poll period logs one
+    // WARN per Connect.
     Frame sample() {
-        const std::vector<bool> plan = proxy_.with_state([this](const Proxy::State&) {
-            std::vector<bool> out;
+        const std::vector<SwitchPlan> plan = proxy_.with_state([this](const Proxy::State&) {
+            std::vector<SwitchPlan> out;
             out.reserve(limits_.switches.size());
-            for (const Info& i : limits_.switches) out.push_back(i.polls_complete());
+            for (const Info& i : limits_.switches) {
+                out.push_back(
+                    {i.polls_complete(), i.two_state(), i.min.value.value_or(0.0), i.max.value.value_or(0.0)});
+            }
             return out;
         });
+        util::TaskClock& clock = proxy_.clock();
+        const auto started = clock.now();
         RemoteAlpacaClient& client = proxy_.client();
         auto readings = std::make_shared<std::vector<SwitchReading>>(plan.size());
         for (std::size_t at = 0; at < plan.size(); ++at) {
+            const SwitchPlan& p = plan[at];
             const RemoteParams params = id_param(static_cast<int>(at));
             SwitchReading& r = (*readings)[at];
-            r.on = answer_of([&] { return client.get_bool("getswitch", params); });
             r.value = answer_of([&] { return client.get_double("getswitchvalue", params); });
-            if (plan[at]) r.complete = answer_of([&] { return client.get_bool("statechangecomplete", params); });
+            const std::optional<double>& v = r.value.value;
+            if (p.two_state && v && (*v == p.min || *v == p.max)) {
+                r.on = {*v == p.max, 0, {}};
+            } else {
+                r.on = answer_of([&] { return client.get_bool("getswitch", params); });
+            }
+            if (p.complete) r.complete = answer_of([&] { return client.get_bool("statechangecomplete", params); });
         }
+        warn_if_slow(clock.now() - started, plan.size());
         Frame frame;
         frame.switches = std::move(readings);
         return frame;
+    }
+
+    // Issue #2796: the poll calls the upstream one switch at a time, so a large bank on a slow link can take longer
+    // than the poll period. The poll then skips the ticks it ran over; this says so, once per Connect.
+    void warn_if_slow(std::chrono::nanoseconds spent, std::size_t switches) {
+        const auto period = proxy_.config().poll_period;
+        if (spent <= period || slow_poll_warned_.exchange(true)) return;
+        const RemoteDeviceConfig& c = proxy_.config();
+        ALPACA_LOG_WARN(detail::kComponent,
+                        "Upstream " + c.host + ":" + std::to_string(c.port) + " device " +
+                            std::to_string(c.upstream_device_number) + ": one poll of " + std::to_string(switches) +
+                            " switches took " +
+                            std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(spent).count()) +
+                            " ms, longer than the " + std::to_string(period.count()) +
+                            " s poll period; set a longer poll period");
     }
 
     // At Connect, with no lock held, after the upstream's identity: MaxSwitch (an error from the upstream, or more than
@@ -459,6 +506,7 @@ private:
     // read_limits_, and what to store under the state lock with the identity, before the first frame is measured.
     std::function<void()> read_limits() {
         RemoteAlpacaClient& client = proxy_.client();
+        slow_poll_warned_.store(false);  // the poll is joined: this Connect's polls warn afresh
         const int count = client.get_int("maxswitch");
         if (count < 0 || count > kMaxProxiedSwitches) {
             throw AlpacaException("Upstream MaxSwitch " + std::to_string(count) + " is outside 0 to " +
@@ -491,6 +539,9 @@ private:
     Limits limits_;
     // The Connect's reads before the store, under transition_mutex_ (only the connect path touches it).
     Limits read_limits_;
+
+    // A poll of this Connect logged the slow-poll WARN (warn_if_slow()); the poll and a Connect write it.
+    std::atomic<bool> slow_poll_warned_{false};
 
     // Guards set_connected() against a concurrent set_connected() only (#528).
     std::mutex transition_mutex_;

@@ -4156,6 +4156,24 @@ int main() {
         EXPECT(cfg.value("pollPeriodSeconds", -1) == 23);
         remove_device(router, "remotealpaca", "dome", 9670);
     }
+    {
+        // case: remotealpaca cover calibrator config round-trips every field (#2704)
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "remotealpaca"},
+                                           {"deviceType", "covercalibrator"},
+                                           {"deviceNumber", 9673},
+                                           {"upstreamHost", "omnisim.test"},
+                                           {"upstreamPort", 32328},
+                                           {"upstreamDeviceNumber", 5},
+                                           {"pollPeriodSeconds", 19}},
+                                          "CoverCalibrator", 9673);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("upstreamHost", "") == "omnisim.test");
+        EXPECT(cfg.value("upstreamPort", -1) == 32328);
+        EXPECT(cfg.value("upstreamDeviceNumber", -1) == 5);
+        EXPECT(cfg.value("pollPeriodSeconds", -1) == 19);
+        remove_device(router, "remotealpaca", "covercalibrator", 9673);
+    }
 #endif
 
 #ifdef ALPACACORE_ENABLE_IOPTRON
@@ -11671,6 +11689,20 @@ int main() {
         EXPECT(!refused.ok);
         EXPECT(refused.message.find("is this server") != std::string::npos);
         EXPECT(listed_entry(router, "Dome", 9671).is_null());
+    }
+    {
+        // case: configuredevice refuses a remotealpaca cover calibrator upstream that is this server (#2704)
+        // Decision 0023 rule 4, as for the other proxied devices above.
+        alpacahttp::Router router(alpacahttp::Router::CatalogExtension{}, 6800);
+        const nlohmann::json loop = {{"vendor", "remotealpaca"},
+                                     {"deviceType", "covercalibrator"},
+                                     {"deviceNumber", 9674},
+                                     {"upstreamHost", "localhost"},
+                                     {"upstreamPort", 6800}};
+        const auto refused = api_attempt(router, loop, "CoverCalibrator");
+        EXPECT(!refused.ok);
+        EXPECT(refused.message.find("is this server") != std::string::npos);
+        EXPECT(listed_entry(router, "CoverCalibrator", 9674).is_null());
     }
 #endif
 

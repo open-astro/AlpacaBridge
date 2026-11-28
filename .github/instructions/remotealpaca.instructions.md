@@ -4,7 +4,7 @@ applyTo: "AlpacaCore/src/vendors/remotealpaca/**,AlpacaCore/include/alpacacore/v
 
 ### remotealpaca
 
-Devices: ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope, Focuser, Dome. The vendor serves a device of an upstream Alpaca server as a proxied device on this server
+Devices: ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope, Focuser, CoverCalibrator, Dome. The vendor serves a device of an upstream Alpaca server as a proxied device on this server
 (`CONTEXT.md`: native device vs proxied device). Its contract is fixed by
 [decision 0023](../../docs/decisions/0023-outbound-clients-in-vendor-wrappers.md) and issue #1753; read both before
 adding a device type.
@@ -19,7 +19,7 @@ the pass-through of upstream errors. A driver keeps its frame and how to measure
 commands, its `transition_mutex_` and its `get_connected()`; behaviour that does not fit the shared shape stays in the
 driver. A new device type adds a driver over it, not a second copy of these rules. The first InterfaceVersion of the
 proxied type that has `Connect` is the driver's (`UpstreamProxy::Setup::platform7_version`): 2 for ObservingConditions,
-3 for SafetyMonitor, FilterWheel, Switch and Dome, 4 for Rotator, Telescope and Focuser.
+3 for SafetyMonitor, FilterWheel, Switch and Dome, 4 for Rotator, Telescope and Focuser, 2 for CoverCalibrator.
 
 #### The upstream client (`RemoteAlpacaClient`, issue #1753 slice 2)
 
@@ -170,10 +170,17 @@ branded Name, snapshot, poll and link rules as the ObservingConditions device, w
   outside 0 to `kMaxProxiedSwitches` (64), fails the Connect.
 - **Snapshot.** The frame is `GetSwitch` and `GetSwitchValue` of every switch, and `StateChangeComplete` of each switch
   whose `CanAsync` the Connect read true; a switch that is not asynchronous changes within its write, so its
-  `StateChangeComplete` is true. The poll is therefore two calls per switch (three for an asynchronous one), one at a
-  time on the client's mutex, which is why `MaxSwitch` is bounded. A stale frame is served; a latched fault refuses
-  it with `DriverException`. `DeviceState` is the switch base's, from the same getters, its `TimeStamp` the frame's
-  age (`device_state_age()`).
+  `StateChangeComplete` is true. A two-state switch (`MaxSwitchValue` one `SwitchStep` above `MinSwitchValue`, all
+  three read at Connect) has its `GetSwitch` derived from its `GetSwitchValue` (#2796): true at the maximum, false at
+  the minimum (ASCOM `SetSwitch`: on is `MaxSwitchValue`, off is `MinSwitchValue`), and the poll does not ask it. A
+  value between the ends or an upstream error on the value, and every multi-state switch (ASCOM leaves an intermediate
+  value's `GetSwitch` to the driver), ask the upstream's `GetSwitch`. The poll is therefore one call per two-state
+  switch and two per other switch, plus one for an asynchronous switch, one at a time on the client's mutex, which is
+  why `MaxSwitch` is bounded: at 64 switches, from 64 calls (a bank of synchronous two-state switches) to 192 (every
+  switch multi-state and asynchronous). A poll that takes longer than the poll period logs one WARN per Connect, with
+  the measured time and the switch count, on the task clock; the poll then skips the ticks it ran over. A stale frame
+  is served; a latched fault refuses it with `DriverException`. `DeviceState` is the switch base's, from the same
+  getters, its `TimeStamp` the frame's age (`device_state_age()`).
 - **Ids and values.** A negative id and a non-finite value are `InvalidValue` before the connection check; an id at or
   past `MaxSwitch` and a value outside the switch's range are `InvalidValue` after it, with nothing sent.
 - **Writes** (`SetSwitch`, `SetSwitchValue`, `SetAsync`, `SetAsyncValue`, `SetSwitchName`) are refused while the link
@@ -205,14 +212,16 @@ bound. The mount rules apply on top (AGENTS.md: ConformU telescope runs on a bar
   while disconnected (the last Connect's answer, false before any) under one state-lock hold.
 - **Snapshot.** The frame is the twelve ITelescopeV4 `DeviceState` members, twelve GETs per poll: `RightAscension`,
   `Declination`, `Altitude`, `Azimuth`, `SiderealTime`, `UTCDate`, `Slewing`, `Tracking`, `AtPark`, `AtHome`,
-  `SideOfPier`, `IsPulseGuiding`. `UTCDate` and `SiderealTime` are served advanced by the frame's age. A stale frame
+  `SideOfPier`, `IsPulseGuiding`. `UTCDate` is a `util::UtcOffset` anchored where the poll read it, or where this
+  server wrote it (decision 0014); `SiderealTime` is served advanced by the frame's age. A stale frame
   is served; a latched fault refuses it; `DeviceState` is the telescope base's, its `TimeStamp` the frame's age.
 - **Commands** refuse in the gate's order (`util/telescope_command_gate.h`): the argument ranges every telescope
   shares (`InvalidValue`), connected, the link fault; the upstream judges parked, Tracking and its own ranges, and its
   error passes through. The async slews, `Park`, `FindHome`, a `SideOfPier` write and a non-zero `MoveAxis` write
   `Slewing` true through; only a poll writes it false, never a fault or a loss. `PulseGuide` writes `IsPulseGuiding`
   true, `Unpark` `AtPark` false, the syncs the synced position; a coordinate slew or sync reads the upstream's targets
-  back (a read with no reply leaves them). `DestinationSideOfPier` is forwarded in the command slot.
+  back (a read with no reply leaves them). `DestinationSideOfPier` is a live upstream GET in the command slot, so it
+  can queue behind a slow motion PUT (each call is bounded by the 5 s per-call timeout).
 - **Stops.** `AbortSlew` and `MoveAxis(axis, 0)` are forwarded even while the link is faulted (refused only for a lost
   link); `AbortSlew` leaves `Slewing` to the poll (ITelescopeV4: true until the motion stopped).
 - **Not proxied:** the synchronous slews (`SlewToCoordinates`, `SlewToTarget`, `SlewToAltAz`) answer
@@ -309,19 +318,57 @@ bound. No Dome member is missing by version: every one the driver calls is in `I
 - A refused connection on any command is a lost link at once; another call with no reply is `DriverException`.
   Actions and `Command*` are not forwarded.
 
+#### The CoverCalibrator proxied device (issue #1753 slice 5, #2704)
+
+The same config, self-loop check, Connect (Platform 7 is `ICoverCalibratorV2`; a version 1 upstream gets
+`Connected=true`), branded Name, snapshot, poll and link rules as the ObservingConditions device, with the same loss
+bound.
+
+- **Connect** reads `CoverState`, `CalibratorState` and `MaxBrightness` once. A `CoverState` or `CalibratorState` of
+  `NotPresent` marks that part absent for the connection: its state getter answers `NotPresent` and `CoverMoving` or
+  `CalibratorChanging` false (ICoverCalibratorV2), `Brightness` (no calibrator) and the part's commands answer
+  `NotImplemented` after the connection check, and none of them is asked of the upstream again. A state answered with an
+  error counts as present. `MaxBrightness` is the upstream's value or error, served unchanged. All of it is static: it
+  keeps answering while the link is faulted.
+- **Members by version.** An `ICoverCalibratorV1` upstream has no `CoverMoving` or `CalibratorChanging`: each answers
+  `NotImplemented` naming the upstream's version, after the connection check, and is never called.
+- **Snapshot.** The frame is `CoverState`, `CoverMoving`, `CalibratorState`, `CalibratorChanging` and `Brightness`, each
+  a value or the upstream's error (a state number outside the ASCOM enumeration is a `DriverException` answer). A stale
+  frame is served, never refused (decision 0010 rule 6): each getter answers the last poll's value until the loss bound.
+  While a fault is latched `CoverState` and `CalibratorState` read `Unknown` (the ASCOM word for it, as the WandererAstro
+  cover; driver-lifecycle "Cache-backed reads must track link health"), and `CoverMoving`, `CalibratorChanging` and
+  `Brightness` throw `DriverException`. `DeviceState` is the base class's, from the same getters.
+- **OpenCover and CloseCover** are refused while the link is faulted. The body forwards the command and writes
+  `CoverState` `Moving` through, and `CoverMoving` true from a V2 upstream, whatever the frame said: the frame can be a
+  poll period old, so only the poll writes the cover settled.
+- **CalibratorOn**: a negative brightness is `InvalidValue` before the connection check, one above the `MaxBrightness`
+  the Connect read is `InvalidValue` after it (with no `MaxBrightness` value the upstream judges the range, and its
+  `InvalidValue` passes through). **CalibratorOn and CalibratorOff** are refused while faulted. The body forwards the
+  command and writes `CalibratorState` `NotReady` through, and `CalibratorChanging` true from a V2 upstream; CalibratorOn
+  also writes `Brightness` as sent. Only the poll writes the calibrator `Ready` or `Off`.
+- **HaltCover** is forwarded even while the link is faulted: the safety stop is refused only for a lost link
+  (`NotConnected`). Its body writes `CoverMoving` false through and then reads the upstream's `CoverState` and writes it
+  through (only the upstream knows where the cover stopped); a read with no usable reply leaves it to the next poll and
+  does not fail the Halt. A HaltCover sent while an OpenCover's body runs waits for it (the caller order above).
+- A refused connection on any command is a lost link at once; another call with no reply is `DriverException`.
+  Actions and `Command*` are not forwarded.
+
 Tests use the loopback `FakeAlpacaServer` (`AlpacaCore/tests/fake_alpaca_server.h`, 127.0.0.1 only, with stall,
 drop, HTTP 500, bad JSON and no-ErrorNumber modes) over the real libcurl client, and `FakeHttpClient` where a case
 counts calls. The device tests (`test_remotealpaca_observingconditions.cpp`, `test_remotealpaca_safetymonitor.cpp`,
 `test_remotealpaca_rotator.cpp`, `test_remotealpaca_filterwheel.cpp`, `test_remotealpaca_switch.cpp`,
 `test_remotealpaca_telescope.cpp` (its `[goto-safety]` cases cover the cap and the relink stop),
-`test_remotealpaca_focuser.cpp`, `test_remotealpaca_dome.cpp`, the contract sweep and the `[stress]` cases in `test_remotealpaca_concurrency_stress.cpp`) answer from
-`AlpacaUpstreamScript` (`AlpacaCore/tests/alpaca_upstream_script.h`, a responder for `FakeHttpClient`;
-`Kind::SafetyMonitor` scripts a SafetyMonitor upstream, `Kind::Rotator` a Rotator whose moves run until
-`finish_move()` or a Halt, `Kind::FilterWheel` a FilterWheel whose Position write reads -1 until
-`finish_wheel_move()`, `Kind::Switch` a Switch keyed by `Id` whose asynchronous writes run until `finish_async()`,
-`Kind::Telescope` a German mount whose slews land at once or, with `hold_motion(true)`, run until `finish_motion()`
-or AbortSlew, `Kind::Focuser` a Focuser whose Move runs until `finish_move()` or a Halt, `Kind::Dome` a Dome whose
-slews run until `finish_move()` or an AbortSlew and whose shutter moves until `finish_shutter()`) with the poll on
+`test_remotealpaca_focuser.cpp`, `test_remotealpaca_covercalibrator.cpp`, `test_remotealpaca_dome.cpp`, the contract sweep and the `[stress]` cases
+in `test_remotealpaca_concurrency_stress.cpp`) answer from `AlpacaUpstreamScript`
+(`AlpacaCore/tests/alpaca_upstream_script.h`, a responder for `FakeHttpClient`; `Kind::SafetyMonitor` scripts a
+SafetyMonitor upstream, `Kind::Rotator` a Rotator whose moves run until `finish_move()` or a Halt, `Kind::FilterWheel`
+a FilterWheel whose Position write reads -1 until `finish_wheel_move()`, `Kind::Switch` a Switch keyed by `Id` whose
+asynchronous writes run until `finish_async()` (`set_call_hook()` gives each upstream call a duration on the fake
+clock), `Kind::Telescope` a German mount whose slews land at once or, with
+`hold_motion(true)`, run until `finish_motion()` or AbortSlew, `Kind::Focuser` a Focuser whose Move runs until
+`finish_move()` or a Halt, `Kind::CoverCalibrator` a CoverCalibrator whose cover commands run until `finish_cover()` or
+a HaltCover and whose calibrator commands run until `finish_calibrator()`, `Kind::Dome` a Dome whose slews run until
+`finish_move()` or an AbortSlew and whose shutter moves until `finish_shutter()`) with the poll on
 `FakeTaskClock`. The contract sweep's snapshot
 rig for the SafetyMonitor states `IsSafe`'s lost answer in `SnapshotRig::lost_answer`.
 

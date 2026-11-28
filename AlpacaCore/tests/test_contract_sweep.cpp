@@ -141,6 +141,7 @@
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
 #include <alpacacore/vendor/remotealpaca/remotealpaca_dome_driver.h>
+#include <alpacacore/vendor/remotealpaca/remotealpaca_covercalibrator_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_filterwheel_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_focuser_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
@@ -3094,6 +3095,38 @@ Tier2Host tier2_host_remotealpaca_dome() {
     h.failing = [make]() { return make(false, true); };
     return h;
 }
+
+// The proxied CoverCalibrator over the scripted upstream, as the rotator host: its Connect makes some fifteen calls,
+// so a 50 ms per-call hold keeps the handshake open past kHoldWindow.
+Tier2Host tier2_host_remotealpaca_covercalibrator() {
+    Tier2Host h{"remotealpaca_covercalibrator",
+                "remotealpaca",
+                "covercalibrator",
+                "fake_http_client.h",
+                DeviceType::CoverCalibrator,
+                "remotealpaca_covercalibrator",
+                {},
+                true,
+                {},
+                ""};
+    auto make = [](bool hold, bool refuse) {
+        auto upstream =
+            std::make_shared<RemoteUpstreamFake>(alpacacore::test::AlpacaUpstreamScript::Kind::CoverCalibrator);
+        if (hold) upstream->http.set_delay(std::chrono::milliseconds(50));
+        if (refuse) upstream->http.refuse_next(1000000);
+        alpacacore::vendor::remotealpaca::RemoteDeviceConfig config;
+        config.host = "127.0.0.1";
+        config.port = 11111;
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::remotealpaca::create_remotealpaca_covercalibrator(
+            0, config, upstream->http.client(), {}, alpacacore::util::default_task_clock());
+        hosted.fake = upstream;
+        return hosted;
+    };
+    h.connectable = [make](bool hold) { return make(hold, false); };
+    h.failing = [make]() { return make(false, true); };
+    return h;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_GEMINI
@@ -3699,7 +3732,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_ASTROASIS(X)
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
-#define CS2_REMOTEALPACA(X) X(remotealpaca_observingconditions, PRB) X(remotealpaca_safetymonitor, NPR) X(remotealpaca_rotator, PRB) X(remotealpaca_filterwheel, PRB) X(remotealpaca_switch, PRB) X(remotealpaca_telescope, TEL) X(remotealpaca_focuser, NPR) X(remotealpaca_dome, PRB)
+#define CS2_REMOTEALPACA(X) X(remotealpaca_observingconditions, PRB) X(remotealpaca_safetymonitor, NPR) X(remotealpaca_rotator, PRB) X(remotealpaca_filterwheel, PRB) X(remotealpaca_switch, PRB) X(remotealpaca_telescope, TEL) X(remotealpaca_focuser, NPR) X(remotealpaca_covercalibrator, PRB) X(remotealpaca_dome, PRB)
 #else
 #define CS2_REMOTEALPACA(X)
 #endif
@@ -5901,6 +5934,20 @@ constexpr double kSnapshotValueMargin = 0.01;
     return g;
 }
 
+[[maybe_unused]] std::vector<SnapshotGetter> snapshot_covercalibrator_getters() {
+    using alpacacore::CoverCalibratorDriver;
+    std::vector<SnapshotGetter> g;
+#define SNAP_CC(label, call) \
+    g.push_back({label, [](AlpacaDriver& d) { return snap_text(static_cast<CoverCalibratorDriver&>(d).call); }});
+    SNAP_CC("CoverState", get_cover_state())
+    SNAP_CC("CoverMoving", get_cover_moving())
+    SNAP_CC("CalibratorState", get_calibrator_state())
+    SNAP_CC("CalibratorChanging", get_calibrator_changing())
+    SNAP_CC("Brightness", get_brightness())
+#undef SNAP_CC
+    return g;
+}
+
 // The first two switches of the fake (a switch and an analog output); MaxSwitch is served from the connect's slots.
 [[maybe_unused]] std::vector<SnapshotGetter> snapshot_switch_getters() {
     using alpacacore::SwitchDriver;
@@ -6538,6 +6585,29 @@ std::unique_ptr<SnapshotRig> snapshot_rig_remotealpaca_dome() {
     return rig_owner;
 }
 
+// As the rotator rig, over a CoverCalibrator upstream with its cover Closed and its calibrator Off.
+std::unique_ptr<SnapshotRig> snapshot_rig_remotealpaca_covercalibrator() {
+    namespace remote = alpacacore::vendor::remotealpaca;
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto upstream = std::make_shared<RemoteUpstreamFake>(alpacacore::test::AlpacaUpstreamScript::Kind::CoverCalibrator);
+    rig.fake = upstream;
+    remote::RemoteDeviceConfig config;
+    config.host = "127.0.0.1";
+    config.port = 11111;
+    config.poll_period = snap_chrono::seconds(1);
+    rig.driver = remote::create_remotealpaca_covercalibrator(0, config, upstream->http.client(), {}, *rig.clock);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    auto* driver = static_cast<alpacacore::CoverCalibratorDriver*>(rig.driver.get());
+    rig.hold_frame = [driver] { remote::set_poll_paused_for_testing(*driver, true); };
+    rig.lose_link = [driver, upstream] {
+        upstream->http.fail_next(1000);
+        remote::set_poll_paused_for_testing(*driver, false);
+    };
+    return rig_owner;
+}
+
 [[maybe_unused]] std::vector<SnapshotGetter> snapshot_safetymonitor_getters() {
     return {{"IsSafe", [](AlpacaDriver& d) {
                  return snap_text(static_cast<alpacacore::SafetyMonitorDriver&>(d).get_is_safe());
@@ -6644,7 +6714,7 @@ std::unique_ptr<SnapshotRig> snapshot_rig_zwo_telescope() {
 #define CS3_ASTROASIS(X)
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
-#define CS3_REMOTEALPACA(X) X(remotealpaca_observingconditions, snapshot_observingconditions_getters()) X(remotealpaca_safetymonitor, snapshot_safetymonitor_getters()) X(remotealpaca_rotator, snapshot_rotator_getters()) X(remotealpaca_filterwheel, snapshot_filterwheel_getters()) X(remotealpaca_switch, snapshot_switch_getters()) X(remotealpaca_telescope, snapshot_telescope_getters(true)) X(remotealpaca_focuser, snapshot_focuser_getters()) X(remotealpaca_dome, snapshot_dome_getters())
+#define CS3_REMOTEALPACA(X) X(remotealpaca_observingconditions, snapshot_observingconditions_getters()) X(remotealpaca_safetymonitor, snapshot_safetymonitor_getters()) X(remotealpaca_rotator, snapshot_rotator_getters()) X(remotealpaca_filterwheel, snapshot_filterwheel_getters()) X(remotealpaca_switch, snapshot_switch_getters()) X(remotealpaca_telescope, snapshot_telescope_getters(true)) X(remotealpaca_focuser, snapshot_focuser_getters()) X(remotealpaca_covercalibrator, snapshot_covercalibrator_getters()) X(remotealpaca_dome, snapshot_dome_getters())
 #else
 #define CS3_REMOTEALPACA(X)
 #endif

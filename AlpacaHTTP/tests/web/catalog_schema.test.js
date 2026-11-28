@@ -98,7 +98,7 @@ test('catalogLoader surfaces a failed load and fetches again on the next call', 
 // with the Gemini switch kept (see the next case).
 const OFFERED = {
     camera: ['altair', 'gphoto', 'iguider', 'ioptron', 'playerone', 'qhy', 'svbony', 'touptek', 'zwo'],
-    covercalibrator: ['gemini', 'wandererastro'],
+    covercalibrator: ['gemini', 'remotealpaca', 'wandererastro'],
     dome: ['remotealpaca'],
     filterwheel: ['ioptron', 'playerone', 'qhy', 'remotealpaca', 'touptek', 'wandererastro', 'zwo'],
     focuser: ['astroasis', 'celestron', 'gemini', 'ifr', 'ioptron', 'onstep', 'qhy', 'remotealpaca', 'touptek', 'zwo'],
