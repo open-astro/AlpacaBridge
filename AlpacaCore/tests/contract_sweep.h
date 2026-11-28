@@ -1206,6 +1206,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"onstep", "switch", "fake_mount_server.h"},   // the auxiliary features on the controller's shared link (#2222)
     {"ioptron", "telescope", "fake_ioptron_mount.h"},
     {"ioptron", "focuser", "fake_ioptron_ieaf.h"},
+    {"ioptron", "filterwheel", "fake_ioptron_ieaf.h"},  // the iEFW on the iEAF fake (model code 99)
     {"ifr", "focuser", "fake_ioptron_ifr.h"},
     {"ifr", "rotator", "fake_ioptron_ifr.h"},
     // The iMate PowerBox, compiled only with libgpiod.
@@ -1222,13 +1223,17 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"remotealpaca", "covercalibrator", "fake_http_client.h"},      // the same, as a CoverCalibrator
     {"weewx", "observingconditions", "fake_http_client.h"},         // a scripted WeeWX JSON feed
     {"gemini", "focuser", "fake_gemini_focuser.h"},
-    {"gemini", "covercalibrator", "fake_gemini_flatpanel.h"},  // Pro firmware only: gemini_covercalibrator_pro
+    {"gemini", "covercalibrator", "fake_gemini_flatpanel.h"},       // the Pro firmware: gemini_covercalibrator_pro
+    {"gemini", "covercalibrator", "fake_gemini_flatpanel_rev2.h"},  // the same fake as Rev2: gemini_covercalibrator_v2
+    {"gemini", "covercalibrator", "fake_gemini_flatpanel_lite.h"},  // the same fake as Lite: gemini_covercalibrator
     {"gemini", "switch", "fake_gemini_pdh.h"},
     {"qhy", "camera", "fake_qhy_sdk.h"},
     {"qhy", "filterwheel", "fake_qhy_cfw3.h"},  // CFW3 serial backend: qhy_filterwheel_cfw3
+    {"qhy", "filterwheel", "fake_qhy_sdk.h"},   // the CFW on the camera handle: hosted as qhy_filterwheel_sdk
     {"qhy", "focuser", "fake_qhy_qfocuser.h"},
     {"playerone", "camera", "fake_playerone_sdk.h"},
     {"playerone", "filterwheel", "fake_playerone_pw_sdk.h"},
+    {"ioptron", "camera", "fake_playerone_sdk.h"},    // the iCAM: the Player One driver behind the iOptron factory
     {"playerone", "switch", "fake_playerone_sdk.h"},  // the thermal switch over the camera SDK fake
     {"touptek", "camera", "fake_touptek_sdk.h"},
     {"touptek", "switch", "fake_touptek_sdk.h"},  // the thermal switch backend: touptek_switch_thermal
@@ -1241,6 +1246,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"gphoto", "camera", "fake_gphoto_sdk.h"},
     {"wandererastro", "covercalibrator", "fake_serial_streamer.h"},
     {"wandererastro", "filterwheel", "fake_serial_streamer.h"},
+    {"wandererastro", "rotator", "fake_wandererastro_rotator.h"},
     {"wandererastro", "switch", "fake_serial_streamer.h"},
 };
 

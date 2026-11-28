@@ -184,10 +184,20 @@ const std::vector<ConformuHost> kHosts = {
      "ZWO EFW (fake SDK, test only)", "ALPACACORE_ENABLE_ZWO", "FakeZWOEFWSDK (simulated EFW SDK, in process)",
      [] { return true; }, driver_of(cu::make_zwo_filterwheel)},
 #endif
+#ifdef FAKE_CONFORMU_IOPTRON
+    {"ioptron", "filterwheel", "fake_ioptron_ieaf.h", alpacacore::DeviceType::FilterWheel, "ioptron-fake",
+     "iOptron iEFW (fake, test only)", "ALPACACORE_ENABLE_IOPTRON",
+     "FakeIoptronIeaf (simulated iEFW-15 over a pseudo-terminal)",
+     [] { return !cu::ioptron_iefw().slave_path().empty(); }, driver_of(cu::make_ioptron_filterwheel)},
+#endif
 #ifdef FAKE_CONFORMU_QHY
     {"qhy", "filterwheel", "fake_qhy_cfw3.h", alpacacore::DeviceType::FilterWheel, "qhy-fake",
      "QHYCFW3 (fake, test only)", "ALPACACORE_ENABLE_QHY", "FakeQhyCfw3 (simulated CFW3 over a pseudo-terminal)",
      [] { return !cu::qhy_cfw3().slave_path().empty(); }, driver_of(cu::make_qhy_cfw3_filterwheel)},
+    {"qhy", "filterwheel", "fake_qhy_sdk.h", alpacacore::DeviceType::FilterWheel, "qhy-fake",
+     "QHY CFW on the camera handle (fake SDK, test only)", "ALPACACORE_ENABLE_QHY",
+     "FakeQHYSDK (simulated QHYCCD SDK with a miniCam8M integrated CFW, in process)", [] { return true; },
+     driver_of(cu::make_qhy_filterwheel)},
 #endif
 #ifdef FAKE_CONFORMU_PLAYERONE
     {"playerone", "filterwheel", "fake_playerone_pw_sdk.h", alpacacore::DeviceType::FilterWheel, "playerone-fake",
@@ -218,11 +228,25 @@ const std::vector<ConformuHost> kHosts = {
      "FakeIoptronIfr (simulated iFR over a pseudo-terminal)", [] { return !cu::ioptron_ifr().slave_path().empty(); },
      driver_of(cu::make_ifr_rotator)},
 #endif
+#ifdef FAKE_CONFORMU_WANDERERASTRO
+    {"wandererastro", "rotator", "fake_wandererastro_rotator.h", alpacacore::DeviceType::Rotator, "wandererastro-fake",
+     "WandererAstro WandererRotator Mini (fake, test only)", "ALPACACORE_ENABLE_WANDERERASTRO",
+     "FakeWandererRotator (a simulated WandererRotator Mini over a pseudo-terminal)",
+     [] { return !cu::wandererastro_rotator().slave_path().empty(); }, driver_of(cu::make_wandererastro_rotator)},
+#endif
 #ifdef FAKE_CONFORMU_GEMINI
     {"gemini", "covercalibrator", "fake_gemini_flatpanel.h", alpacacore::DeviceType::CoverCalibrator, "gemini-fake",
      "Gemini Flat Panel Pro (fake, test only)", "ALPACACORE_ENABLE_GEMINI",
      "FakeGeminiFlatPanel (simulated Motorized Flat Panel V3 firmware over a pseudo-terminal)",
      [] { return !cu::gemini_flatpanel().slave_path().empty(); }, driver_of(cu::make_gemini_flatpanel_pro)},
+    {"gemini", "covercalibrator", "fake_gemini_flatpanel_rev2.h", alpacacore::DeviceType::CoverCalibrator,
+     "gemini-fake", "Gemini Automatic FlatPanel v2 (fake, test only)", "ALPACACORE_ENABLE_GEMINI",
+     "FakeGeminiFlatPanelRev2 (simulated Astro Automatic FlatPanel v2 firmware over a pseudo-terminal)",
+     [] { return !cu::gemini_flatpanel_rev2().slave_path().empty(); }, driver_of(cu::make_gemini_flatpanel_v2)},
+    {"gemini", "covercalibrator", "fake_gemini_flatpanel_lite.h", alpacacore::DeviceType::CoverCalibrator,
+     "gemini-fake", "Gemini Flat Panel Cover Lite (fake, test only)", "ALPACACORE_ENABLE_GEMINI",
+     "FakeGeminiFlatPanelLite (simulated Astro Flat Panel Cover Lite firmware over a pseudo-terminal)",
+     [] { return !cu::gemini_flatpanel_lite().slave_path().empty(); }, driver_of(cu::make_gemini_flatpanel_lite)},
 #endif
 #ifdef FAKE_CONFORMU_WANDERERASTRO
     {"wandererastro", "covercalibrator", "fake_serial_streamer.h", alpacacore::DeviceType::CoverCalibrator,
@@ -313,6 +337,11 @@ const std::vector<ConformuHost> kHosts = {
      "Player One camera (fake SDK, test only)", "ALPACACORE_ENABLE_PLAYERONE",
      "FakePlayerOneSDK (simulated Player One camera SDK, in process)", [] { return true; },
      driver_of(cu::make_playerone_camera)},
+    // The iCAM is built by the Player One driver under the Player One option (register_ioptron_icam_factory()).
+    {"ioptron", "camera", "fake_playerone_sdk.h", alpacacore::DeviceType::Camera, "ioptron-fake",
+     "iOptron iCAM (fake Player One SDK, test only)", "ALPACACORE_ENABLE_PLAYERONE",
+     "FakePlayerOneSDK (simulated iOptron iCAM178M on the Player One camera SDK, in process)", [] { return true; },
+     driver_of(cu::make_ioptron_camera)},
 #endif
 #ifdef FAKE_CONFORMU_TOUPTEK
     {"touptek", "camera", "fake_touptek_sdk.h", alpacacore::DeviceType::Camera, "touptek-fake",

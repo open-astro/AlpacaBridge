@@ -27,6 +27,7 @@ gemini	covercalibrator	fake_gemini_flatpanel.h	run	6	AlpacaCore/conformu/Gemini/
 gemini	switch	fake_gemini_pdh.h	run	6	AlpacaCore/conformu/Gemini/Fake/Fake-switch-fake_gemini_pdh-Linux-arm64.txt	-
 qhy	camera	fake_qhy_sdk.h	run	6	AlpacaCore/conformu/QHY/Fake/Fake-camera-fake_qhy_sdk-Linux-arm64.txt	-
 qhy	filterwheel	fake_qhy_cfw3.h	run	4	AlpacaCore/conformu/QHY/Fake/Fake-filterwheel-fake_qhy_cfw3-Linux-arm64.txt	-
+qhy	filterwheel	fake_qhy_sdk.h	run	6	AlpacaCore/conformu/QHY/Fake/Fake-filterwheel-fake_qhy_sdk-Linux-arm64.txt	-
 qhy	focuser	fake_qhy_qfocuser.h	run	3	AlpacaCore/conformu/QHY/Fake/Fake-focuser-fake_qhy_qfocuser-Linux-arm64.txt	-
 playerone	camera	fake_playerone_sdk.h	run	6	AlpacaCore/conformu/Player One/Fake/Fake-camera-fake_playerone_sdk-Linux-arm64.txt	-
 playerone	filterwheel	fake_playerone_pw_sdk.h	run	4	AlpacaCore/conformu/Player One/Fake/Fake-filterwheel-fake_playerone_pw_sdk-Linux-arm64.txt	-
@@ -38,6 +39,7 @@ gphoto	camera	fake_gphoto_sdk.h	run	5	AlpacaCore/conformu/GPhoto/Fake/Fake-camer
 wandererastro	covercalibrator	fake_serial_streamer.h	run	6	AlpacaCore/conformu/WandererAstro/Fake/Fake-covercalibrator-fake_serial_streamer-Linux-arm64.txt	-
 wandererastro	filterwheel	fake_serial_streamer.h	run	6	AlpacaCore/conformu/WandererAstro/Fake/Fake-filterwheel-fake_serial_streamer-Linux-arm64.txt	-
 wandererastro	switch	fake_serial_streamer.h	pending	6	-	ConformU time, not the fake: the row hosts and passes every check it reached in a 10-minute run, but ConformU steps each of the three 0-255 dew heater outputs through every value at four offsets with a 3.5 s pause per step (about an hour per output), so a full run takes about three hours against the 45-minute CI job limit; runs once the job limit or the step count allows it
+wandererastro	rotator	fake_wandererastro_rotator.h	run	6	AlpacaCore/conformu/WandererAstro/Fake/Fake-rotator-fake_wandererastro_rotator-Linux-arm64.txt	-
 bisque	telescope	-	no-fake	6	-	no fake exists yet
 weewx	observingconditions	fake_http_client.h	run	6	AlpacaCore/conformu/WeeWX/Fake/Fake-observingconditions-fake_http_client-Linux-arm64.txt	-
 remotealpaca	observingconditions	fake_http_client.h	run	6	AlpacaCore/conformu/Remote Alpaca/Fake/Fake-observingconditions-fake_http_client-Linux-arm64.txt	-
@@ -51,13 +53,11 @@ remotealpaca	covercalibrator	fake_http_client.h	pending	6	-	not yet tried: slice
 zwo	switch	fake_zwo_sdk.h	run	6	AlpacaCore/conformu/ZWO/Fake/Fake-switch-fake_zwo_sdk-Linux-arm64.txt	-
 zwo	switch	fake_zwo_asiair_gpiod.h	run	6	AlpacaCore/conformu/ZWO/Fake/Fake-switch-fake_zwo_asiair_gpiod-Linux-arm64.txt	-
 zwo	switch	fake_zwo_asiair_plus_ioctl.h	run	6	AlpacaCore/conformu/ZWO/Fake/Fake-switch-fake_zwo_asiair_plus_ioctl-Linux-arm64.txt	-
-wandererastro	rotator	-	no-fake	6	-	no fake exists yet
 touptek	switch	fake_touptek_sdk.h	run	6	AlpacaCore/conformu/ToupTek/Fake/Fake-switch-fake_touptek_sdk-Linux-arm64.txt	-
 touptek	filterwheel	fake_touptek_sdk.h	run	6	AlpacaCore/conformu/ToupTek/Fake/Fake-filterwheel-fake_touptek_sdk-Linux-arm64.txt	-
 touptek	focuser	fake_touptek_sdk.h	run	6	AlpacaCore/conformu/ToupTek/Fake/Fake-focuser-fake_touptek_sdk-Linux-arm64.txt	-
-ioptron	filterwheel	-	no-fake	6	-	no fake exists yet
-ioptron	camera	-	no-fake	6	-	no fake exists yet
+ioptron	filterwheel	fake_ioptron_ieaf.h	run	6	AlpacaCore/conformu/iOptron/Fake/Fake-filterwheel-fake_ioptron_ieaf-Linux-arm64.txt	-
+ioptron	camera	fake_playerone_sdk.h	run	6	AlpacaCore/conformu/iOptron/Fake/Fake-camera-fake_playerone_sdk-Linux-arm64.txt	-
 playerone	switch	fake_playerone_sdk.h	run	6	AlpacaCore/conformu/Player One/Fake/Fake-switch-fake_playerone_sdk-Linux-arm64.txt	-
-qhy	filterwheel	-usb	no-fake	6	-	no fake exists yet
-gemini	covercalibrator	-v1	no-fake	6	-	no fake exists yet
-gemini	covercalibrator	-v2	no-fake	6	-	no fake exists yet
+gemini	covercalibrator	fake_gemini_flatpanel_rev2.h	run	6	AlpacaCore/conformu/Gemini/Fake/Fake-covercalibrator-fake_gemini_flatpanel_rev2-Linux-arm64.txt	-
+gemini	covercalibrator	fake_gemini_flatpanel_lite.h	run	6	AlpacaCore/conformu/Gemini/Fake/Fake-covercalibrator-fake_gemini_flatpanel_lite-Linux-arm64.txt	-

@@ -131,6 +131,8 @@
 #include <alpacacore/vendor/gemini/gemini_pdh_switch_driver.h>
 
 #include "fake_gemini_flatpanel.h"
+#include "fake_gemini_flatpanel_lite.h"
+#include "fake_gemini_flatpanel_rev2.h"
 #include "fake_gemini_focuser.h"
 #include "fake_gemini_pdh.h"
 #endif
@@ -161,6 +163,7 @@
 #ifdef ALPACACORE_ENABLE_QHY
 #include <alpacacore/vendor/qhy/qhy_camera_driver.h>
 #include <alpacacore/vendor/qhy/qhy_cfw3_filterwheel_driver.h>
+#include <alpacacore/vendor/qhy/qhy_filterwheel_driver.h>
 #include <alpacacore/vendor/qhy/qhy_focuser_driver.h>
 
 #include "fake_qhy_cfw3.h"
@@ -213,8 +216,10 @@
 #include <alpacacore/vendor/wandererastro/wandererastro_box_switch_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_covercalibrator_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_filterwheel_driver.h>
+#include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
 
 #include "fake_serial_streamer.h"
+#include "fake_wandererastro_rotator.h"
 #endif
 
 namespace {
@@ -2779,6 +2784,34 @@ Tier2Host tier2_host_ioptron_focuser() {
     };
     return h;
 }
+// The iEFW-15 on the iEAF fake: :DeviceInfo# answers model code 99 (5 slots), which the wheel driver needs; the fake's
+// default model is the iEAF focuser, which it refuses (#2204).
+Tier2Host tier2_host_ioptron_filterwheel() {
+    Tier2Host h{"ioptron_filterwheel",
+                "ioptron",
+                "filterwheel",
+                "fake_ioptron_ieaf.h",
+                DeviceType::FilterWheel,
+                "ioptron_filterwheel",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto iefw = std::make_shared<alpacacore::test::FakeIoptronIeaf>();
+        iefw->set_model(99);
+        if (hold) iefw->hold_next_reply(kHold);
+        return host_over(iefw, [](const alpacacore::test::FakeIoptronIeaf& f) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::ioptron::create_iefw_filterwheel(0, f.slave_path());
+        });
+    };
+    h.failing = []() {
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::ioptron::create_iefw_filterwheel(0, kAbsentPort);
+        return hosted;
+    };
+    return h;
+}
 // The iFR focuser-rotator: both rows over FakeIoptronIfr, each device on its own fake (one session per fake).
 Tier2Host tier2_host_ifr_focuser() {
     Tier2Host h{"ifr_focuser", "ifr", "focuser", "fake_ioptron_ifr.h", DeviceType::Focuser, "ifr_focuser", {},
@@ -3219,8 +3252,8 @@ Tier2Host tier2_host_gemini_focuser() {
     return h;
 }
 
-// fake_gemini_flatpanel.h models the Pro firmware only, so this row hosts the gemini_covercalibrator_pro
-// registry entry; Cover Lite and v2 have no connected coverage (source: the fake header).
+// fake_gemini_flatpanel.h answers as the Pro firmware by default, so this row hosts the gemini_covercalibrator_pro
+// registry entry; the Rev2 and Lite rows below host the other two over the same fake.
 Tier2Host tier2_host_gemini_covercalibrator() {
     Tier2Host h{"gemini_covercalibrator",
                 "gemini",
@@ -3244,6 +3277,61 @@ Tier2Host tier2_host_gemini_covercalibrator() {
     h.failing = []() {
         Hosted hosted;
         hosted.driver = alpacacore::vendor::gemini::create_gemini_flatpanel_pro(0, kAbsentPort, 9600);
+        return hosted;
+    };
+    return h;
+}
+
+// The Rev2 and Lite firmwares connect like the Pro (the same Impl::connect), so the ">H#" hold holds them too.
+Tier2Host tier2_host_gemini_covercalibrator_v2() {
+    Tier2Host h{"gemini_covercalibrator_v2",
+                "gemini",
+                "covercalibrator",
+                "fake_gemini_flatpanel_rev2.h",
+                DeviceType::CoverCalibrator,
+                "gemini_covercalibrator_v2",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto panel = std::make_shared<alpacacore::test::FakeGeminiFlatPanelRev2>();
+        if (hold) panel->set_reply_delay(">H#", kFlatPanelHold);
+        return host_over(panel,
+                         [](const alpacacore::test::FakeGeminiFlatPanelRev2& f) -> std::unique_ptr<AlpacaDriver> {
+                             return alpacacore::vendor::gemini::create_gemini_flatpanel_v2(0, f.slave_path(), 9600);
+                         });
+    };
+    h.failing = []() {
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::gemini::create_gemini_flatpanel_v2(0, kAbsentPort, 9600);
+        return hosted;
+    };
+    return h;
+}
+
+Tier2Host tier2_host_gemini_covercalibrator_lite() {
+    Tier2Host h{"gemini_covercalibrator_lite",
+                "gemini",
+                "covercalibrator",
+                "fake_gemini_flatpanel_lite.h",
+                DeviceType::CoverCalibrator,
+                "gemini_covercalibrator",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto panel = std::make_shared<alpacacore::test::FakeGeminiFlatPanelLite>();
+        if (hold) panel->set_reply_delay(">H#", kFlatPanelHold);
+        return host_over(panel,
+                         [](const alpacacore::test::FakeGeminiFlatPanelLite& f) -> std::unique_ptr<AlpacaDriver> {
+                             return alpacacore::vendor::gemini::create_gemini_flatpanel(0, f.slave_path(), 9600);
+                         });
+    };
+    h.failing = []() {
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::gemini::create_gemini_flatpanel(0, kAbsentPort, 9600);
         return hosted;
     };
     return h;
@@ -3340,6 +3428,40 @@ Tier2Host tier2_host_qhy_filterwheel() {
         Hosted hosted;
         hosted.driver = alpacacore::vendor::qhy::create_qhy_cfw3_filterwheel(0, kAbsentPort, settings());
         return hosted;
+    };
+    return h;
+}
+
+// The integrated CFW on the camera's own handle (registry entry qhy_filterwheel), over the camera row's SDK fake. Its
+// connect opens the shared handle with sdk_.open_camera(id) (qhy_filterwheel_driver.cpp), held as for the camera.
+Tier2Host tier2_host_qhy_filterwheel_sdk() {
+    Tier2Host h{"qhy_filterwheel_sdk",
+                "qhy",
+                "filterwheel",
+                "fake_qhy_sdk.h",
+                DeviceType::FilterWheel,
+                "qhy_filterwheel",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto sdk_hold = std::make_shared<QhySdkHold>();
+        if (hold) {
+            sdk_hold->fake.before_call = [](const std::string& name) {
+                if (name == "open_camera") alpacacore::test::connect_hold(kQhyOpenHold);
+            };
+        }
+        return host_over(sdk_hold, [](QhySdkHold& s) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", s.sdk);
+        });
+    };
+    h.failing = []() {
+        auto hold = std::make_shared<QhySdkHold>();
+        hold->fake.sdk_resource_available = false;  // fake_qhy_sdk.h: the resource load fails
+        return host_over(hold, [](QhySdkHold& s) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", s.sdk);
+        });
     };
     return h;
 }
@@ -3586,19 +3708,13 @@ Tier2Host tier2_host_touptek_switch() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_PLAYERONE
-Tier2Host tier2_host_playerone_camera() {
-    Tier2Host h{"playerone_camera",
-                "playerone",
-                "camera",
-                "fake_playerone_sdk.h",
-                DeviceType::Camera,
-                "playerone_camera",
-                {},
-                true,
-                {},
-                ""};
-    h.connectable = [](bool hold) {
+// The Player One camera over FakePlayerOneSDK. The iOptron iCAM row (ioptron_camera) is the same driver behind the
+// iOptron factory (register_ioptron_icam_factory()), its fake listing the camera by the iCAM's SDK name.
+Tier2Host playerone_camera_host(const char* id, const char* vendor, const char* camera_name) {
+    Tier2Host h{id, vendor, "camera", "fake_playerone_sdk.h", DeviceType::Camera, id, {}, true, {}, ""};
+    h.connectable = [camera_name](bool hold) {
         auto sdk = std::make_shared<alpacacore::test::FakePlayerOneSDK>();
+        if (camera_name != nullptr) sdk->set_camera_name(camera_name);
         if (hold) sdk->set_open_delay(kHold);
         return host_over(sdk, [](alpacacore::test::FakePlayerOneSDK& fake) -> std::unique_ptr<AlpacaDriver> {
             return alpacacore::vendor::playerone::create_playerone_camera(0, 0, fake);
@@ -3613,6 +3729,8 @@ Tier2Host tier2_host_playerone_camera() {
     };
     return h;
 }
+Tier2Host tier2_host_playerone_camera() { return playerone_camera_host("playerone_camera", "playerone", nullptr); }
+Tier2Host tier2_host_ioptron_camera() { return playerone_camera_host("ioptron_camera", "ioptron", "iCAM178M"); }
 
 Tier2Host tier2_host_playerone_filterwheel() {
     Tier2Host h{"playerone_filterwheel",
@@ -3839,6 +3957,36 @@ Tier2Host tier2_host_wandererastro_switch() {
     };
     return h;
 }
+
+// The rotator turns at the ConformU host's rate (conformu_rotator_factories.h), so a move stays in flight for its
+// travel time (the tier-3 control window needs one that lasts).
+constexpr double kWandererRotatorMsPerDegree = 240.0;
+
+Tier2Host tier2_host_wandererastro_rotator() {
+    Tier2Host h{"wandererastro_rotator",
+                "wandererastro",
+                "rotator",
+                "fake_wandererastro_rotator.h",
+                DeviceType::Rotator,
+                "wandererastro_rotator",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto fake = std::make_shared<alpacacore::test::FakeWandererRotator>(kWandererRotatorMsPerDegree);
+        if (hold) fake->hold_next_reply(kHold);  // the handshake read waits serial_timeout_s (3 s)
+        return host_over(fake, [](const alpacacore::test::FakeWandererRotator& f) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, f.slave_path());
+        });
+    };
+    h.failing = []() {
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, kAbsentPort);
+        return hosted;
+    };
+    return h;
+}
 #endif
 
 // One X(id, kind) per hosted roster row, under the vendor's guard. kind decides which cases the row is
@@ -3879,13 +4027,13 @@ Tier2Host tier2_host_wandererastro_switch() {
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
 #define CS2_IOPTRON(X) \
-    X(ioptron_telescope, TEL) X(ioptron_focuser, NPR) X(iguider_camera, CAM) X(ifr_focuser, NPR) \
-    X(ifr_rotator, PRB) CS2_IOPTRON_POWERBOX(X)
+    X(ioptron_telescope, TEL) X(ioptron_focuser, NPR) X(ioptron_filterwheel, PRB) X(iguider_camera, CAM) \
+    X(ifr_focuser, NPR) X(ifr_rotator, PRB) CS2_IOPTRON_POWERBOX(X)
 #else
 #define CS2_IOPTRON(X)
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
-#define CS2_GEMINI(X) X(gemini_focuser, NPR) X(gemini_covercalibrator, PRB) X(gemini_switch, PRB)
+#define CS2_GEMINI(X) X(gemini_focuser, NPR) X(gemini_covercalibrator, PRB) X(gemini_covercalibrator_v2, PRB) X(gemini_covercalibrator_lite, PRB) X(gemini_switch, PRB)
 #else
 #define CS2_GEMINI(X)
 #endif
@@ -3905,7 +4053,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_WEEWX(X)
 #endif
 #ifdef ALPACACORE_ENABLE_QHY
-#define CS2_QHY(X) X(qhy_camera, CAM) X(qhy_filterwheel, PRB) X(qhy_focuser, NPR)
+#define CS2_QHY(X) X(qhy_camera, CAM) X(qhy_filterwheel, PRB) X(qhy_filterwheel_sdk, PRB) X(qhy_focuser, NPR)
 #else
 #define CS2_QHY(X)
 #endif
@@ -3930,7 +4078,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_SVBONY(X)
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
-#define CS2_PLAYERONE(X) X(playerone_camera, CAM) X(playerone_filterwheel, PRB) X(playerone_switch, PRB)
+#define CS2_PLAYERONE(X) X(playerone_camera, CAM) X(playerone_filterwheel, PRB) X(playerone_switch, PRB) X(ioptron_camera, CAM)
 #else
 #define CS2_PLAYERONE(X)
 #endif
@@ -3940,7 +4088,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_GPHOTO(X)
 #endif
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
-#define CS2_WANDERERASTRO(X) X(wandererastro_covercalibrator, PRB) X(wandererastro_filterwheel, PRB) X(wandererastro_switch, PRB)
+#define CS2_WANDERERASTRO(X) X(wandererastro_covercalibrator, PRB) X(wandererastro_filterwheel, PRB) X(wandererastro_switch, PRB) X(wandererastro_rotator, PRB)
 #else
 #define CS2_WANDERERASTRO(X)
 #endif
@@ -4453,6 +4601,20 @@ Tier3Recipe tier3_recipe_ioptron_focuser() {
                        DeviceType::Focuser, clock);
 }
 
+// iEFW: the wheel keeps reporting -1 (moving), then every :WP# answers a reply the wrapper cannot parse. Falsified by:
+// get_position() answering a slot, not raising, when the :WP# read fails.
+Tier3Recipe tier3_recipe_ioptron_filterwheel() {
+    using Fake = alpacacore::test::FakeIoptronIeaf;
+    return {[](Hosted& hosted) {
+                t3_fake<Fake>(hosted).set_wheel_moving_polls(1 << 30);
+                auto& f = dynamic_cast<alpacacore::FilterWheelDriver&>(*hosted.driver);
+                f.set_position(f.get_position() == 1 ? 2 : 1);
+            },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).fail_wheel_position(true); },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).fail_wheel_position(false); },
+            "FakeIoptronIeaf::fail_wheel_position(true) mid-move"};
+}
+
 // iFR: a move the fake never finishes (it keeps reporting the motor running), then the unit stops answering with
 // the port open. Falsified by: get_is_moving() answering false, or the move hold, on a failed status read.
 Tier3Recipe tier3_recipe_ifr_focuser() {
@@ -4748,6 +4910,21 @@ Tier3Recipe tier3_recipe_wandererastro_filterwheel() {
                                  });
             }};
 }
+
+// A 10 degree move (2.4 s of travel) loses its motor power mid-sweep: the rotator stops with no completion report, as
+// a WandererRotator with its DC supply pulled does, and the monitor's budget (twice the travel plus 5 s, 9.8 s from the
+// start, on steady_clock: the driver is not on the task clock) ends with IsMoving raising the fault. Restoring the
+// power never reports the stopped move. Falsified by: the move monitor reporting arrival when no report came.
+Tier3Recipe tier3_recipe_wandererastro_rotator() {
+    using Fake = alpacacore::test::FakeWandererRotator;
+    return {[](Hosted& hosted) {
+                auto& r = dynamic_cast<alpacacore::RotatorDriver&>(*hosted.driver);
+                r.move_absolute(r.get_position() < 180.0 ? r.get_position() + 10.0 : r.get_position() - 10.0);
+            },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_motor_power_off(true); },
+            [](Hosted& hosted) { t3_fake<Fake>(hosted).set_motor_power_off(false); },
+            "FakeWandererRotator::set_motor_power_off(true) mid-move"};
+}
 #endif
 
 [[maybe_unused]] void t3_start_filterwheel_move(Hosted& hosted) {
@@ -4988,6 +5165,19 @@ Tier3Recipe tier3_recipe_qhy_filterwheel() {
             }};
 }
 
+// The wheel reads -1 (turning) for good once the move is ordered; then every status read throws. The driver's 15 s move
+// deadline (real clock) falls inside the 20 s tier-3 budget, so a body that swallowed the read failure and kept reading
+// -1 is caught only by that deadline. Falsified by: Position answering the requested slot when the read fails.
+Tier3Recipe tier3_recipe_qhy_filterwheel_sdk() {
+    return {[](Hosted& hosted) {
+                t3_start_filterwheel_move(hosted);
+                t3_fake<QhySdkHold>(hosted).fake.cfw_position_script = {-1};  // no driver thread reads the fake
+            },
+            [](Hosted& hosted) { t3_fake<QhySdkHold>(hosted).fake.fail_from("get_cfw_position"); },
+            [](Hosted& hosted) { t3_fake<QhySdkHold>(hosted).fake.clear_fail_from(); },
+            "FakeQHYSDK::fail_from(get_cfw_position) mid-move"};
+}
+
 // The Q-Focuser advances one step per position poll, so a 500-step move never ends; then the firmware goes silent.
 // Falsified by: IsMoving answering false when the position poll times out.
 Tier3Recipe tier3_recipe_qhy_focuser() {
@@ -5110,6 +5300,9 @@ Tier3Recipe tier3_recipe_playerone_camera() {
                        DeviceType::Camera, clock);
 }
 
+// The iCAM row is the same driver: the Player One camera recipe.
+Tier3Recipe tier3_recipe_ioptron_camera() { return tier3_recipe_playerone_camera(); }
+
 // The wheel reports -1 (moving) for good; then every Position read throws. Falsified by: Position answering the
 // requested slot when the read fails.
 Tier3Recipe tier3_recipe_playerone_filterwheel() {
@@ -5151,7 +5344,8 @@ Tier3Recipe tier3_recipe_gphoto_camera() {
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
 #define CT3_IOPTRON(X) \
-    X(ioptron_telescope, OK) X(ioptron_focuser, OK) X(iguider_camera, OK) X(ifr_focuser, OK) X(ifr_rotator, OK)
+    X(ioptron_telescope, OK) X(ioptron_focuser, OK) X(ioptron_filterwheel, OK) X(iguider_camera, OK) \
+    X(ifr_focuser, OK) X(ifr_rotator, OK)
 #else
 #define CT3_IOPTRON(X)
 #endif
@@ -5181,7 +5375,7 @@ Tier3Recipe tier3_recipe_gphoto_camera() {
 #define CT3_GEMINI(X)
 #endif
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
-#define CT3_WANDERERASTRO(X) X(wandererastro_filterwheel, OK)
+#define CT3_WANDERERASTRO(X) X(wandererastro_filterwheel, OK) X(wandererastro_rotator, OK)
 #else
 #define CT3_WANDERERASTRO(X)
 #endif
@@ -5191,7 +5385,7 @@ Tier3Recipe tier3_recipe_gphoto_camera() {
 #define CT3_ZWO(X)
 #endif
 #ifdef ALPACACORE_ENABLE_QHY
-#define CT3_QHY(X) X(qhy_camera, OK) X(qhy_filterwheel, OK) X(qhy_focuser, OK)
+#define CT3_QHY(X) X(qhy_camera, OK) X(qhy_filterwheel, OK) X(qhy_filterwheel_sdk, OK) X(qhy_focuser, OK)
 #else
 #define CT3_QHY(X)
 #endif
@@ -5211,7 +5405,7 @@ Tier3Recipe tier3_recipe_gphoto_camera() {
 #define CT3_SVBONY(X)
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
-#define CT3_PLAYERONE(X) X(playerone_camera, OK) X(playerone_filterwheel, OK)
+#define CT3_PLAYERONE(X) X(playerone_camera, OK) X(playerone_filterwheel, OK) X(ioptron_camera, OK)
 #else
 #define CT3_PLAYERONE(X)
 #endif
@@ -5436,6 +5630,7 @@ TEST_CASE("Contract sweep - filter wheels - names and offsets while disconnected
 #define CS2_LASTEXP_iguider_camera(id) CS2_LASTEXP_RUN(id)
 #define CS2_LASTEXP_svbony_camera(id) CS2_LASTEXP_RUN(id)
 #define CS2_LASTEXP_playerone_camera(id) CS2_LASTEXP_RUN(id)
+#define CS2_LASTEXP_ioptron_camera(id) CS2_LASTEXP_RUN(id)
 #define CS2_LASTEXP_gphoto_camera(id) CS2_LASTEXP_RUN(id)
 #define CS2_LASTEXP_touptek_camera(id) CS2_LASTEXP_RUN(id)
 #define CS2_LASTEXP_altair_camera(id) CS2_LASTEXP_RUN(id)

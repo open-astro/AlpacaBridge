@@ -136,6 +136,9 @@ namespace alpacacore::test {
  *   documents no unit, and microseconds never end the wait early.
  * - get_single_frame() never blocks (rule 1), where the real call waits for
  *   the exposure; the driver's own exposure-remaining poll is the wait.
+ * - move_cfw() lands the wheel at once unless cfw_reads_per_slot is set, where
+ *   the real wheel passes every slot between at about a second each; with it
+ *   set the turn is counted in reads, not in time.
  *
  * ROI UNITS — `roi_` is in BINNED pixels, matching the only caller: the driver
  * passes max_width / bin_x to set_resolution() from set_bin_locked(), and
@@ -235,6 +238,10 @@ public:
     std::vector<std::string> readout_modes{"Full Resolution", "Linearity HDR"};
     // Consumed by get_cfw_position; -1 = in motion. Last entry repeats.
     std::deque<int> cfw_position_script;
+    /// 0, the default: move_cfw lands on its slot at once. Above 0, move_cfw scripts the turn instead: the slot it
+    /// leaves and each slot it passes read that many times, the wrap from the last slot to 0 reads -1 once, then the
+    /// target (the ConformU host sets it, #2697). Read-counted, not timed, so nothing blocks (rule 1).
+    int cfw_reads_per_slot = 0;
     bool read_directly = false;  // start_single_frame's return
     bool frame_ok = true;        // get_single_frame's return
     uint32_t exposure_remaining = 0;  // get_exposure_remaining's return; 100 or less: the exposure is over (#2721)
@@ -734,8 +741,25 @@ public:
         }
         require_open(camera_id);
         last_cfw_target = position;
-        cfw_position_ = position;
         cfw_position_script.clear();
+        const auto slots = params.find(vendor::qhy::control::CFWSLOTSNUM);
+        const int slot_count = slots == params.end() ? 0 : static_cast<int>(slots->second);
+        if (cfw_reads_per_slot <= 0 || slot_count <= 0 || position >= slot_count || cfw_position_ == position) {
+            cfw_position_ = position;
+            return;
+        }
+        // The wheel turns one way from the slot it leaves through every slot between, as GetQHYCCDCFWStatus reports
+        // them (a 4 -> 3 move on the miniCam8M read 4,5,6,-1,0,1,2,3): each for cfw_reads_per_slot reads, -1 at the
+        // wrap. The first reads are the slot it leaves, the stale reading failure 0001 cached.
+        const int from = cfw_position_ < 0 ? 0 : cfw_position_;
+        cfw_position_script.insert(cfw_position_script.end(), static_cast<std::size_t>(cfw_reads_per_slot), from);
+        for (int slot = from; slot != position;) {
+            slot = (slot + 1) % slot_count;
+            if (slot == 0) cfw_position_script.push_back(-1);
+            if (slot == position) break;
+            cfw_position_script.insert(cfw_position_script.end(), static_cast<std::size_t>(cfw_reads_per_slot), slot);
+        }
+        cfw_position_script.push_back(position);  // the last entry repeats: the wheel is at rest
     }
 
     int get_cfw_position(const std::string& camera_id) override {

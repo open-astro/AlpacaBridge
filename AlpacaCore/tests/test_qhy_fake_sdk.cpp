@@ -181,6 +181,26 @@ TEST_CASE("FakeQHYSDK - a move clears any pending script", "[qhy][fake][unit]") 
     CHECK(fake.get_cfw_position("fake-qhy-0") == 4);
 }
 
+TEST_CASE("FakeQHYSDK - cfw_reads_per_slot turns the wheel through the slots between", "[qhy][fake][unit]") {
+    auto fake = make_fake();  // a 5-slot wheel (CFWSLOTSNUM), at slot 0
+    fake.open_camera("fake-qhy-0");
+    fake.cfw_reads_per_slot = 2;
+    const auto reads = [&](int n) {
+        std::vector<int> out;
+        for (int i = 0; i < n; ++i) out.push_back(fake.get_cfw_position("fake-qhy-0"));
+        return out;
+    };
+    fake.move_cfw("fake-qhy-0", 3);
+    // The slot it leaves, then each slot it passes, then the target, which repeats.
+    CHECK(reads(8) == std::vector<int>{0, 0, 1, 1, 2, 2, 3, 3});
+    // 3 -> 1 turns the same way and reads -1 at the wrap from the last slot to 0.
+    fake.move_cfw("fake-qhy-0", 1);
+    CHECK(reads(9) == std::vector<int>{3, 3, 4, 4, -1, 0, 0, 1, 1});
+    // A move to the slot it is on does not turn.
+    fake.move_cfw("fake-qhy-0", 1);
+    CHECK(reads(1) == std::vector<int>{1});
+}
+
 TEST_CASE("FakeQHYSDK - chip info comes from the canned camera and never touches model", "[qhy][fake][unit]") {
     // Matches QHYSDKWrapper::get_chip_info(), which never writes info.model at
     // all -- the driver's connect sequence always populates it separately

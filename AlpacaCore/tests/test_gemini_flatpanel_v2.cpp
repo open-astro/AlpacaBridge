@@ -15,9 +15,11 @@
 #include <alpacacore/vendor/gemini/gemini_flatpanel_protocol_wrapper.h>
 #include <alpacacore/version.h>
 
+#include <chrono>
 #include <functional>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -25,6 +27,7 @@
 #include "device_location_test_dir.h"
 #include "driver_rig.h"
 #include "fake_gemini_flatpanel.h"
+#include "fake_gemini_flatpanel_rev2.h"
 
 namespace {
 
@@ -240,4 +243,44 @@ TEST_CASE("Gemini Flat Panel v2 Driver - CoverMoving is true exactly when CoverS
 
     REQUIRE(driver->get_cover_state() == alpacacore::CoverState::Moving);
     CHECK(driver->get_cover_moving());
+}
+
+// The Rev2 firmware of the fake (fake_gemini_flatpanel_rev2.h, the v2's fake ConformU row): ">S#" in the Rev2 layout
+// "*S19<motor><light><cover>#" (parse_rev2_status() refuses the Pro layout's missing 19/99 id), and the exact
+// "*OOpened#" / "*CClosed#" acks the Rev2 driver requires (a Pro "*O405#" ack fails the open, CoverState Error).
+TEST_CASE("Gemini Flat Panel v2 Driver - FakeGeminiFlatPanelRev2 answers as the v2 panel",
+          "[gemini][flatpanel][unit][fake]") {
+    alpacacore::test::FakeGeminiFlatPanelRev2 panel;
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel_v2(0, panel.slave_path(), 9600);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_device_firmware() == std::optional<std::string>("408"));
+    REQUIRE(driver->get_cover_state() == alpacacore::CoverState::Closed);
+
+    const auto settles_at = [&](alpacacore::CoverState want) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (driver->get_cover_moving() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return driver->get_cover_state() == want;
+    };
+    driver->open_cover();
+    REQUIRE(settles_at(alpacacore::CoverState::Open));
+    CHECK(panel.cover() == 2);
+    driver->close_cover();
+    REQUIRE(settles_at(alpacacore::CoverState::Closed));
+    CHECK(panel.cover() == 1);
+
+    // The connect's state seed reads the light from the same ">S#" layout.
+    driver->calibrator_on(100);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (driver->get_calibrator_changing() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(panel.light_on());
+    driver->set_connected(false);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_calibrator_state() == alpacacore::CalibratorState::Ready);
+    CHECK(driver->get_brightness() == 100);
 }
