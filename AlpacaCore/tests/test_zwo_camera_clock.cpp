@@ -17,10 +17,15 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <memory>
+#include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -380,6 +385,41 @@ struct WorkingRig {
     }
 };
 
+// Issue #2721: ASIStopExposure blocks for the rest of a short exposure plus ~0.4 s, up to 3.18 s on an ASI120MM Mini
+// (rig, SDK 1.41). The gate holds every SDK stop in the fake until open() (or throws it), on whichever thread calls it.
+// Declared before the rig, so the rig's teardown never calls into a destroyed gate.
+struct StopGate {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool open_{false};
+    std::atomic<bool> fail{false};
+    std::atomic<int> entered{0};
+
+    void attach(FakeZWOSDK& sdk) {
+        sdk.before_call = [this](const std::string& call) {
+            if (call != "stop_exposure") return;
+            std::unique_lock<std::mutex> lock(mutex);
+            ++entered;
+            cv.notify_all();
+            cv.wait_for(lock, kRendezvous, [this] { return open_; });
+            if (fail) throw std::runtime_error("ASIStopExposure failed");
+        };
+    }
+    bool wait_entered(int n) {
+        std::unique_lock<std::mutex> lock(mutex);
+        return cv.wait_for(lock, kRendezvous, [&] { return entered.load() >= n; });
+    }
+    void open() {
+        std::lock_guard<std::mutex> lock(mutex);
+        open_ = true;
+        cv.notify_all();
+    }
+};
+
+bool returns_within(std::future<void>& call, std::chrono::milliseconds bound) {
+    return call.wait_for(bound) == std::future_status::ready;
+}
+
 }  // namespace
 
 // Rule 4.3: the body polls the exposure status once per 50 ms wait on the task clock, and delivers the frame at the
@@ -437,11 +477,116 @@ TEST_CASE("ZWO camera clock - AbortExposure wakes the status poll without a cloc
     REQUIRE(rig.clock.wait_for_wait_count(1, kRendezvous));
     const int stops = rig.sdk.call_count("stop_exposure");
     CHECK(alpacacore::test::zwo_returns_without_advance(rig.clock, [&] { rig.camera->abort_exposure(); }));
-    CHECK(rig.sdk.call_count("stop_exposure") == stops + 1);
+    CHECK(rig.sdk.wait_for_call_count("stop_exposure", stops + 1, kRendezvous));
+    CHECK(rig.clock.wait_for_woken_settled(kRendezvous));
     CHECK(rig.clock.waiter_count() == 0);
     CHECK(rig.camera->get_camera_state() == alpacacore::CameraState::Idle);
     CHECK_FALSE(rig.camera->get_image_ready());
     rig.camera->set_connected(false);
+}
+
+// Falsified by: zwo_camera_driver.cpp stop_exposure_impl() calling dev_.stop_exposure() on the client's thread, or
+// joining the body (session_.abort()) while the body's ASIStopExposure runs: the AbortExposure blocks for the whole SDK
+// stop, up to 3.18 s on the rig (issue #2721).
+TEST_CASE("ZWO camera clock - AbortExposure returns while the SDK stop is still running",
+          "[zwo][camera][unit][clock][capture-session]") {
+    StopGate gate;
+    WorkingRig rig;
+    gate.attach(rig.sdk);
+    rig.camera->start_exposure(10.0, true);
+    REQUIRE(rig.clock.wait_for_wait_count(1, kRendezvous));
+
+    auto aborted = std::async(std::launch::async, [&] { rig.camera->abort_exposure(); });
+    const bool stop_entered = gate.wait_entered(1);
+    const bool returned_during_stop = returns_within(aborted, milliseconds(2000));
+    const auto state_during_stop = rig.camera->get_camera_state();
+    const bool ready_during_stop = rig.camera->get_image_ready();
+    gate.open();
+    aborted.get();
+
+    CHECK(stop_entered);
+    CHECK(returned_during_stop);
+    CHECK(state_during_stop == alpacacore::CameraState::Idle);
+    CHECK_FALSE(ready_during_stop);
+    CHECK(rig.sdk.wait_for_call_count("stop_exposure", 1, kRendezvous));  // one stop, sent by the body
+    rig.camera->set_connected(false);
+}
+
+// Falsified by: zwo_camera_driver.cpp start_exposure() triggering a new exposure while the aborted body's
+// ASIStopExposure still runs (two SDK calls on one exposure at once), or the session refusing it after the stop ended.
+TEST_CASE("ZWO camera clock - StartExposure during the aborted body's SDK stop is refused, and runs after it",
+          "[zwo][camera][unit][clock][capture-session]") {
+    StopGate gate;
+    WorkingRig rig;
+    gate.attach(rig.sdk);
+    rig.camera->start_exposure(10.0, true);
+    REQUIRE(rig.clock.wait_for_wait_count(1, kRendezvous));
+    auto aborted = std::async(std::launch::async, [&] { rig.camera->abort_exposure(); });
+    REQUIRE(gate.wait_entered(1));
+    REQUIRE(returns_within(aborted, milliseconds(2000)));
+    const int starts = rig.sdk.call_count("start_exposure");
+
+    // CaptureSession::start() waits kStartTimeout (2 s, task clock) for the body still running, then refuses.
+    auto refused =
+        std::async(std::launch::async, [&] { return error_code([&] { rig.camera->start_exposure(1.0, true); }); });
+    REQUIRE(rig.clock.wait_for_waiters(1, kRendezvous));
+    rig.clock.advance(milliseconds(2000));
+    CHECK(refused.get() == AlpacaError::InvalidOperation);
+    CHECK(rig.sdk.call_count("start_exposure") == starts);
+
+    gate.open();
+    aborted.get();
+    // start() waits for the body that sent the stop to return, then runs.
+    CHECK(error_code([&] { rig.camera->start_exposure(1.0, true); }) == -1);
+    CHECK(rig.sdk.wait_for_call_count("start_exposure", starts + 1, kRendezvous));
+    rig.camera->set_connected(false);
+}
+
+// Falsified by: zwo_camera_driver.cpp stop_exposure_impl() raising the SDK stop's failure to the client, or the body
+// keeping it as the session's failure after the abort ended the exposure (ImageReady would raise DriverException).
+TEST_CASE("ZWO camera clock - a failed SDK stop after AbortExposure is logged, not raised",
+          "[zwo][camera][unit][clock][capture-session]") {
+    StopGate gate;
+    WorkingRig rig;
+    gate.attach(rig.sdk);
+    gate.fail = true;
+    gate.open();
+    rig.camera->start_exposure(10.0, true);
+    REQUIRE(rig.clock.wait_for_wait_count(1, kRendezvous));
+
+    CHECK(error_code([&] { rig.camera->abort_exposure(); }) == -1);
+    REQUIRE(gate.wait_entered(1));
+    REQUIRE(rig.clock.wait_for_woken_settled(kRendezvous));
+    CHECK(rig.camera->get_camera_state() == alpacacore::CameraState::Idle);
+    CHECK(error_code([&] { static_cast<void>(rig.camera->get_image_ready()); }) == -1);
+    gate.fail = false;
+    rig.camera->set_connected(false);
+}
+
+// Falsified by: zwo_camera_driver.cpp set_connected(false) closing the camera while the aborted body's ASIStopExposure
+// still runs, or publishing Connected false only after that stop (issue #2721: Disconnect waits for the stop).
+TEST_CASE("ZWO camera clock - Disconnect during the aborted body's SDK stop reads false and closes after it",
+          "[zwo][camera][unit][clock][capture-session]") {
+    StopGate gate;
+    WorkingRig rig;
+    gate.attach(rig.sdk);
+    rig.camera->start_exposure(10.0, true);
+    REQUIRE(rig.clock.wait_for_wait_count(1, kRendezvous));
+    auto aborted = std::async(std::launch::async, [&] { rig.camera->abort_exposure(); });
+    REQUIRE(gate.wait_entered(1));
+    REQUIRE(returns_within(aborted, milliseconds(2000)));
+
+    auto disconnected = std::async(std::launch::async, [&] { rig.camera->set_connected(false); });
+    const bool reads_false = alpacacore::test::zwo_eventually([&] { return !rig.camera->get_connected(); });
+    const bool returned_during_stop = returns_within(disconnected, milliseconds(200));
+    const int opens_during_stop = rig.sdk.open_count();
+    gate.open();
+    disconnected.get();
+
+    CHECK(reads_false);
+    CHECK_FALSE(returned_during_stop);
+    CHECK(opens_during_stop == 1);
+    CHECK(rig.sdk.open_count() == 0);
 }
 
 // Rules 5 and 7.2: a Disconnect stops the SDK exposure and joins the body before the close, with no clock advance.

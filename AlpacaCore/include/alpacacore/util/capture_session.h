@@ -78,10 +78,10 @@ private:
  *
  * Locks: mutex_ is a leaf. While it is held the session calls no slot method,
  * body, log call or callback. Joins serialise on join_mutex_, taken without
- * mutex_. Call start(), abort(), disconnect_and_join() and the destructor
- * without the driver mutex; the getters, fail(), set_stopping(), discard_image()
- * and open() may run under it. A body never calls start(), abort(), disconnect_and_join()
- * or open().
+ * mutex_. Call start(), abort(), cancel(), disconnect_and_join() and the
+ * destructor without the driver mutex; the getters, fail(), set_stopping(),
+ * discard_image() and open() may run under it. A body never calls start(),
+ * abort(), cancel(), disconnect_and_join() or open().
  */
 class CaptureSession {
 public:
@@ -173,6 +173,25 @@ public:
         ++pending_;
         lock.unlock();
         join_all();
+        lock.lock();
+        --pending_;
+        cv_.notify_all();
+    }
+
+    /// Cancels the exposure in flight like abort() but returns without joining its body, which ends on its own
+    /// thread (a ZWO body's ASIStopExposure can block for seconds, #2721). start() waits for that body like any
+    /// other still running (kStartTimeout), and disconnect_and_join() joins it. A no-op when nothing is exposing.
+    void cancel() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!is_exposing_locked()) {
+            return;
+        }
+        state_ = State::Idle;
+        image_.reset();
+        owner_ = 0;
+        ++pending_;
+        lock.unlock();
+        slot_.cancel();
         lock.lock();
         --pending_;
         cv_.notify_all();
