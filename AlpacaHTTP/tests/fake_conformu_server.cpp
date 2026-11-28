@@ -261,6 +261,18 @@ const std::vector<ConformuHost> kHosts = {
      driver_of(cu::make_touptek_switch)},
 #endif
 #ifdef FAKE_CONFORMU_ZWO
+    {"zwo", "switch", "fake_zwo_sdk.h", alpacacore::DeviceType::Switch, "zwo-fake",
+     "ZWO Dew Heater (fake SDK, test only)", "ALPACACORE_ENABLE_ZWO",
+     "FakeZWOSDK (the anti-dew heater of a simulated ASI camera, in process)", [] { return true; },
+     driver_of(cu::make_zwo_dew_heater_switch)},
+    {"zwo", "switch", "fake_zwo_asiair_gpiod.h", alpacacore::DeviceType::Switch, "zwo-fake",
+     "ZWO ASIAIR Pro (fake GPIO chip, test only)", "ALPACACORE_ENABLE_ZWO",
+     "the libgpiod stub chip of fake_zwo_asiair_gpiod.h (simulated ASIAIR Pro GPIO lines, in process)",
+     [] { return true; }, driver_of(cu::make_zwo_asiair_switch)},
+    {"zwo", "switch", "fake_zwo_asiair_plus_ioctl.h", alpacacore::DeviceType::Switch, "zwo-fake",
+     "ZWO ASIAIR Plus RK3568 (fake kernel module, test only)", "ALPACACORE_ENABLE_ZWO",
+     "the ioctl stub of fake_zwo_asiair_plus_ioctl.h (simulated pwm_gpio_compat module, in process)",
+     [] { return !cu::zwo_asiair_plus_device().sysfs_root().empty(); }, driver_of(cu::make_zwo_asiair_plus_switch)},
     {"zwo", "camera", "fake_zwo_sdk.h", alpacacore::DeviceType::Camera, "zwo-fake",
      "ZWO ASI camera (fake SDK, test only)", "ALPACACORE_ENABLE_ZWO",
      "FakeZWOSDK (simulated ASI camera SDK, in process)", [] { return true; }, driver_of(cu::make_zwo_camera)},

@@ -18,12 +18,23 @@
 // so it outlives every driver the server builds. It lives here, not in AlpacaHTTP, so the vendor headers stay out of
 // AlpacaHTTP (scripts/check_layering.py). The iOptron and ToupTek power boxes are compiled only with libgpiod, so their
 // factories also wait for the ALPACACORE_IOPTRON_POWERBOX and ALPACACORE_TOUPTEK_STELLAVITA macros the build sets then.
+// The ZWO build always needs libgpiod; its two ASIAIR switches run their real backends over the libgpiod and ioctl()
+// stubs that zwo_asiair_stubs.cpp, compiled into the server, defines.
 
 #include <alpacacore/switch_driver.h>
 
 #include <chrono>
 #include <memory>
 
+#ifdef FAKE_CONFORMU_ZWO
+#include <alpacacore/vendor/zwo/zwo_asiair_plus_switch_driver.h>
+#include <alpacacore/vendor/zwo/zwo_asiair_switch_driver.h>
+#include <alpacacore/vendor/zwo/zwo_switch_driver.h>
+
+#include "fake_zwo_asiair_gpiod.h"
+#include "fake_zwo_asiair_plus_ioctl.h"
+#include "fake_zwo_sdk.h"
+#endif
 #ifdef FAKE_CONFORMU_ONSTEP
 #include <alpacacore/vendor/onstep/onstep_switch_driver.h>
 
@@ -52,6 +63,40 @@
 #endif
 
 namespace alpacacore::test::conformu {
+
+#ifdef FAKE_CONFORMU_ZWO
+// The dew heater of the fake ASI camera (its AntiDewHeater control), through the dew heater's own SDK seam.
+inline vendor::zwo::ZWOSdkDewHeaterSdk& zwo_dew_heater_sdk() {
+    static FakeZWOSDK sdk;
+    static vendor::zwo::ZWOSdkDewHeaterSdk dew_sdk{sdk};
+    return dew_sdk;
+}
+inline std::unique_ptr<SwitchDriver> make_zwo_dew_heater_switch(int device_number) {
+    return vendor::zwo::create_zwo_dew_heater_switch_by_index(device_number, 0, zwo_dew_heater_sdk());
+}
+
+// The ASIAIR Pro over the libgpiod stub chip, every line high as the stock boot leaves it.
+inline std::unique_ptr<SwitchDriver> make_zwo_asiair_switch(int device_number) {
+    static const bool booted = [] {
+        stub_reset_levels(1);
+        return true;
+    }();
+    (void)booted;
+    return vendor::zwo::create_zwo_asiair_switch(device_number, stub_asiair_pro_config());
+}
+
+// The ASIAIR Plus (RK3568) over the ioctl stub playing pwm_gpio_compat, the OpenAstro image's module: the harsher of
+// the two stub modules, which refuses every command the GPIO path must not send.
+inline StubDeviceFile& zwo_asiair_plus_device() {
+    static StubDeviceFile device(compat_device());
+    return device;
+}
+inline std::unique_ptr<SwitchDriver> make_zwo_asiair_plus_switch(int device_number) {
+    auto config = vendor::zwo::default_asiair_plus_rk3568_config();
+    config.device_path = zwo_asiair_plus_device().path;
+    return vendor::zwo::create_zwo_asiair_plus_switch(device_number, config, zwo_asiair_plus_device().sysfs_root());
+}
+#endif
 
 #ifdef FAKE_CONFORMU_ONSTEP
 inline std::unique_ptr<SwitchDriver> make_onstep_switch(int device_number) {
