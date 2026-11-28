@@ -5168,9 +5168,9 @@ Tier3Recipe tier3_recipe_qhy_filterwheel() {
             }};
 }
 
-// The wheel reads -1 (turning) for good once the move is ordered; then every status read throws. The driver's move
-// deadline (15 s on the real clock) is past the case. Falsified by: Position answering the requested slot when the read
-// fails.
+// The wheel reads -1 (turning) for good once the move is ordered; then every status read throws. The driver's 15 s move
+// deadline (real clock) falls inside the 20 s tier-3 budget, so a body that swallowed the read failure and kept reading
+// -1 is caught only by that deadline. Falsified by: Position answering the requested slot when the read fails.
 Tier3Recipe tier3_recipe_qhy_filterwheel_sdk() {
     return {[](Hosted& hosted) {
                 t3_start_filterwheel_move(hosted);
