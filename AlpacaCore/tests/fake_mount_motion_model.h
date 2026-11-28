@@ -13,15 +13,17 @@
 #pragma once
 
 // Protocol-neutral equatorial mount motion model for the fake ConformU rows (#2078, #2614). It knows how a German
-// equatorial mount MOVES, not how any vendor talks: a protocol fake (FakeIoptronMount today; ZWO AM, CGX,
-// NexStar/SynScan and OnStep next) keeps one FakeMountMotionModel, forwards each wire command to a method below and
-// answers each read from a getter. It stays out of the wire format, so a second protocol adds no motion code.
+// equatorial mount MOVES, not how any vendor talks: a protocol fake (FakeIoptronMount, FakeBisqueMount,
+// FakeSynScanHandset, FakeCelestronHandset, FakeZwoMount and FakeOnStepMount today; the CGX next) keeps one
+// FakeMountMotionModel, forwards each wire command to a method below and answers each read from a getter. It stays out
+// of the wire format, so a second protocol adds no motion code.
 //
 // What it models, all in degrees (RA hours only at the edge, as the Alpaca units are):
 //   - GOTO: a straight run at slew_deg_per_s; slewing() is true until the travel time has passed, then the position
 //     is exactly the target. goto_radec() returns the travel time.
 //   - Tracking: on, the sky position holds; off, it drifts east at the sidereal rate (the mount stands still while
-//     the sky turns).
+//     the sky turns). A tracking rate offset (set_rate_offset(), ASCOM RightAscensionRate and DeclinationRate) adds to
+//     the held position while tracking is on.
 //   - MoveAxis: move_axis() runs one axis at a signed rate until stopped (rate 0, or stop()).
 //   - Pulse guide: pulse() runs one axis at a signed rate for a duration, then stops by itself.
 //   - Park and home: park() / go_home() slew to the configured mechanical position (hour angle, Dec); on arrival
@@ -127,6 +129,15 @@ public:
         advance_locked();
         tracking_ = on;
         if (on) parked_ = false;
+    }
+
+    /// The tracking rate offsets, degrees per second of the sky position (positive raises RA or Dec), applied while
+    /// tracking is on and no slew runs. 0, 0 is the sidereal rate.
+    void set_rate_offset(double ra_deg_per_s, double dec_deg_per_s) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        advance_locked();
+        rate_offset_[0] = ra_deg_per_s;
+        rate_offset_[1] = dec_deg_per_s;
     }
 
     /// Runs @p axis at @p deg_per_s (signed: positive raises RA or Dec) until stopped; 0 stops that axis.
@@ -418,6 +429,10 @@ private:
             } else {
                 double ra_rate = axis_rate_[0] + (tracking_ ? 0.0 : kSiderealDegPerSec);
                 double dec_rate = axis_rate_[1];
+                if (tracking_) {
+                    ra_rate += rate_offset_[0];
+                    dec_rate += rate_offset_[1];
+                }
                 if (pulse_[0].until > stamp_) ra_rate += pulse_[0].rate;
                 if (pulse_[1].until > stamp_) dec_rate += pulse_[1].rate;
                 ra_deg_ = util::wrap_degrees(ra_deg_ + ra_rate * dt);
@@ -436,6 +451,7 @@ private:
     mutable bool parked_ = false;
     mutable Slew slew_;
     double axis_rate_[2] = {0.0, 0.0};
+    double rate_offset_[2] = {0.0, 0.0};
     Pulse pulse_[2];
 };
 

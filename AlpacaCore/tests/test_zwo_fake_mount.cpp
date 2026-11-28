@@ -21,8 +21,11 @@
 
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <future>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -346,4 +349,221 @@ TEST_CASE("FakeZwoMount - drop_link and reset_connections close the link and a n
     CHECK(second.closed());
     Client third{rig.mount.port()};
     CHECK(third.ask(":GVP#") == "AM5N#");
+}
+
+// ---- ConformU mode (#2692): the wire answered from FakeMountMotionModel on a clock the case advances ----
+
+namespace {
+
+using alpacacore::test::FakeMountMotionModel;
+using std::chrono::seconds;
+
+struct ModelledZwo {
+    FakeTaskClock task_clock;
+    std::shared_ptr<FakeMountMotionModel::TimePoint> now = std::make_shared<FakeMountMotionModel::TimePoint>(
+        FakeMountMotionModel::TimePoint{seconds(1767225600)});  // 2026-01-01 00:00:00 UTC
+    FakeZwoMount mount;
+
+    ModelledZwo() : mount(task_clock, config(now)) {}
+
+    static FakeMountMotionModel::Config config(const std::shared_ptr<FakeMountMotionModel::TimePoint>& clock) {
+        auto c = FakeZwoMount::conformu_motion_config();
+        c.clock = [clock] { return *clock; };
+        return c;
+    }
+    void advance(seconds by) { *now += by; }
+    std::string ask(const std::string& command) { return mount.respond_to(command); }
+
+    static double parse_hms(const std::string& reply) {
+        int h = 0, m = 0, s = 0;
+        REQUIRE(std::sscanf(reply.c_str(), "%d:%d:%d", &h, &m, &s) == 3);
+        return h + m / 60.0 + s / 3600.0;
+    }
+    static double parse_dms(const std::string& reply) {
+        int d = 0, m = 0, s = 0;
+        REQUIRE(std::sscanf(reply.c_str() + 1, "%d*%d:%d", &d, &m, &s) == 3);
+        return (reply[0] == '-' ? -1.0 : 1.0) * (d + m / 60.0 + s / 3600.0);
+    }
+    double ra_hours() { return parse_hms(ask(":GR")); }
+    double dec_degrees() { return parse_dms(ask(":GD")); }
+    bool slewing() { return ask(":GU").find('N') == std::string::npos; }
+    bool tracking() { return ask(":GU").find('n') == std::string::npos; }
+
+    static std::string hms_of(double hours) {
+        const int total = static_cast<int>(std::lround(std::fmod(hours + 24.0, 24.0) * 3600.0)) % 86400;
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60);
+        return buf;
+    }
+    void set_target(double ra_hours, const std::string& dec) {
+        REQUIRE(ask(":Sr" + hms_of(ra_hours)) == "1#");
+        REQUIRE(ask(":Sd" + dec) == "1#");
+    }
+    // A sync to a known start, so a case does not depend on the mount's power-on pointing.
+    void sync_to(const std::string& ra, const std::string& dec) { REQUIRE(ask(":SMMC" + ra + "&" + dec) == "N/A#"); }
+};
+
+}  // namespace
+
+TEST_CASE("FakeZwoMount ConformU mode - a GOTO reports slewing and the target only after its travel time",
+          "[zwo][fake][mount-model][unit]") {
+    ModelledZwo rig;
+    REQUIRE(rig.mount.motion() != nullptr);
+    CHECK(rig.ask(":Te") == "1#");
+    const double dec_before = rig.dec_degrees();
+    const double aim_ra = std::fmod(rig.mount.motion()->lst_hours() + 1.0, 24.0);
+    rig.set_target(aim_ra, "-30*00:00:00");
+    REQUIRE(rig.ask(":MS") == "0#");
+
+    CHECK(rig.slewing());
+    rig.advance(seconds(5));
+    CHECK(rig.slewing());
+    const double mid = rig.dec_degrees();
+    CHECK(mid != Catch::Approx(dec_before).margin(0.5));
+    CHECK(mid != Catch::Approx(-30.0).margin(0.5));  // on its way, not there
+
+    rig.advance(seconds(60));
+    CHECK_FALSE(rig.slewing());
+    CHECK(rig.dec_degrees() == Catch::Approx(-30.0).margin(1e-3));
+    CHECK(std::remainder(rig.ra_hours() - aim_ra, 24.0) == Catch::Approx(0.0).margin(1e-3));
+}
+
+TEST_CASE("FakeZwoMount ConformU mode - a GOTO under the horizon is refused with e5 and moves nothing",
+          "[zwo][fake][mount-model][unit]") {
+    ModelledZwo rig;
+    rig.sync_to("06:00:00", "+40*00:00");
+    rig.set_target(12.0, "+80*00:00:00");  // never above the horizon from a site at -33.9 degrees
+    CHECK(rig.ask(":MS") == "e5#");
+    CHECK_FALSE(rig.slewing());
+    CHECK(rig.dec_degrees() == Catch::Approx(40.0).margin(1e-3));
+}
+
+TEST_CASE("FakeZwoMount ConformU mode - a Sync re-labels the reported position", "[zwo][fake][mount-model][unit]") {
+    ModelledZwo rig;
+    const double dec_before = rig.dec_degrees();
+    REQUIRE(rig.ask(":SMMC06:00:00&+40*00:00") == "N/A#");
+    CHECK(rig.dec_degrees() != Catch::Approx(dec_before).margin(1.0));
+    CHECK(rig.dec_degrees() == Catch::Approx(40.0).margin(1e-3));
+    CHECK(rig.ra_hours() == Catch::Approx(6.0).margin(1e-4));
+    CHECK_FALSE(rig.slewing());  // a sync moves nothing
+
+    rig.set_target(9.0, "+10*30:00");
+    REQUIRE(rig.ask(":CM") == "1#");  // a sync to the target registers
+    CHECK(rig.ra_hours() == Catch::Approx(9.0).margin(1e-4));
+    CHECK(rig.dec_degrees() == Catch::Approx(10.5).margin(1e-3));
+}
+
+TEST_CASE("FakeZwoMount ConformU mode - tracking holds RA and stopped tracking lets it drift east",
+          "[zwo][fake][mount-model][unit]") {
+    ModelledZwo rig;
+    rig.sync_to("06:00:00", "+40*00:00");
+    REQUIRE(rig.ask(":Te") == "1#");
+    CHECK(rig.ask(":GAT") == "1#");
+    CHECK(rig.tracking());
+    rig.advance(seconds(600));
+    CHECK(rig.ra_hours() == Catch::Approx(6.0).margin(1e-3));  // tracking: the sky position holds
+
+    REQUIRE(rig.ask(":Td") == "1#");
+    CHECK(rig.ask(":GAT") == "0#");
+    CHECK_FALSE(rig.tracking());
+    rig.advance(seconds(600));
+    // 600 s of sidereal time is 600 * 360.98564736629 / 86400 degrees of RA east.
+    CHECK(rig.ra_hours() == Catch::Approx(6.0 + 600.0 * 360.98564736629 / 86400.0 / 15.0).margin(5e-4));
+}
+
+TEST_CASE("FakeZwoMount ConformU mode - a jog runs its axis until the directional stop",
+          "[zwo][fake][mount-model][unit]") {
+    ModelledZwo rig;
+    rig.sync_to("06:00:00", "+40*00:00");
+    rig.ask(":Te");
+    rig.ask(":Rv0100.00");  // blind: 100x sidereal
+    rig.ask(":Me");
+    CHECK(rig.slewing());  // a jog reads as moving
+    rig.advance(seconds(10));
+    const double sidereal = FakeMountMotionModel::kSiderealDegPerSec;
+    CHECK(rig.ra_hours() == Catch::Approx(6.0 + 100.0 * sidereal * 10.0 / 15.0).margin(5e-4));
+    CHECK(rig.dec_degrees() == Catch::Approx(40.0).margin(1e-3));  // the other axis stays
+
+    rig.ask(":Qe");
+    CHECK_FALSE(rig.slewing());
+    const double stopped = rig.ra_hours();
+    rig.advance(seconds(10));
+    CHECK(rig.ra_hours() == Catch::Approx(stopped).margin(5e-4));
+
+    rig.ask(":Ms");  // south lowers Dec
+    rig.advance(seconds(10));
+    CHECK(rig.dec_degrees() == Catch::Approx(40.0 - 100.0 * sidereal * 10.0).margin(2e-3));
+}
+
+TEST_CASE("FakeZwoMount ConformU mode - a guide pulse moves its axis for its duration then stops",
+          "[zwo][fake][mount-model][unit]") {
+    ModelledZwo rig;
+    rig.sync_to("06:00:00", "+40*00:00");
+    rig.ask(":Te");
+    rig.ask(":Rg0.90");  // blind
+    rig.ask(":Mgn9999");
+    CHECK(rig.ask(":GU").find('t') != std::string::npos);  // a Dec guide is running
+    rig.advance(seconds(5));
+    const double mid = rig.dec_degrees();
+    CHECK(mid == Catch::Approx(40.0 + 0.9 * FakeMountMotionModel::kSiderealDegPerSec * 5.0).margin(5e-4));
+    rig.advance(seconds(10));
+    CHECK(ModelledZwo::parse_dms(rig.ask(":GD")) ==
+          Catch::Approx(40.0 + 0.9 * FakeMountMotionModel::kSiderealDegPerSec * 9.999).margin(5e-4));
+    CHECK(rig.ask(":GU").find('t') == std::string::npos);      // the pulse is over
+    CHECK(rig.ra_hours() == Catch::Approx(6.0).margin(1e-3));  // the RA axis never moved
+}
+
+TEST_CASE("FakeZwoMount ConformU mode - Park is reached after its travel time and Unpark clears it",
+          "[zwo][fake][mount-model][unit]") {
+    ModelledZwo rig;
+    rig.sync_to("06:00:00", "+40*00:00");
+    rig.ask(":Te");
+    rig.ask(":hP");  // blind, and ignored while tracking is on (AM5 firmware 1.8.8, open-astro#2097)
+    CHECK(rig.ask(":Gps") == "0#");
+    CHECK_FALSE(rig.slewing());
+
+    rig.ask(":Td");
+    rig.ask(":hP");
+    CHECK(rig.ask(":Gps") == "1#");  // in progress
+    CHECK(rig.slewing());
+    rig.advance(seconds(5));
+    CHECK(rig.ask(":Gps") == "1#");
+    rig.advance(seconds(60));
+    CHECK(rig.ask(":Gps") == "2#");  // parked
+    CHECK_FALSE(rig.slewing());
+    CHECK_FALSE(rig.tracking());
+
+    REQUIRE(rig.ask(":Spu") == "1#");
+    CHECK(rig.ask(":Gps") == "0#");
+}
+
+TEST_CASE("FakeZwoMount ConformU mode - FindHome reaches home and :Gh reads it afterwards",
+          "[zwo][fake][mount-model][unit]") {
+    ModelledZwo rig;
+    rig.sync_to("06:00:00", "+40*00:00");
+    CHECK(rig.ask(":Gh") == "0#");
+    rig.ask(":hC");  // blind
+    CHECK(rig.slewing());
+    rig.advance(seconds(60));
+    CHECK_FALSE(rig.slewing());
+    CHECK(rig.ask(":GU").find('H') != std::string::npos);
+    CHECK(rig.ask(":Gh") == "1#");
+    CHECK(rig.dec_degrees() == Catch::Approx(-90.0).margin(1e-3));  // the pole, counterweight down
+}
+
+TEST_CASE("FakeZwoMount ConformU mode - site and time writes are read back and move the sidereal time",
+          "[zwo][fake][mount-model][unit]") {
+    ModelledZwo rig;
+    // ":GMGE" is latitude & west-positive longitude: the made-up Sydney Opera House site.
+    CHECK(rig.ask(":GMGE") == "-33*51:24&-151*12:55#");
+    const double lst_before = ModelledZwo::parse_hms(rig.ask(":GS"));
+    REQUIRE(rig.ask(":SMGE+51*28:40&+000*00:05") == "1#");  // Greenwich, 5 arc seconds west
+    CHECK(rig.ask(":GMGE") == "+51*28:40&+00*00:05#");
+    CHECK(ModelledZwo::parse_hms(rig.ask(":GS")) != Catch::Approx(lst_before).margin(0.5));
+
+    CHECK(rig.ask(":GMTI") == "01/01/26&00:00:00&+00:00#");
+    REQUIRE(rig.ask(":SMTI03/04/26&05:06:07&+00:00") == "1#");
+    CHECK(rig.ask(":GMTI") == "03/04/26&05:06:07&+00:00#");
+    rig.advance(seconds(90));
+    CHECK(rig.ask(":GMTI") == "03/04/26&05:07:37&+00:00#");  // the written time runs on
 }

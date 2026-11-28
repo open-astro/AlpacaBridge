@@ -232,6 +232,7 @@ if(TARGET alpacacore_ioptron)
 endif()
 if(TARGET alpacacore_onstep)
     list(APPEND TEST_SOURCES test_onstep_telescope.cpp)
+    list(APPEND TEST_SOURCES test_onstep_fake_motion_mode.cpp)
     list(APPEND TEST_SOURCES test_onstep_clock_trust.cpp)
     # Same telescope [stress] coverage as SynScan/iOptron (audit 3.0.1 follow-up).
     list(APPEND TEST_SOURCES test_onstep_concurrency_stress.cpp)

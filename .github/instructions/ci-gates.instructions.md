@@ -150,7 +150,7 @@ author must do. Read the docstring before changing a gate.
   or tracks) stays `pending` with its parity gap as the reason, never behind a known-failures list. A new mount row's fake
   answers its own wire commands from the shared `FakeMountMotionModel` (`AlpacaCore/tests/fake_mount_motion_model.h`:
   GOTO travel time, tracking, pulses, MoveAxis, park, home, side of pier; #2614); the iOptron mount row is the first, in
-  `FakeIoptronMount`'s ConformU mode; the ZWO AM, Celestron, SynScan and OnStep mount rows stay `pending` until their fakes use it, and the two Sky-Watcher rows keep `FakeSkyWatcherBoard`'s own motor-step model. It is not a job in `ci.yml`: it runs on a PR only when the PR touches the
+  `FakeIoptronMount`'s ConformU mode; the Bisque, Celestron NexStar, SynScan, ZWO AM and OnStep mount fakes use it too (`FakeBisqueMount`, `FakeCelestronHandset`, `FakeSynScanHandset`, `FakeZwoMount`, `FakeOnStepMount`), the two Celestron CGX rows do not yet, and the two Sky-Watcher rows keep `FakeSkyWatcherBoard`'s own motor-step model. It is not a job in `ci.yml`: it runs on a PR only when the PR touches the
   workflow's `paths:` list (the run rows' drivers and fakes, the server, the run rows' device interfaces, the HTTP
   layer, the run script, the run list, the roster header and `scripts/check_conformu_reports.py`, which decides
   whether a run passes), nightly on `main` at 04:47 UTC, and on dispatch. Keep that list in step with the

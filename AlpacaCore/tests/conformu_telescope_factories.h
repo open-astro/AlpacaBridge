@@ -41,6 +41,17 @@
 #include "fake_bisque_mount.h"
 #include "fake_mount_server.h"
 #endif
+#ifdef FAKE_CONFORMU_ONSTEP
+#include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
+
+#include "fake_mount_server.h"
+#include "fake_onstep_mount.h"
+#endif
+#ifdef FAKE_CONFORMU_ZWO
+#include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
+
+#include "fake_zwo_mount.h"
+#endif
 #ifdef FAKE_CONFORMU_IOPTRON
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 
@@ -128,6 +139,50 @@ inline std::unique_ptr<TelescopeDriver> make_bisque_telescope(int device_number)
     connection.host = "127.0.0.1";
     connection.tcp_port = bisque_mount().server.port();
     return vendor::bisque::create_bisque_telescope_with_site(device_number, connection, -33.856784, 151.215297, 42.0);
+}
+#endif
+
+#ifdef FAKE_CONFORMU_ONSTEP
+// The OnStepX mount fake (#2692) in ConformU mode behind a FakeMountServer on loopback TCP: a GOTO takes its travel
+// time, a MoveAxis ends at the firmware's guide time limit, Park and FindHome are reached. The focuser, rotator and
+// switch rows keep their OnStepXController (conformu_focuser_factories.h). The driver runs on the real task clock with
+// the made-up Sydney Opera House site (never a real site). The mount is declared first, so it outlives the server that
+// holds its responder.
+struct OnStepMountHost {
+    FakeOnStepMount mount;
+    FakeMountServer server{mount.responder()};
+};
+inline OnStepMountHost& onstep_mount() {
+    static OnStepMountHost host;
+    return host;
+}
+inline std::unique_ptr<TelescopeDriver> make_onstep_telescope(int device_number) {
+    vendor::onstep::ConnectionInfo connection;
+    connection.type = vendor::onstep::ConnectionType::Network;
+    connection.host = "127.0.0.1";
+    connection.tcp_port = onstep_mount().server.port();
+    connection.response_timeout_ms = 2000;
+    return vendor::onstep::create_onstep_telescope_with_site(device_number, connection, -33.856784, 151.215297, 42.0,
+                                                             /*sync_time_on_connect=*/true);
+}
+#endif
+
+#ifdef FAKE_CONFORMU_ZWO
+// The stateful ZWO AM mount (FakeZwoMount, #2692) in ConformU mode on loopback TCP: it answers from the shared motion
+// model on the real clock, so a GOTO takes its travel time and a jog and a guide pulse move their axis. The driver
+// runs on the real task clock with the made-up Sydney Opera House site (never a real site).
+inline FakeZwoMount& zwo_mount() {
+    static FakeZwoMount mount(util::default_task_clock(), FakeZwoMount::conformu_motion_config());
+    return mount;
+}
+inline std::unique_ptr<TelescopeDriver> make_zwo_telescope(int device_number) {
+    vendor::zwo::ConnectionInfo connection;
+    connection.type = vendor::zwo::ConnectionType::Network;
+    connection.host = "127.0.0.1";
+    connection.tcp_port = zwo_mount().port();
+    connection.response_timeout_ms = 2000;
+    return vendor::zwo::create_zwo_telescope_with_site(device_number, connection, -33.856784, 151.215297, 42.0,
+                                                       /*sync_time_on_connect=*/true);
 }
 #endif
 

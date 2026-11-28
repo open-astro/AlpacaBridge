@@ -187,3 +187,27 @@ TEST_CASE("FakeMountMotionModel: altitude and azimuth come from the hour angle a
     CHECK(rig.model.altitude_degrees() == Approx(80.0).epsilon(0).margin(1e-6));
     CHECK(rig.model.azimuth_degrees() == Approx(0.0).epsilon(0).margin(1e-6));
 }
+
+TEST_CASE("FakeMountMotionModel: a tracking rate offset moves the held position only while tracking and not slewing",
+          "[fake][mount-model][unit]") {
+    Rig rig;
+    rig.model.set_position(6.0, 40.0);
+    rig.model.set_tracking(true);
+    rig.model.set_rate_offset(0.01, -0.02);  // degrees per second of RA and Dec
+    rig.advance(seconds(100));
+    CHECK(rig.model.ra_hours() == Approx(6.0 + 0.01 * 100.0 / 15.0).epsilon(0).margin(1e-6));
+    CHECK(rig.model.dec_degrees() == Approx(40.0 - 0.02 * 100.0).epsilon(0).margin(1e-6));
+
+    rig.model.set_tracking(false);  // not tracking: the sidereal drift only, the offset is the tracking rate's
+    const double ra_before = rig.model.ra_hours();
+    const double dec_before = rig.model.dec_degrees();
+    rig.advance(seconds(100));
+    CHECK(rig.model.ra_hours() == Approx(ra_before + 100.0 * kSidereal / 15.0).epsilon(0).margin(1e-6));
+    CHECK(rig.model.dec_degrees() == Approx(dec_before).epsilon(0).margin(1e-9));
+
+    rig.model.set_tracking(true);
+    rig.model.set_rate_offset(0.0, 0.0);
+    const double held = rig.model.ra_hours();
+    rig.advance(seconds(100));
+    CHECK(rig.model.ra_hours() == Approx(held).epsilon(0).margin(1e-9));  // offset cleared: the sky position holds
+}
