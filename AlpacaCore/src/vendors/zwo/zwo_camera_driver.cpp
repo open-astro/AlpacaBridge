@@ -225,9 +225,11 @@ public:
 
         if (!connected) {
             // Decision 0020 rules 5 and 6: stop the SDK exposure, then join the body, both before mutex_ is taken and
-            // before the close. A body in ASIGetDataAfterExp is joined when its transfer returns (that call takes no
-            // timeout, the 0020 `partial` note). The join is last and closes the session, so a StartExposure that
-            // passed its connection check before this Disconnect raises NotConnected and runs no body.
+            // before the close. A body in ASIGetDataAfterExp is joined when that call returns (no timeout, but it
+            // copies a frame the SDK already holds: 8 to 10 ms for an 18 MB frame on the rig, #2721), and one an
+            // AbortExposure left in ASIStopExposure when the stop returns (up to 3.18 s on the rig). The join is last
+            // and closes the session, so a StartExposure that passed its connection check before this Disconnect raises
+            // NotConnected and runs no body.
             stop_sdk_exposure(current_camera_id());
             session_.disconnect_and_join();
         } else {
@@ -1037,8 +1039,9 @@ private:
             validate_frame_format(id, request.frame, request.formats);
             std::vector<std::uint8_t> buffer(image_buffer_size(request.frame));
             c.reading_out();
-            // ASIGetDataAfterExp is the lazy, potentially multi-second USB transfer. It takes no timeout, so an
-            // AbortExposure is refused in Download and a Disconnect waits for it (the 0020 `partial` note).
+            // ASIGetDataAfterExp takes no timeout, so an AbortExposure is refused in Download and a Disconnect waits
+            // for it. It copies a frame the SDK already transferred before ASI_EXP_SUCCESS: 8 to 10 ms for an 18 MB
+            // frame on the rig (#2721).
             dev_.get_data_after_exposure(id, buffer.data(), static_cast<long>(buffer.size()));
             {
                 std::lock_guard<std::mutex> sdk_lock(exposure_sdk_mutex_);
@@ -1119,7 +1122,7 @@ private:
         try {
             dev_.stop_exposure(camera_id);
         } catch (const std::exception& e) {
-            ALPACA_LOG_DEBUG("ZWO", "stop_exposure on body exit failed: " + printable(e.what()));
+            ALPACA_LOG_WARN("ZWO", "stop_exposure on body exit failed: " + printable(e.what()));
         }
     }
 
@@ -1145,18 +1148,18 @@ private:
 
     // Decision 0020 rule 5. AbortExposure and StopExposure do the same: nothing (and no SDK call) while Idle or Ready;
     // in Download, AbortExposure is refused and StopExposure ignored (ASIGetDataAfterExp cannot be cancelled); while
-    // Exposing, the SDK stop with no driver mutex held, then the session's cancel and join. A failed SDK stop
-    // leaves the exposure running and raises.
+    // Exposing, the session's cancel without a join, and the body sends the SDK stop (stop_left_running) on its own
+    // thread. ASIStopExposure blocks for the rest of a short exposure plus ~0.4 s, up to 3.18 s measured on an
+    // ASI120MM Mini (#2721), so the client call returns within one status poll step instead. A failed SDK stop is
+    // logged by the body; the next StartExposure waits for that body (CaptureSession::kStartTimeout) or is refused.
     void stop_exposure_impl(bool abort) {
         ensure_connected();
-        int stop_id = -1;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected();
             if (!camera_id_.has_value()) {
                 throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
             }
-            stop_id = camera_id_.value();
         }
         const CameraState state = session_.camera_state();
         if (state == CameraState::Download) {
@@ -1169,26 +1172,11 @@ private:
         if (state != CameraState::Exposing) {
             return;
         }
-        {
-            std::lock_guard<std::mutex> sdk_lock(exposure_sdk_mutex_);
-            // The exposure that owns the session is the one stopped, and its stopping mark (a body failure the
-            // stop causes is dropped, not kept, #1745) is set in the same session hold as its token is read
-            // (#2043). Before, the mark was the newest StartExposure's token, minted before its session start,
-            // and set_stopping(true) ran apart from it: a StartExposure that began between this stop's state read
-            // and its mark found the mark against its own token with no stopping flag, refused its trigger and
-            // returned, and the session kept "the exposure ended without an image".
-            stop_token_ = session_.begin_stop();
-            try {
-                dev_.stop_exposure(stop_id);
-            } catch (...) {
-                stop_token_ = 0;
-                session_.set_stopping(false);  // the exposure runs on
-                throw;
-            }
-            sdk_running_ = false;
-        }
-        // Cancels and joins the body: bounded by one status poll step or one SDK call.
-        session_.abort();
+        // The exposure that owns the session is the one stopped, and its stopping mark (a body failure the stop
+        // causes is dropped, not kept, #1745) is set in the same session hold as its token is read (#2043), so a
+        // body that has not triggered yet never does. Not under exposure_sdk_mutex_: a body in an SDK stop holds it.
+        stop_token_ = session_.begin_stop();
+        session_.cancel();
     }
 
     int device_number_;
@@ -1287,7 +1275,8 @@ private:
     mutable std::mutex exposure_sdk_mutex_;
     // The session token of the exposure the driver stopped last (CaptureSession::begin_stop(), #2043); 0 when
     // the stop found no exposure. A body compares it with its own CaptureControl::token().
-    std::uint64_t stop_token_{0};
+    // Atomic: AbortExposure writes it without exposure_sdk_mutex_ (#2721).
+    std::atomic<std::uint64_t> stop_token_{0};
     bool sdk_running_{false};  // the body triggered an SDK exposure nothing has stopped yet
 
     // Cleared by the timer after the last pending turn-off, so a fire-and-forget client that never polls

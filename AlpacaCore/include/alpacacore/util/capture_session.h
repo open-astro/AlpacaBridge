@@ -178,6 +178,25 @@ public:
         cv_.notify_all();
     }
 
+    /// Cancels the exposure in flight like abort() but returns without joining its body, which ends on its own
+    /// thread (a ZWO body's ASIStopExposure can block for seconds, #2721). start() waits for that body like any
+    /// other still running (kStartTimeout), and disconnect_and_join() joins it. A no-op when nothing is exposing.
+    void cancel() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!is_exposing_locked()) {
+            return;
+        }
+        state_ = State::Idle;
+        image_.reset();
+        owner_ = 0;
+        ++pending_;
+        lock.unlock();
+        slot_.cancel();
+        lock.lock();
+        --pending_;
+        cv_.notify_all();
+    }
+
     /// Closes the session, cancels and joins every body, then clears the
     /// image, the failure and the last exposure. A closed session refuses
     /// start() with NotConnected, a start() waiting for an old body included,

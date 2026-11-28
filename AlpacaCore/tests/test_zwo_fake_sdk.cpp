@@ -292,8 +292,10 @@ TEST_CASE("ZWO fake SDK - LastExposure publishes only acquisition success", "[zw
     expect_unset(AlpacaError::InvalidOperation);
     camera->abort_exposure();
     expect_unset(AlpacaError::InvalidOperation);
-    sdk.set_exposure_status_error("first acquisition failed");
+    // Scripted after the start: the aborted body ends on its own thread and may poll once more (#2721); start() has
+    // waited for it, so only the new body reads the error.
     camera->start_exposure(0.01, true);
+    sdk.set_exposure_status_error("first acquisition failed");
     REQUIRE(alpacacore::test::wait_exposure_end(*camera));
     CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
     expect_unset(AlpacaError::InvalidOperation);
@@ -322,8 +324,8 @@ TEST_CASE("ZWO fake SDK - LastExposure publishes only acquisition success", "[zw
     expect_a();
     CHECK_FALSE(camera->get_image_ready());
     CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::InvalidOperation);
+    camera->start_exposure(0.03, true);  // after the start, as above
     sdk.set_exposure_status_error("later acquisition failed");
-    camera->start_exposure(0.03, true);
     REQUIRE(alpacacore::test::wait_exposure_end(*camera));
     CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
     expect_a();
