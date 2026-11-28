@@ -162,6 +162,7 @@ public:
         }
         status_poll_.cancel_all_and_join();
         pulse_guide_op_.cancel_all_and_join();
+        motion_op_.cancel_all_and_join();
     }
 
     // ── AlpacaDriver base methods ──
@@ -244,6 +245,7 @@ public:
                 lock.unlock();
                 status_poll_.cancel_all_and_join();
                 pulse_guide_op_.cancel_all_and_join();
+                motion_op_.cancel_all_and_join();
             }
             return;
         }
@@ -263,6 +265,7 @@ public:
             lock.unlock();
             status_poll_.cancel_all_and_join();
             pulse_guide_op_.cancel_all_and_join();
+            motion_op_.cancel_all_and_join();
             lock.lock();
         }
         if (connected) {
@@ -369,6 +372,7 @@ public:
             }
             status_poll_.cancel_all_and_join();
             pulse_guide_op_.cancel_all_and_join();
+            motion_op_.cancel_all_and_join();
         }
     }
 
@@ -431,12 +435,14 @@ public:
     bool get_at_home() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_link_locked();
+        check_motion_error_locked();  // a failed Park or FindHome (#2809)
         return at_home_;
     }
 
     bool get_at_park() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_link_locked();
+        check_motion_error_locked();  // a failed Park or FindHome (#2809)
         return parked_;
     }
 
@@ -504,7 +510,7 @@ public:
         protocol.set_tracking(tracking, true, 0.0, 0.0);
         // Written through, so the next read sees it before the next poll runs.
         std::lock_guard<std::mutex> lock(mutex_);
-        if (tracking) at_home_ = false;  // tracking moves the mount off home (#2461)
+        if (tracking) leave_home_locked();  // tracking moves the mount off home (#2461)
         snapshot_.write([tracking](PolledFrame& frame) {
             frame.tracking = tracking;
             frame.tracking_known = true;
@@ -722,33 +728,43 @@ public:
             check_link_locked();
             check_not_parked("FindHome");
             begin_motion_command_locked();
+            // Supersedes a running Park body under mutex_, before this call sets its flags (decision 0006 rule 3).
+            motion_generation_.bump();
+            leave_home_locked();
+            homing_ = true;  // Slewing reads true until the body ends; a motion start or a stop clears it
         }
-        auto& protocol = BisqueProtocolWrapper::instance();
-        // FindHome blocks in TheSkyX (with internal sleep loop), up to 60 seconds; mutex_ is free meanwhile.
-        protocol.find_home();
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            homing_ = false;
-            at_home_ = true;
-        }
-        publish_measurement();
+        // ITelescopeV4: FindHome returns at once (#2809). TheSkyX's FindHome blocks in its own script loop for up to
+        // 60 s, so the slot runs it; AtHome, Slewing and a kept error report the outcome.
+        start_motion_body(
+            [this](util::OperationContext& ctx) {
+                std::string error;
+                try {
+                    BisqueProtocolWrapper::instance().find_home();
+                } catch (const std::exception& e) {
+                    error = std::string("FindHome failed: ") + e.what();
+                } catch (...) {
+                    error = "FindHome failed with an unknown TheSkyX error";
+                }
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    // A newer motion, an AbortSlew or a disconnect owns the outcome now.
+                    if (ctx.stop_reason() != util::StopReason::None || !homing_) return;
+                    homing_ = false;
+                    if (!error.empty()) {
+                        motion_error_ = std::move(error);
+                        ALPACA_LOG_WARN("Bisque", motion_error_);
+                        return;
+                    }
+                    at_home_ = true;
+                }
+                publish_measurement();
+            },
+            [this] { homing_ = false; });
     }
 
     void park() override {
         auto& protocol = BisqueProtocolWrapper::instance();
-        // Cleared on every exit; the poll below runs without initiator_mutex_, so AbortSlew never waits for it.
-        struct ParkingGuard {
-            BisqueTelescopeDriver& self;
-            bool armed = false;
-            uint64_t epoch = 0;
-            ~ParkingGuard() {
-                if (!armed) return;
-                std::lock_guard<std::mutex> lock(self.mutex_);
-                // A newer Park owns the flag now (park_epoch_).
-                if (self.park_epoch_ == epoch) self.parking_ = false;
-            }
-        };
-        ParkingGuard guard{*this};
+        uint64_t epoch = 0;
         {
             // Initiator lock for the gate and the Park send only: a slew either went to the wire before the park
             // or sees parking_ after it (#1838).
@@ -757,34 +773,24 @@ public:
                 std::lock_guard<std::mutex> lock(mutex_);
                 check_link_locked();
                 begin_motion_command_locked();
+                motion_generation_.bump();  // supersedes a running Park or FindHome body first (0006 rule 3)
                 parking_ = true;
-                at_home_ = false;  // a park moves the mount off home (#2461)
-                guard.epoch = ++park_epoch_;
-                guard.armed = true;
-            }
-            protocol.park();
-        }
-        // Poll until parked.
-        auto start = clock_.now();
-        while (true) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(clock_.now() - start).count();
-            if (elapsed > 120) {
-                stop_timed_out_park(guard.epoch);
+                leave_home_locked();  // a park moves the mount off home (#2461)
+                epoch = ++park_epoch_;
             }
             try {
-                if (protocol.is_parked()) break;
+                protocol.park();
             } catch (...) {
+                end_parking(epoch);
+                throw;
             }
-            clock_.sleep_for(std::chrono::seconds(1));
-            // The mount may have been disconnected meanwhile.
-            check_connected_now();
         }
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            parked_ = true;
-            if (park_epoch_ == guard.epoch) parking_ = false;
-        }
-        publish_measurement();
+        // ITelescopeV4: Park returns at once (#2809); the slot polls IsParked, and AtPark, Slewing and a kept error
+        // report the outcome. The poll runs without initiator_mutex_, so AbortSlew never waits for it.
+        start_motion_body([this, epoch](util::OperationContext& ctx) { run_park_poll(ctx, epoch); },
+                          [this, epoch] {
+                              if (park_epoch_ == epoch) parking_ = false;
+                          });
     }
 
     void pulse_guide(int direction, int duration) override {
@@ -840,7 +846,7 @@ public:
 
         pulse_guiding_ = true;
         pulse_guide_error_.clear();
-        at_home_ = false;  // a guide pulse moves the mount off home (#2461)
+        leave_home_locked();  // a guide pulse moves the mount off home (#2461)
         // The request id is taken under mutex_ with the state it guards; abort,
         // connect and disconnect bump it, so the body compares it under mutex_
         // and a guide they retired neither sends nor records anything.
@@ -1111,7 +1117,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         manual_axis_slewing_[axis] = true;
         manual_axis_deadline_[axis] = clock_.now() + kMaxMoveAxisDuration;  // each nonzero MoveAxis renews it
-        at_home_ = false;  // see note_slew_started_locked()
+        leave_home_locked();                                                // see note_slew_started_locked()
         drop_poll_in_flight_locked();
     }
 
@@ -1140,6 +1146,7 @@ public:
         begin_motion_command_locked();
         ++slew_epoch_;
         parking_ = false;  // a park poll still running no longer blocks slews
+        homing_ = false;   // a FindHome still running no longer reports its outcome
         // Bumping the request id retires a running guide body: under mutex_ it
         // sends and records nothing. It is not cancelled or joined here, because a PulseGuide
         // started while the abort waits on the wrapper owns the slot by then.
@@ -1237,6 +1244,11 @@ public:
     void set_stop_sent_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(test_hook_mutex_);
         stop_sent_hook_ = std::move(hook);
+    }
+
+    void set_motion_start_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(test_hook_mutex_);
+        motion_start_hook_ = std::move(hook);
     }
 
 private:
@@ -1351,7 +1363,7 @@ private:
     // Every motion start clears AtHome, which only FindHome sets (ITelescopeV4, #2461): the four equatorial slews
     // here, and MoveAxis, Park, PulseGuide and Tracking on at their own sites.
     void note_slew_started_locked() {
-        at_home_ = false;
+        leave_home_locked();
         ++slew_epoch_;
         slewing_cached_ = true;
         slew_poll_error_.clear();
@@ -1656,11 +1668,16 @@ private:
         }
     }
 
-    bool get_slewing_locked() const {
-        // #2410: a motion the driver had to stop or could not stop raises until the next motion command or a connect.
+    // #2410: a motion the driver had to stop or could not stop raises until the next motion command or a connect.
+    void check_motion_error_locked() const {
         if (!motion_error_.empty()) {
             throw AlpacaException(motion_error_, AlpacaError::DriverException);
         }
+    }
+
+    bool get_slewing_locked() const {
+        check_motion_error_locked();
+        if (parking_ || homing_) return true;  // a Park or FindHome body still running (#2809)
         // Within the slew-force window, report as slewing without querying.
         if (slewing_cached_ && clock_.now() < slew_force_until_) {
             return true;
@@ -2028,6 +2045,72 @@ private:
         slew_stop_reason_ = reason;
     }
 
+    // A motion start moves the mount off home and retires a FindHome still running (#2461). Call with mutex_ held.
+    void leave_home_locked() {
+        at_home_ = false;
+        homing_ = false;
+    }
+
+    // Clears parking_ unless a newer Park owns it now (park_epoch_).
+    void end_parking(uint64_t epoch) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (park_epoch_ == epoch) parking_ = false;
+    }
+
+    // Starts a Park or FindHome body on motion_op_. Call without mutex_ held (AsyncOperation rule 10). A refused start
+    // runs `undo` under mutex_ and rethrows, so the command's flag does not stay set with no body to clear it.
+    void start_motion_body(std::function<void(util::OperationContext&)> body, const std::function<void()>& undo) {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(test_hook_mutex_);
+            hook = motion_start_hook_;
+        }
+        if (hook) hook();
+        try {
+            motion_op_.start(std::move(body));
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            undo();
+            throw;
+        }
+    }
+
+    // The Park body (#2809): polls IsParked once a second for up to 120 s. A timeout keeps its error in motion_error_
+    // (stop_timed_out_park), which AtPark, AtHome and Slewing raise until the next motion command or a connect.
+    void run_park_poll(util::OperationContext& ctx, uint64_t epoch) {
+        struct ParkingGuard {  // cleared on every exit
+            BisqueTelescopeDriver& self;
+            uint64_t epoch;
+            ~ParkingGuard() { self.end_parking(epoch); }
+        } guard{*this, epoch};
+        auto& protocol = BisqueProtocolWrapper::instance();
+        const auto start = clock_.now();
+        try {
+            while (true) {
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(clock_.now() - start).count();
+                if (elapsed > 120) {
+                    stop_timed_out_park(epoch);
+                }
+                try {
+                    if (protocol.is_parked()) break;
+                } catch (...) {  // NOLINT(bugprone-empty-catch): a failed poll retries until the deadline
+                }
+                if (!ctx.wait_for(std::chrono::seconds(1))) return;  // a disconnect or a newer Park
+                // The mount may have been disconnected meanwhile.
+                check_connected_now();
+            }
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): a timeout already kept its error
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            // A superseded body touches no driver state (decision 0006 rule 6): a newer Park or a FindHome owns it.
+            if (ctx.stop_reason() != util::StopReason::None || park_epoch_ != epoch) return;
+            parked_ = true;
+        }
+        publish_measurement();
+    }
+
     // Park's 120 s deadline (#2410): sends the verified Abort() (TheSkyX's Park docs monitor a park with
     // IsSlewComplete) and throws. A newer Park, an AbortSlew, an Unpark or a disconnect since (`epoch`, parking_)
     // owns the mount and is left alone. Call with no driver lock held.
@@ -2208,6 +2291,7 @@ private:
     std::mutex test_hook_mutex_;                // leaf; never held while the hook runs
     std::function<void()> slew_complete_hook_;  // guarded by test_hook_mutex_
     std::function<void()> stop_sent_hook_;      // guarded by test_hook_mutex_
+    std::function<void()> motion_start_hook_;   // guarded by test_hook_mutex_
 
     double site_latitude_ = 0.0;
     double site_longitude_ = 0.0;
@@ -2218,7 +2302,7 @@ private:
     uint64_t park_epoch_ = 0;  // under mutex_; bumped by each Park so a stale Park's exit leaves a newer one's parking_
     bool parking_ = false;     // under mutex_; a Park is sent and its IsParked poll runs; refuses slews like parked_
     mutable bool at_home_ = false;
-    mutable bool homing_ = false;
+    mutable bool homing_ = false;  // under mutex_; a FindHome body runs and owns its outcome
     mutable bool slewing_cached_ = false;
     uint64_t slew_epoch_ = 0;  // under mutex_; bumped by a slew start and by AbortSlew
     mutable util::TaskClock::clock::time_point slew_force_until_;
@@ -2245,6 +2329,8 @@ private:
     util::AsyncOperation pulse_guide_op_{"Bisque pulse guide", pulse_generation_, clock_};
     util::OperationGeneration poll_generation_;
     util::AsyncOperation status_poll_{"Bisque status poll", poll_generation_, clock_};
+    util::OperationGeneration motion_generation_;
+    util::AsyncOperation motion_op_{"Bisque park/home", motion_generation_, clock_};  // the Park and FindHome bodies
 
     int slew_settle_time_seconds_ = 0;
 
@@ -2286,6 +2372,12 @@ void set_slew_complete_hook_for_testing(TelescopeDriver& driver, std::function<v
 void set_stop_sent_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* bisque = dynamic_cast<BisqueTelescopeDriver*>(&driver)) {
         bisque->set_stop_sent_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_motion_start_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* bisque = dynamic_cast<BisqueTelescopeDriver*>(&driver)) {
+        bisque->set_motion_start_hook_for_testing(std::move(hook));
     }
 }
 

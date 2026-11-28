@@ -110,6 +110,25 @@ bool ready(std::future<T>& f) {
     return f.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
 }
 
+// #2809: Park and FindHome return at once and their bodies run on. Waits in real time for `done`, at most 30 s.
+bool wait_real(const std::function<bool()>& done) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (!done() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return done();
+}
+
+// True once a failed Park or FindHome body kept its error, which AtPark raises (#2809).
+bool motion_failed(alpacacore::TelescopeDriver& driver) {
+    try {
+        (void)driver.get_at_park();
+        return false;
+    } catch (const alpacacore::AlpacaException&) {
+        return true;
+    }
+}
+
 // A connected Bisque driver on a FakeTaskClock over the stateful mount fake.
 struct ClockedBisque {
     alpacacore::test::FakeBisqueMount mount;
@@ -1028,7 +1047,7 @@ TEST_CASE("Bisque FindHome - waits past the default response timeout for TheSkyX
     pause_poll(*driver);
 
     REQUIRE_NOTHROW(driver->find_home());
-    CHECK(driver->get_at_home());
+    CHECK(wait_real([&] { return driver->get_at_home(); }));
     driver->set_connected(false);
 }
 
@@ -1036,7 +1055,7 @@ TEST_CASE("Bisque FindHome - waits past the default response timeout for TheSkyX
 namespace {
 void home(ClockedBisque& rig) {
     REQUIRE_NOTHROW(rig.driver->find_home());
-    REQUIRE(rig.driver->get_at_home());
+    REQUIRE(wait_real([&] { return rig.driver->get_at_home(); }));
 }
 }  // namespace
 
@@ -1087,9 +1106,8 @@ TEST_CASE("Bisque AtHome - Park clears it (#2461)", "[bisque][telescope][findhom
     home(rig);
     rig.mount.park_polls_needed = 1;
     auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
-    CHECK(advance_until(rig.clock, [&] { return ready(parked); }));
+    CHECK(advance_until(rig.clock, [&] { return ready(parked) && rig.driver->get_at_park(); }));
     REQUIRE_NOTHROW(parked.get());
-    CHECK(rig.driver->get_at_park());
     CHECK_FALSE(rig.driver->get_at_home());
 }
 
@@ -1314,9 +1332,8 @@ TEST_CASE("Bisque park - the poll sleeps on the task clock and completes without
     ClockedBisque rig;
     rig.mount.park_polls_needed = 2;
     auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
-    CHECK(advance_until(rig.clock, [&] { return ready(parked); }));
+    CHECK(advance_until(rig.clock, [&] { return ready(parked) && rig.driver->get_at_park(); }));
     REQUIRE_NOTHROW(parked.get());
-    CHECK(rig.driver->get_at_park());
     // Two polls that said "not yet" (one 1 s sleep each), then the third.
     CHECK(rig.mount.park_polls.load() == 3);
     CHECK(rig.virtual_elapsed() == std::chrono::seconds(2));
@@ -1327,11 +1344,197 @@ TEST_CASE("Bisque park - a park that never completes times out after 120 virtual
     ClockedBisque rig;
     rig.mount.park_polls_needed = 100000;
     auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
-    CHECK(advance_until(rig.clock, [&] { return ready(parked); }));
-    require_alpaca_error([&] { parked.get(); }, alpacacore::AlpacaError::DriverException);
-    CHECK_FALSE(rig.driver->get_at_park());
+    CHECK(advance_until(rig.clock, [&] { return ready(parked) && motion_failed(*rig.driver); }));
+    REQUIRE_NOTHROW(parked.get());
+    // #2809: AtPark raises the kept timeout instead of reading false.
+    require_alpaca_error([&] { (void)rig.driver->get_at_park(); }, alpacacore::AlpacaError::DriverException);
     // Polls at t=0..120 s inclusive; the 121st second trips the deadline.
     CHECK(rig.mount.park_polls.load() == 121);
+}
+
+namespace {
+// A connected Bisque driver whose replies may be held for seconds (`is_parked_ms`, `find_home_ms`) without timing
+// out, over the stateful mount fake; `fail_find_home` answers FindHome with a TheSkyX error.
+struct HeldReplyBisque {
+    alpacacore::test::FakeBisqueMount mount;
+    alpacacore::test::FakeTaskClock clock;
+    std::atomic<bool> fail_find_home{false};
+    alpacacore::test::FakeMountServer server{[this](const std::string& command) {
+        if (fail_find_home.load() && command.find("FindHome") != std::string::npos) {
+            return std::string("|No error. Error = 0.TypeError: FindHome failed#");
+        }
+        return mount.responder()(command);
+    }};
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+
+    HeldReplyBisque() {
+        REQUIRE(server.ok());
+        auto info = loopback(server.port());
+        info.response_timeout_ms = 5000;
+        driver = alpacacore::vendor::bisque::create_bisque_telescope(0, info, clock);
+        REQUIRE_NOTHROW(driver->set_connected(true));
+        pause_poll(*driver);
+    }
+    ~HeldReplyBisque() { driver->set_connected(false); }
+    int is_parked_count() const {
+        const auto ledger = mount.ledger();
+        return static_cast<int>(std::count(ledger.begin(), ledger.end(), "IsParked"));
+    }
+};
+}  // namespace
+
+// #2809: ITelescopeV4 makes Park and FindHome asynchronous: each returns at once, and AtPark, AtHome and Slewing
+// report the outcome. Each call runs on std::async so a call that still waits fails the case instead of hanging it.
+TEST_CASE("Bisque Park - returns at once and Slewing reads true until AtPark (#2809)",
+          "[bisque][telescope][taskclock][park]") {
+    ClockedBisque rig;
+    rig.mount.park_polls_needed = 2;
+    auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
+    // No clock advance: an asynchronous Park returns without its IsParked poll.
+    CHECK(parked.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    CHECK(rig.driver->get_slewing());
+    CHECK_FALSE(rig.driver->get_at_park());
+    CHECK(advance_until(rig.clock, [&] { return ready(parked) && rig.driver->get_at_park(); }));
+    REQUIRE_NOTHROW(parked.get());
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+TEST_CASE("Bisque FindHome - returns at once and Slewing reads true until AtHome (#2809)",
+          "[bisque][telescope][findhome]") {
+    ClockedBisque rig;
+    rig.mount.find_home_ms = 1500;  // TheSkyX's in-script home loop holds the reply this long
+    auto homed = std::async(std::launch::async, [&] { rig.driver->find_home(); });
+    CHECK(homed.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready);
+    CHECK(rig.driver->get_slewing());
+    CHECK_FALSE(rig.driver->get_at_home());
+    CHECK(wait_real([&] { return rig.driver->get_at_home(); }));
+    REQUIRE_NOTHROW(homed.get());
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+TEST_CASE("Bisque Park - a failed Park keeps its error in AtPark, AtHome and Slewing until a reconnect (#2809)",
+          "[bisque][telescope][taskclock][park]") {
+    ClockedBisque rig;
+    rig.mount.park_polls_needed = 100000;  // never parks: the poll times out after 120 s
+    auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
+    CHECK(parked.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    const auto kept = [&] {
+        try {
+            (void)rig.driver->get_at_park();
+            return false;
+        } catch (const alpacacore::AlpacaException&) {
+            return true;
+        }
+    };
+    CHECK(advance_until(rig.clock, [&] { return ready(parked) && kept(); }));
+    for (int read = 0; read < 2; ++read) {  // kept, not raised once
+        require_alpaca_error([&] { (void)rig.driver->get_at_park(); }, alpacacore::AlpacaError::DriverException);
+        require_alpaca_error([&] { (void)rig.driver->get_at_home(); }, alpacacore::AlpacaError::DriverException);
+        require_alpaca_error([&] { (void)rig.driver->get_slewing(); }, alpacacore::AlpacaError::DriverException);
+    }
+    rig.driver->set_connected(false);
+    rig.mount.park_polls_needed = 0;
+    REQUIRE_NOTHROW(rig.driver->set_connected(true));
+    pause_poll(*rig.driver);
+    CHECK_NOTHROW(rig.driver->get_at_park());
+    CHECK_NOTHROW(rig.driver->get_slewing());
+}
+
+TEST_CASE("Bisque Park - a superseded Park whose poll then reads parked does not set AtPark (#2809)",
+          "[bisque][telescope][park]") {
+    HeldReplyBisque rig;
+    rig.mount.is_parked_ms = 1500;             // holds Park 1's first IsParked reply, which then reads parked
+    const int before = rig.is_parked_count();  // the connect asks IsParked too
+    REQUIRE_NOTHROW(rig.driver->park());
+    const auto polled = [&] { return rig.is_parked_count() > before; };
+    REQUIRE(wait_real(polled));  // the reply is held from here
+    // AbortSlew clears parking_ at once, then waits for the link behind the held reply.
+    auto aborted = std::async(std::launch::async, [&] { rig.driver->abort_slew(); });
+    REQUIRE(wait_real([&] { return !rig.driver->get_slewing(); }));
+    // FindHome supersedes Park 1's body while its IsParked reply is still held.
+    REQUIRE_NOTHROW(rig.driver->find_home());
+    REQUIRE_NOTHROW(aborted.get());
+    CHECK(wait_real([&] { return rig.driver->get_at_home(); }));
+    CHECK_FALSE(rig.driver->get_at_park());
+}
+
+TEST_CASE(
+    "Bisque Park - a FindHome whose start lags its state write still retires a Park poll that reads parked (#2809)",
+    "[bisque][telescope][park]") {
+    HeldReplyBisque rig;
+    rig.mount.is_parked_ms = 1500;  // Park 1's first IsParked reply is held, then reads parked
+    const int before = rig.is_parked_count();
+    REQUIRE_NOTHROW(rig.driver->park());
+    REQUIRE(wait_real([&] { return rig.is_parked_count() > before; }));
+    auto aborted = std::async(std::launch::async, [&] { rig.driver->abort_slew(); });
+    REQUIRE(wait_real([&] { return !rig.driver->get_slewing(); }));
+    // FindHome has set homing_ but not yet started its body when Park 1's held reply comes back: the hook holds the
+    // start until Park 1's body has had time to write (or 3 s pass).
+    alpacacore::vendor::bisque::set_motion_start_hook_for_testing(*rig.driver, [&] {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (!rig.driver->get_at_park() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    });
+    REQUIRE_NOTHROW(rig.driver->find_home());
+    alpacacore::vendor::bisque::set_motion_start_hook_for_testing(*rig.driver, nullptr);
+    REQUIRE_NOTHROW(aborted.get());
+    CHECK(wait_real([&] { return rig.driver->get_at_home(); }));
+    CHECK_FALSE(rig.driver->get_at_park());
+}
+
+TEST_CASE(
+    "Bisque FindHome - a failed FindHome keeps its error in AtHome, AtPark and Slewing until the next command (#2809)",
+    "[bisque][telescope][findhome]") {
+    HeldReplyBisque rig;
+    rig.fail_find_home = true;
+    REQUIRE_NOTHROW(rig.driver->find_home());
+    const auto kept = [&] {
+        try {
+            (void)rig.driver->get_at_home();
+            return false;
+        } catch (const alpacacore::AlpacaException&) {
+            return true;
+        }
+    };
+    REQUIRE(wait_real(kept));
+    for (int read = 0; read < 2; ++read) {  // kept, not raised once
+        require_alpaca_error([&] { (void)rig.driver->get_at_home(); }, alpacacore::AlpacaError::DriverException);
+        require_alpaca_error([&] { (void)rig.driver->get_at_park(); }, alpacacore::AlpacaError::DriverException);
+        require_alpaca_error([&] { (void)rig.driver->get_slewing(); }, alpacacore::AlpacaError::DriverException);
+    }
+    REQUIRE_NOTHROW(rig.driver->abort_slew());  // the next motion command clears it
+    CHECK_FALSE(rig.driver->get_at_home());
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+TEST_CASE(
+    "Bisque FindHome - an AbortSlew during the home retires it: Slewing reads false and AtHome stays false (#2809)",
+    "[bisque][telescope][findhome]") {
+    HeldReplyBisque rig;
+    rig.mount.find_home_ms = 1500;  // TheSkyX's home loop holds the reply
+    REQUIRE_NOTHROW(rig.driver->find_home());
+    REQUIRE(rig.driver->get_slewing());
+    // AbortSlew clears the home at once, then waits for the link behind the held FindHome reply.
+    auto aborted = std::async(std::launch::async, [&] { rig.driver->abort_slew(); });
+    CHECK(wait_real([&] { return !rig.driver->get_slewing(); }));
+    REQUIRE_NOTHROW(aborted.get());  // its Abort() went out after the FindHome reply
+    CHECK_FALSE(rig.driver->get_at_home());
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+TEST_CASE(
+    "Bisque FindHome - a PulseGuide during the home retires it: Slewing reads false and AtHome stays false (#2809)",
+    "[bisque][telescope][findhome][pulseguiding]") {
+    HeldReplyBisque rig;
+    rig.mount.find_home_ms = 1500;
+    REQUIRE_NOTHROW(rig.driver->find_home());
+    REQUIRE(rig.driver->get_slewing());
+    REQUIRE_NOTHROW(rig.driver->pulse_guide(0, 100));  // a motion start: it moves the mount off home (#2461)
+    CHECK_FALSE(rig.driver->get_slewing());
+    // The guide is sent after the held FindHome reply; once it ends, the home's reply is long in.
+    CHECK(wait_real([&] { return !rig.driver->get_is_pulse_guiding(); }));
+    CHECK_FALSE(rig.driver->get_at_home());
 }
 
 TEST_CASE("Bisque sync slew - the poll sleep and completion run on the task clock", "[bisque][telescope][taskclock]") {
@@ -1717,7 +1920,9 @@ TEST_CASE("Bisque park - Unpark during the park poll allows a slew again (#1838)
 }
 
 // A Park that ends late (its 120 s timeout) must not clear the flag of a newer Park still polling.
-TEST_CASE("Bisque park - a stale Park's timeout leaves a newer Park refusing slews (#1838)",
+// #2809: Park and FindHome share one operation slot, so Park 2's start supersedes Park 1's body, which stops at its
+// next wait and never reaches its own timeout.
+TEST_CASE("Bisque park - a newer Park supersedes a stale Park's poll and keeps refusing slews (#1838)",
           "[bisque][telescope][taskclock][park-race]") {
     ClockedBisque rig;
     rig.mount.park_polls_needed = 100000;
@@ -1735,25 +1940,24 @@ TEST_CASE("Bisque park - a stale Park's timeout leaves a newer Park refusing sle
     } finish_parks{rig, park1, park2};
     // The Park threads start in real time, so wait for them in real time: stepping the clock does not give a thread
     // time to start under load.
-    const auto wait_real = [](const std::function<bool()>& done) {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-        while (!done() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
-        return done();
-    };
     REQUIRE(wait_real([&] { return rig.mount.park_polls.load() >= 1; }));
 
     REQUIRE_NOTHROW(rig.driver->abort_slew());
-    // Park 2 starts 60 s into Park 1, so Park 1 times out with 60 s of Park 2's budget left.
+    // Park 2 starts 60 s into Park 1, after the AbortSlew left Park 1's poll running.
     advance_until(rig.clock, [&] { return rig.virtual_elapsed() >= std::chrono::seconds(60); }, 60);
     REQUIRE(rig.virtual_elapsed() >= std::chrono::seconds(60));
     park2 = std::async(std::launch::async, [&] { rig.driver->park(); });
     REQUIRE(wait_real([&] { return rig.mount.park_commands.load() == 2; }));
-    // Park 1 times out (120 s after its start) while Park 2, started later, still polls.
-    REQUIRE(advance_until(rig.clock, [&] { return ready(park1); }, 200));
-    require_alpaca_error([&] { park1.get(); }, alpacacore::AlpacaError::DriverException);
-    REQUIRE_FALSE(ready(park2));
-    // #2410: the stale Park's timeout sends no Abort() of its own: Park 2 owns the mount (park_epoch_).
-    CHECK(rig.mount.abort_commands.load() == 1);  // the AbortSlew above
+    // Park 2's Park command reset the fake's poll count. Only Park 2 polls now: one IsParked a second, where Park 1
+    // still polling would add a second one. Each step waits for Park 2's poll to wait on the clock again.
+    const auto park2_start = rig.virtual_elapsed();
+    REQUIRE(
+        advance_until(rig.clock, [&] { return rig.virtual_elapsed() >= park2_start + std::chrono::seconds(70); }, 200));
+    CHECK(rig.mount.park_polls.load() <= 72);
+    REQUIRE_NOTHROW(park1.get());
+    CHECK_FALSE(motion_failed(*rig.driver));      // Park 1 kept no error: Park 2 owns the outcome
+    CHECK(rig.driver->get_slewing());             // Park 2 still parking, past Park 1's 120 s deadline
+    CHECK(rig.mount.abort_commands.load() == 1);  // the AbortSlew above; Park 1 sent no stop of its own
 
     require_alpaca_error([&] { rig.driver->slew_to_coordinates_async(5.5, 20.0); },
                          alpacacore::AlpacaError::InvalidWhileParked);
@@ -2259,8 +2463,8 @@ TEST_CASE("Bisque park - a park that times out at 120 s gets a verified Abort(),
     rig.mount.park_polls_needed = 100000;
     rig.mount.abort_ends_park = true;
     auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
-    CHECK(advance_until(rig.clock, [&] { return ready(parked); }));
-    require_alpaca_error([&] { parked.get(); }, alpacacore::AlpacaError::DriverException);
+    CHECK(advance_until(rig.clock, [&] { return ready(parked) && motion_failed(*rig.driver); }));
+    REQUIRE_NOTHROW(parked.get());
     CHECK(rig.mount.abort_commands.load() == 1);
     const auto ledger = rig.mount.ledger();
     REQUIRE_FALSE(ledger.empty());
@@ -2274,8 +2478,8 @@ TEST_CASE("Bisque park - a timed-out park whose stop failed is stopped again 10 
     rig.mount.park_polls_needed = 100000;
     rig.mount.ignore_aborts = 100;
     auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
-    CHECK(advance_until(rig.clock, [&] { return ready(parked); }));
-    require_alpaca_error([&] { parked.get(); }, alpacacore::AlpacaError::DriverException);
+    CHECK(advance_until(rig.clock, [&] { return ready(parked) && motion_failed(*rig.driver); }));
+    REQUIRE_NOTHROW(parked.get());
     CHECK(rig.mount.abort_commands.load() == 3);
     CHECK(contains(slewing_failure(*rig.driver), "and stopping it failed"));
     rig.clock.advance(std::chrono::seconds(11));
@@ -2400,8 +2604,11 @@ TEST_CASE("Bisque park - a Park whose poll outlives an AbortSlew sends no Abort(
     REQUIRE(advance_until(rig.clock, [&] { return rig.mount.park_polls.load() >= 1; }, 5));
     REQUIRE_NOTHROW(rig.driver->abort_slew());
     REQUIRE(rig.mount.abort_commands.load() == 1);
-    CHECK(advance_until(rig.clock, [&] { return ready(parked); }));
-    require_alpaca_error([&] { parked.get(); }, alpacacore::AlpacaError::DriverException);
+    // The poll runs on to its 120 s deadline (#2809: the call itself returned at once). Past the last poll the clock
+    // steps until no wait is left on it, which is the body's exit; that step finds no waiter for 5 s of real time.
+    CHECK(advance_until(rig.clock, [&] { return rig.mount.park_polls.load() >= 121; }));
+    CHECK_FALSE(advance_until(rig.clock, [] { return false; }, 10));
+    REQUIRE_NOTHROW(parked.get());
     CHECK(rig.mount.abort_commands.load() == 1);  // the AbortSlew owns the mount: no second stop
     CHECK(slewing_failure(*rig.driver).empty());
 }
@@ -2411,15 +2618,45 @@ TEST_CASE("Bisque park - a park stop whose session ended meanwhile writes nothin
     ClockedBisque rig;
     rig.mount.park_polls_needed = 100000;
     rig.mount.ignore_aborts = 1000;  // the stop fails, so the old session would store a failure and a retry
+    // The hook runs on the Park body (#2809), which a disconnect joins: the reconnect runs on its own thread, and
+    // the hook returns once the disconnect has ended the session (Connected reads false).
+    std::promise<void> go;  // the hook releases the reconnect
+    std::promise<void> reconnected;
+    auto reconnect = reconnected.get_future();
+    std::thread reconnector([&, released = go.get_future()] {
+        released.wait();
+        try {
+            rig.driver->set_connected(false);
+            rig.driver->set_connected(true);
+            pause_poll(*rig.driver);
+            reconnected.set_value();
+        } catch (...) {
+            reconnected.set_exception(std::current_exception());
+        }
+    });
+    // Joined before `rig` goes, a failed REQUIRE included; a reconnect the hook never released runs at teardown.
+    const struct JoinReconnector {
+        std::promise<void>& go;
+        std::thread& thread;
+        ~JoinReconnector() {
+            try {
+                go.set_value();
+            } catch (const std::future_error&) {  // NOLINT(bugprone-empty-catch): the hook released it already
+            }
+            thread.join();
+        }
+    } join_reconnector{go, reconnector};
+    std::atomic<bool> session_ended{false};  // checked on the test thread: Catch2 assertions are not thread-safe
     alpacacore::vendor::bisque::set_stop_sent_hook_for_testing(*rig.driver, [&] {
-        rig.driver->set_connected(false);
-        rig.driver->set_connected(true);
-        pause_poll(*rig.driver);
+        go.set_value();
+        session_ended = wait_real([&] { return !rig.driver->get_connected(); });
     });
     auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
-    CHECK(advance_until(rig.clock, [&] { return ready(parked); }));
+    CHECK(advance_until(rig.clock, [&] { return ready(reconnect); }));
     alpacacore::vendor::bisque::set_stop_sent_hook_for_testing(*rig.driver, nullptr);
-    require_alpaca_error([&] { parked.get(); }, alpacacore::AlpacaError::DriverException);
+    REQUIRE_NOTHROW(reconnect.get());
+    REQUIRE_NOTHROW(parked.get());
+    CHECK(session_ended.load());
     CHECK(slewing_failure(*rig.driver).empty());
     CHECK_FALSE(rig.driver->get_slewing());
     rig.mount.ignore_aborts = 0;
