@@ -25,6 +25,7 @@
 #include <string>
 #include <vector>
 
+#include "connect_hold_gate.h"
 #include "fake_task_clock.h"
 
 namespace alpacacore::test {
@@ -36,7 +37,8 @@ namespace alpacacore::test {
  *
  * open() returns the levels set by set_level() (every line high by default, the boot's level), or nothing after
  * set_unreadable() (the RK3568). fail_open() and fail_write(line) make the next open, or every write to a line,
- * fail the way a kernel refusal does. No method blocks unless a case sets the before_write hook. Thread-safe: the
+ * fail the way a kernel refusal does. No method blocks unless a case sets the before_write hook or open_delay
+ * (a connect held open, through connect_hold_gate.h). Thread-safe: the
  * engine's workers write while the test thread reads the record.
  */
 class FakeGpioLineBackend final : public util::GpioLineBackend {
@@ -52,7 +54,12 @@ public:
 
     explicit FakeGpioLineBackend(FakeTaskClock& clock) : clock_(clock) {}
 
+    /// open() holds this long (or until the test's ConnectHoldGate releases it) before claiming: a connect held
+    /// open. Set before the driver connects; never read under the fake's lock.
+    std::chrono::milliseconds open_delay{0};
+
     std::vector<int> open(const std::string& device_path, const std::vector<unsigned int>& lines) override {
+        alpacacore::test::connect_hold(open_delay);  // before the lock: the hold must not block the test's reads
         std::lock_guard<std::mutex> lock(mutex_);
         events_.push_back({Event::Kind::Open, 0, false, true, clock_.now()});
         device_path_ = device_path;

@@ -13,15 +13,35 @@
 #pragma once
 
 #include <alpacacore/switch_driver.h>
+#include <alpacacore/util/gpio_line_backend.h>
 #include <alpacacore/util/power_port_state_store.h>
-#include <alpacacore/vendor/touptek/touptek_powerbox_sdk.h>
-#include <alpacacore/vendor/touptek/touptek_powerbox_wrapper.h>
+#include <alpacacore/util/task_clock.h>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace alpacacore::vendor::touptek {
+
+// One 12V DC output of the ToupTek StellaVita power box.
+//
+// The StellaVita is a Raspberry Pi CM4 (BCM2711) controller. Four DC barrel
+// jacks are wired to GPIOs on the main 40-pin bank (/dev/gpiochip0,
+// pinctrl-bcm2711) where the libgpiod line offset equals the BCM GPIO number:
+// Port 1 -> 18, Port 2 -> 10, Port 3 -> 17, Port 4 -> 4. The board's
+// config.txt drives all four high at boot (gpio=...=op,dh,pu), so the ports are
+// energised on power-up; a connect reads and keeps whatever level they hold.
+//
+// BCM GPIO 9 and 11 also exist on the header but power the on-board Cypress USB
+// hub — they are deliberately NOT exposed as switch channels, because cutting
+// them would drop every USB device (cameras, focusers) attached to the board.
+struct StellaVitaPortConfig {
+    std::string name;
+    std::uint32_t gpio_line;   // libgpiod offset on gpio_chip_path (== BCM GPIO on BCM2711)
+    bool writable = true;      // false makes a port read-only (always-on)
+    bool pwm_enabled = false;  // soft-PWM dimming (0-100% duty) instead of on/off
+};
 
 struct TouptekSwitchConfig {
     // The StellaVita's main GPIO bank. The CM4 (BCM2711) exposes the 40-pin
@@ -56,14 +76,13 @@ TouptekSwitchConfig default_stellavita_config();
 std::unique_ptr<SwitchDriver> create_touptek_switch(int device_number, TouptekSwitchConfig config);
 
 /**
- * @brief Test seam: as create_touptek_switch(), over an injected power box.
+ * @brief Test seam (decision 0027): as create_touptek_switch(), over a caller-owned GPIO backend and task clock.
  *
- * @p powerbox must outlive the driver. Its port_count() must equal
- * config.ports.size(); the shared driver refuses a mismatch with InvalidValue. The config still supplies
- * the port table (names, writability, PWM); the injected object supplies the
- * line values and the open state.
+ * @p backend and @p clock must outlive the driver. The config supplies the port table; the backend supplies
+ * the line levels.
  */
 std::unique_ptr<SwitchDriver> create_touptek_switch(int device_number, const TouptekSwitchConfig& config,
-                                                    TouptekPowerboxSDK& powerbox);
+                                                    util::GpioLineBackend& backend,
+                                                    util::TaskClock& clock = util::default_task_clock());
 
 }  // namespace alpacacore::vendor::touptek

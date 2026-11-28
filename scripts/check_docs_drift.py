@@ -683,10 +683,11 @@ def _matching_brace(text, open_index):
 IS_OPEN_BODY_RE = re.compile(r"\bis_open\s*\(\s*\)\s*const\s*\{")
 
 # Shared headers whose is_open() stands in for a vendor wrapper's, keyed by the vendor directories that build on
-# them. util::SoftPwmPorts replaced the two ZWO ASIAIR wrappers (#1757); without this entry the ZWO directory
-# would have no wrapper is_open() left to read, and "none found" classifies as locking.
+# them. util::SoftPwmPorts replaced the two ZWO ASIAIR wrappers (#1757) and the iOptron iMate and ToupTek StellaVita
+# wrappers (#2722); without this entry those directories would have no wrapper is_open() left to read, and "none
+# found" classifies as locking.
 SHARED_IS_OPEN_HEADERS = {
-    "AlpacaCore/include/alpacacore/util/soft_pwm_ports.h": ("zwo",),
+    "AlpacaCore/include/alpacacore/util/soft_pwm_ports.h": ("zwo", "ioptron", "touptek"),
 }
 
 
@@ -1871,7 +1872,7 @@ HELPER_FAKES = {
     "fake_raw_decoder.h": "fake RawDecoder seam for the gphoto camera, used together with fake_gphoto_sdk.h",
     "fake_task_clock.h": "virtual-time TaskClock for driver wait tests",
     "fake_timed_completion.h": "timed exposure and guide completion on a TaskClock that the QHY, Player One and SVBONY camera SDK fakes share (#2693); no driver connects through it",
-    "fake_gpio_line_backend.h": "in-memory util::GpioLineBackend recording each write with the shared FakeTaskClock time, for the soft-PWM engine cases (#1757); the GPIO power-port drivers connect through their real backends over the libgpiod and ioctl stubs",
+    "fake_gpio_line_backend.h": "in-memory util::GpioLineBackend recording each write with the shared FakeTaskClock time, for the soft-PWM engine cases (#1757) and the iMate and StellaVita switches, which fake_ioptron_gpio.h and fake_touptek_powerbox_sdk.h bundle with a clock; the ASIAIR drivers connect through their real backends over the libgpiod and ioctl stubs",
     "fake_zwo_mount.h": "stateful ZWO mount responder plugged into FakeMountServer, motion derived from the shared FakeTaskClock",
     "fake_usb_serial_tree.h": "fake /dev, by-id and sysfs tree for the attacheddevices listing (#2312); no driver connects through it",
     "fake_alpaca_server.h": "loopback fake upstream Alpaca server for the remotealpaca client (#1753 slice 2); no driver connects through it yet",

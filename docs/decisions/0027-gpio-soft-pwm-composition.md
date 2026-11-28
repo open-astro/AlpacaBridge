@@ -21,7 +21,7 @@ A port is armed when its level is known: read at `open()`, or chosen by a client
 
 The rules a change is checked against. Each names where it applies and what checks it; the reasoning is in the Decision above.
 
-1. A GPIO power-port board's port table, value cache and PWM worker threads are one `util::SoftPwmPorts` held as a member; a board's driver or wrapper has no PWM thread of its own and no base class, CRTP or mixin for it. Scope: `AlpacaCore/src/vendors/zwo/zwo_asiair_switch_driver.cpp`, `AlpacaCore/src/vendors/zwo/zwo_asiair_plus_switch_driver.cpp`, `AlpacaCore/include/alpacacore/util/soft_pwm_ports.h`. Checked by: review (no `std::thread` or `pwm_loop` in a board's driver or wrapper, no class deriving from `SoftPwmPorts`).
+1. A GPIO power-port board's port table, value cache and PWM worker threads are one `util::SoftPwmPorts` held as a member; a board's driver or wrapper has no PWM thread of its own and no base class, CRTP or mixin for it. Scope: `AlpacaCore/src/vendors/zwo/zwo_asiair_switch_driver.cpp`, `AlpacaCore/src/vendors/zwo/zwo_asiair_plus_switch_driver.cpp`, `AlpacaCore/src/vendors/ioptron/ioptron_switch_driver.cpp`, `AlpacaCore/src/vendors/touptek/touptek_switch_driver.cpp`, `AlpacaCore/include/alpacacore/util/soft_pwm_ports.h`. Checked by: review (no `std::thread` or `pwm_loop` in a board's driver or wrapper, no class deriving from `SoftPwmPorts`).
 2. Only a `util::GpioLineBackend` reaches libgpiod or the `pwm_gpio.ko` ioctls; the engine includes neither. Scope: `AlpacaCore/include/alpacacore/util/soft_pwm_ports.h`, `AlpacaCore/src/core/util/soft_pwm_ports.cpp`. Checked by: the core build, which links no libgpiod and fails on a `gpiod.h` include, and review (no `ioctl` or `gpiod_` call in the engine).
 3. Every backend write returns its result. A failed write logs at ERROR, stops that port's worker for every backend, and answers `DriverException` from `set_value` on that port until the next `open()`. Scope: `AlpacaCore/src/core/util/soft_pwm_ports.cpp`, `AlpacaCore/include/alpacacore/util/gpiod_line_backend.h`, `AlpacaCore/src/vendors/zwo/pwm_gpio_misc_backend.cpp`. Checked by: `AlpacaCore/tests/test_soft_pwm_ports.cpp` ("a failed PWM write logs ERROR, stops that port's worker and no other"). <!-- allowed -->
 4. Period waits and edges go through the `TaskClock`; the engine never sleeps or reads `std::chrono::steady_clock` itself. Scope: `AlpacaCore/src/core/util/soft_pwm_ports.cpp`. Checked by: `AlpacaCore/tests/test_soft_pwm_ports.cpp` ("PWM 50 % at 50 Hz is one high at t0 and one low 10 ms later": a raw sleep leaves the fake clock without a waiter and the case fails).
@@ -42,19 +42,19 @@ The rules a change is checked against. Each names where it applies and what chec
 
 ## Consequences
 
-- The ASIAIR Pro and Plus lose 1,074 lines of wrapper source and header (366, 567, 61 and 80) and gain 767 lines of engine and backends, comments included; the iMate and StellaVita wrappers (433 and 374 source lines) are what the follow-up replaces.
+- The ASIAIR Pro and Plus lose 1,074 lines of wrapper source and header (366, 567, 61 and 80) and gain 767 lines of engine and backends, comments included; the iMate and StellaVita wrappers (433 and 374 source lines, and their headers) went the same way in [issue #2722](https://github.com/open-astro/AlpacaBridge/issues/2722), with the StellaVita SDK seam (`TouptekPowerboxSDK`) and the iMate GPIO seam (`IoptronGpioBackend`): `util::GpioLineBackend` is the seam for all four boards.
 - The engine is core code: it builds and its cases run on every host, while the two backends need libgpiod or the ASIAIR Plus kernel module and build on arm64 only.
 - `set_value` on a PWM port whose worker stopped now answers an error where the old wrappers reported success.
 - SET_MODE and ENABLE on the RK3568 go once per line since the open, where the old boolean path sent them with every write.
-- Until the iMate and StellaVita move over, their two wrappers still carry their own copy of the engine, and the soft-PWM rule in the ASCOM contract instructions says so.
+- All four boards are on the engine; the iMate and StellaVita factories also take a caller-owned `GpioLineBackend` and `TaskClock`, which their tests and the fake ConformU run pass `FakeGpioLineBackend` and `FakeTaskClock` through.
 
 ## How to reverse
 
-Reverting the ASIAIR Pro or the Plus restores its wrapper and driver from the commit before this record, and the other board is unaffected. The engine and the backends can stay as unused code or go in the same revert. This record then goes `superseded`, and the soft-PWM rule in the ASCOM contract instructions returns to its earlier text. Clients see no difference either way: port tables, frequencies, boot-level preserve and the no-power-cycle disconnect are the same before and after.
+Reverting a board (the ASIAIR Pro, the Plus, the iMate or the StellaVita) restores its wrapper and driver from the commit before it moved, and the other boards are unaffected. The engine and the backends can stay as unused code or go in the same revert. This record then goes `superseded`, and the soft-PWM rule in the ASCOM contract instructions returns to its earlier text. Clients see no difference either way: port tables, frequencies, boot-level preserve and the no-power-cycle disconnect are the same before and after.
 
 ## Links
 
 - Adoption roster: [docs/adoption/0027-gpio-soft-pwm-composition.md](../adoption/0027-gpio-soft-pwm-composition.md).
-- Issue [#1757](https://github.com/open-astro/AlpacaBridge/issues/1757): the shared GPIO power-switch helper.
+- Issue [#1757](https://github.com/open-astro/AlpacaBridge/issues/1757): the shared GPIO power-switch helper. Issue [#2722](https://github.com/open-astro/AlpacaBridge/issues/2722): the iMate and StellaVita move onto it.
 - [Power port power-on state](0021-power-port-power-on-state.md), [Task clock](0005-task-clock.md), [SDK seams](0015-sdk-seams.md), [Getters never wait on device I/O](0016-getters-never-wait-on-device-io.md), [Designs to avoid](0013-designs-to-avoid.md).
 - Rules for the drivers: the GPIO section of [the ASCOM contract instructions](../../.github/instructions/ascom-contract.instructions.md#gpio-power-switch--soft-pwm-drivers-general-rules).

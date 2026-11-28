@@ -483,7 +483,8 @@ inline ContractEntry contract_entry_ioptron_switch() {
                              },
                              kSrcAgents),
                          DisconnectedRead::Static, DisconnectedRead::Static, 1,
-                         "util::PowerPortSwitchDriver<IoptronPowerboxWrapper> and default_imate_powerbox_config(): "
+                         "util::PowerPortSwitchDriver<util::OwnedSoftPwmPorts<util::GpiodLineBackend>> and "
+                         "default_imate_powerbox_config(): "
                          "static port table; id 0 (DC3 always on) is read-only, id 1 (DC1) is writable"),
         1.0);
 }
@@ -958,7 +959,8 @@ inline ContractEntry contract_entry_touptek_switch() {
                              },
                              kSrcAgents),
                          DisconnectedRead::Static, DisconnectedRead::Static, 0,
-                         "util::PowerPortSwitchDriver and default_stellavita_config(): static port table, "
+                         "util::PowerPortSwitchDriver<util::OwnedSoftPwmPorts<util::GpiodLineBackend>> and "
+                         "default_stellavita_config(): static port table, "
                          "all four ports writable"),
         1.0);
 }

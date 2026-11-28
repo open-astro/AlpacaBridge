@@ -62,7 +62,6 @@ if(ALPACACORE_ENABLE_IOPTRON)
         # These are local GPIO outputs (libgpiod), independent of the mount
         # RS-232 protocol above.
         list(APPEND IOPTRON_SOURCES
-            ioptron_powerbox_wrapper.cpp
             ioptron_switch_driver.cpp
         )
     else()

@@ -193,7 +193,6 @@
 #include <alpacacore/vendor/touptek/touptek_switch_driver.h>
 
 #include "fake_touptek_powerbox_sdk.h"
-#include "locked_touptek_powerbox_sdk.h"
 #endif
 #ifdef ALPACACORE_ENABLE_SVBONY
 #include <alpacacore/vendor/svbony/svbony_camera_driver.h>
@@ -3848,7 +3847,8 @@ Tier2Host tier2_host_altair_camera() {
 #endif
 
 #if defined(ALPACACORE_ENABLE_IOPTRON) && defined(ALPACACORE_IOPTRON_POWERBOX)
-// The iMate PowerBox GPIO side: request_delay holds the connect open, fail_request fails it.
+// The iMate PowerBox GPIO side: open_delay holds the connect open, fail_open fails it. The bundle holds the
+// virtual clock the backend is stamped by, which the driver also runs on.
 Tier2Host tier2_host_ioptron_switch() {
     Tier2Host h{"ioptron_switch",
                 "ioptron",
@@ -3860,32 +3860,26 @@ Tier2Host tier2_host_ioptron_switch() {
                 true,
                 {},
                 ""};
-    const auto make = [](alpacacore::test::FakeIoptronGpio& gpio) -> std::unique_ptr<AlpacaDriver> {
-        return alpacacore::vendor::ioptron::create_ioptron_switch(
-            0, alpacacore::vendor::ioptron::default_imate_powerbox_config(), gpio);
+    const auto make = [](alpacacore::test::FakeIoptronGpio& rig) -> std::unique_ptr<AlpacaDriver> {
+        return rig.make(alpacacore::vendor::ioptron::default_imate_powerbox_config());
     };
     h.connectable = [make](bool hold_open) {
-        auto gpio = std::make_shared<alpacacore::test::FakeIoptronGpio>();
-        if (hold_open) gpio->request_delay = kHold;
-        return host_over(gpio, make);
+        auto rig = std::make_shared<alpacacore::test::FakeIoptronGpio>();
+        if (hold_open) rig->gpio.open_delay = kHold;
+        return host_over(rig, make);
     };
     h.failing = [make]() {
-        auto gpio = std::make_shared<alpacacore::test::FakeIoptronGpio>();
-        gpio->fail_request = true;
-        return host_over(gpio, make);
+        auto rig = std::make_shared<alpacacore::test::FakeIoptronGpio>();
+        rig->gpio.fail_open();
+        return host_over(rig, make);
     };
     return h;
 }
 #endif
 
 #if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
-// The StellaVita power box: open_delay holds the connect open, fail_open fails it. The fake and its
-// Locked decorator live in one holder, because the driver keeps a reference to the box.
-struct StellaVitaHold {
-    alpacacore::test::FakeTouptekPowerboxSDK fake;
-    alpacacore::test::LockedTouptekPowerboxSDK box{fake};
-};
-
+// The StellaVita power box: open_delay holds the connect open, fail_open fails it. The bundle holds the virtual
+// clock the backend is stamped by, which the driver also runs on.
 Tier2Host tier2_host_touptek_switch() {
     Tier2Host h{"touptek_switch",
                 "touptek",
@@ -3897,21 +3891,18 @@ Tier2Host tier2_host_touptek_switch() {
                 true,
                 {},
                 ""};
-    h.connectable = [](bool hold_open) {
-        auto hold = std::make_shared<StellaVitaHold>();
-        if (hold_open) hold->fake.open_delay = kHold;
-        return host_over(hold, [](StellaVitaHold& s) -> std::unique_ptr<AlpacaDriver> {
-            return alpacacore::vendor::touptek::create_touptek_switch(
-                0, alpacacore::vendor::touptek::default_stellavita_config(), s.box);
-        });
+    const auto make = [](alpacacore::test::FakeTouptekPowerbox& rig) -> std::unique_ptr<AlpacaDriver> {
+        return rig.make(alpacacore::vendor::touptek::default_stellavita_config());
     };
-    h.failing = []() {
-        auto hold = std::make_shared<StellaVitaHold>();
-        hold->fake.fail_open = true;
-        return host_over(hold, [](StellaVitaHold& s) -> std::unique_ptr<AlpacaDriver> {
-            return alpacacore::vendor::touptek::create_touptek_switch(
-                0, alpacacore::vendor::touptek::default_stellavita_config(), s.box);
-        });
+    h.connectable = [make](bool hold_open) {
+        auto rig = std::make_shared<alpacacore::test::FakeTouptekPowerbox>();
+        if (hold_open) rig->gpio.open_delay = kHold;
+        return host_over(rig, make);
+    };
+    h.failing = [make]() {
+        auto rig = std::make_shared<alpacacore::test::FakeTouptekPowerbox>();
+        rig->gpio.fail_open();
+        return host_over(rig, make);
     };
     return h;
 }

@@ -13,7 +13,6 @@ Scan: `AlpacaCore/tests/locked_*.h`
 | Driver | Symbol | Source | State | Issue | Notes |
 | --- | --- | --- | --- | --- | --- |
 | ToupTek camera, filter wheel and focuser (and the Altair rebadge) | `ToupTekSDK` | `AlpacaCore/tests/locked_touptek_sdk.h` | adopted | #104 | public virtual destructor kept (Alternatives rejected) |
-| ToupTek StellaVita powerbox | `TouptekPowerboxSDK` | `AlpacaCore/tests/locked_touptek_powerbox_sdk.h` | adopted | #1345 | |
 | QHY camera and CFW | `QHYSDK` | `AlpacaCore/tests/locked_qhy_sdk.h` | adopted | #321 | |
 | gphoto camera | `GPhotoSDK` | `AlpacaCore/tests/locked_gphoto_sdk.h` | adopted | #489, #546 | issue #489, PR #546 |
 | gphoto raw decoder | `RawDecoder` | `AlpacaCore/tests/fake_raw_decoder.h` | adopted | #546 | fake only; libraw needs no decorator |

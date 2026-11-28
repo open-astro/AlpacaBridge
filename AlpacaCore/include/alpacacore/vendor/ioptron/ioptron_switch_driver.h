@@ -13,14 +13,31 @@
 #pragma once
 
 #include <alpacacore/switch_driver.h>
+#include <alpacacore/util/gpio_line_backend.h>
 #include <alpacacore/util/power_port_state_store.h>
-#include <alpacacore/vendor/ioptron/ioptron_powerbox_wrapper.h>
+#include <alpacacore/util/task_clock.h>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace alpacacore::vendor::ioptron {
+
+// One DC output of the iMate PowerBox.
+//
+// The iMate exposes three physical DC barrel jacks but only two are wired to
+// a GPIO: DC1 -> gpiochip1 line 118 (PD22), DC2 -> gpiochip1 line
+// 114 (PD18) on the OpenAstro (Armbian mainline) kernel. The third jack is a hardwired pass-through that is
+// always energised and has no GPIO line; it is represented with
+// has_line == false / writable == false so clients can still see it.
+struct IoptronPowerPortConfig {
+    std::string name;
+    bool has_line;             // false for the always-on pass-through jack
+    std::uint32_t gpio_line;   // libgpiod offset on gpio_chip_path; ignored when !has_line
+    bool writable;             // false for the always-on pass-through jack
+    bool pwm_enabled = false;  // soft-PWM dimming (0-100% duty) instead of on/off
+};
 
 struct IoptronSwitchConfig {
     // The iMate's main GPIO bank. On the OpenAstro (Armbian mainline) image the
@@ -49,9 +66,10 @@ IoptronSwitchConfig default_imate_powerbox_config();
 
 std::unique_ptr<SwitchDriver> create_ioptron_switch(int device_number, IoptronSwitchConfig config);
 
-// Test seam: the same driver over a caller-owned GPIO backend instead of libgpiod.
-// @p backend must outlive the driver.
+// Test seam (decision 0027): the same driver over a caller-owned GPIO backend and task clock instead of
+// libgpiod and the wall clock. @p backend and @p clock must outlive the driver.
 std::unique_ptr<SwitchDriver> create_ioptron_switch(int device_number, IoptronSwitchConfig config,
-                                                    IoptronGpioBackend& backend);
+                                                    util::GpioLineBackend& backend,
+                                                    util::TaskClock& clock = util::default_task_clock());
 
 }  // namespace alpacacore::vendor::ioptron

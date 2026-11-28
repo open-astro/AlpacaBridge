@@ -390,19 +390,19 @@ notes carry only the pin map and per-board deltas.
   `util::PowerPortSwitchDriver<Wrapper>` (`alpacacore/util/power_port_switch_driver.h`) holds
   the connect and disconnect gates, the power-on state, the value checks and the error order,
   so a fix to the rules below lands there once. Each vendor's factory builds a plain-data
-  board profile (strings, per-port metadata, the power-on state) and passes its own port
-  wrapper's constructor arguments; the wrapper stays the vendor's. A future board adds a
-  profile and a wrapper, not a driver.
+  board profile (strings, per-port metadata, the power-on state) and passes the constructor
+  arguments of its port wrapper, `util::OwnedSoftPwmPorts<Backend>` below. A future board adds a
+  profile and a backend, not a driver.
 - **One engine for the port table, the values and the PWM workers**
   ([decision 0027](../../docs/decisions/0027-gpio-soft-pwm-composition.md)):
   `util::SoftPwmPorts` (`alpacacore/util/soft_pwm_ports.h`) is held as a member, never a base
   class, and talks to the kernel only through a `util::GpioLineBackend` (`gpio_line_backend.h`):
   `util::GpiodLineBackend` (libgpiod v2) or the vendor's own (`PwmGpioMiscBackend`, the ASIAIR
   Plus RK3568 ioctl path, with its two ioctl numberings and its kernel index offset). The wrapper
-  type is `util::OwnedSoftPwmPorts<Backend>`. The ASIAIR Pro, Plus CM4 and Plus RK3568 are on it;
-  the iOptron iMate (`ioptron_powerbox_wrapper.cpp`) and ToupTek StellaVita
-  (`touptek_powerbox_wrapper.cpp`) wrappers still carry their own copy until #2722.
-  A test drives the engine over `FakeGpioLineBackend` and `FakeTaskClock`
+  type is `util::OwnedSoftPwmPorts<Backend>`. The ASIAIR Pro, Plus CM4 and Plus RK3568, the iOptron iMate and the ToupTek
+  StellaVita are on it (the roster is `docs/adoption/0027-gpio-soft-pwm-composition.md`);
+  none has a wrapper of its own, and a factory's test overload takes a `util::GpioLineBackend` and a
+  `util::TaskClock` in place of libgpiod and the wall clock. A test drives the engine over `FakeGpioLineBackend` and `FakeTaskClock`
   (`tests/test_soft_pwm_ports.cpp`), with no real sleep.
 - **libgpiod v2 only** (`libgpiod-dev (>= 2.0)`, `libgpiod3` runtime): one
   `gpiod_line_request*` owns all lines together; values go through

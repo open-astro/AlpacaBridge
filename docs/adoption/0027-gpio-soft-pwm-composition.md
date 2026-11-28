@@ -13,5 +13,5 @@ Symbol: `OwnedSoftPwmPorts`
 | --- | --- | --- | --- | --- |
 | ZWO ASIAIR Pro and Plus CM4 switch | `AlpacaCore/src/vendors/zwo/zwo_asiair_switch_driver.cpp` | adopted | #1757 | over `util::GpiodLineBackend` |
 | ZWO ASIAIR Plus RK3568 switch | `AlpacaCore/src/vendors/zwo/zwo_asiair_plus_switch_driver.cpp` | adopted | #1757 | over `PwmGpioMiscBackend` |
-| iOptron iMate PowerBox switch | — | planned | #2722 | the follow-up deletes `ioptron_powerbox_wrapper.cpp` |
-| ToupTek StellaVita switch | — | planned | #2722 | the follow-up deletes `touptek_powerbox_wrapper.cpp` |
+| iOptron iMate PowerBox switch | `AlpacaCore/src/vendors/ioptron/ioptron_switch_driver.cpp` | adopted | #2722 | over `util::GpiodLineBackend` |
+| ToupTek StellaVita switch | `AlpacaCore/src/vendors/touptek/touptek_switch_driver.cpp` | adopted | #2722 | over `util::GpiodLineBackend` |

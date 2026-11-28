@@ -72,7 +72,6 @@ if(ALPACACORE_ENABLE_TOUPTEK)
         # StellaVita: ASCOM Switch driver for the on-board 12V DC power ports
         # (local GPIO via libgpiod), independent of the camera/focuser SDK.
         list(APPEND TOUPTEK_SOURCES
-            touptek_powerbox_wrapper.cpp
             touptek_switch_driver.cpp
         )
     else()
