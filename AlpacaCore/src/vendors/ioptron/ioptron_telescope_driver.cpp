@@ -1934,13 +1934,7 @@ public:
         // returns Tracking to its state before the motion. The firmware reports tracking off for a whole GOTO and
         // :Q# leaves it as it is, so a stopped GOTO would otherwise stay untracked. An Alt/Az slew needs Tracking
         // off (#1377) and Park and FindHome end without it, so those are left as the stop leaves them.
-        std::optional<bool> restore_tracking;
-        if (slew_in_progress_ && equatorial_slew_) {
-            restore_tracking = true;
-        } else if ((axis_move_active_primary_ || axis_move_active_secondary_) &&
-                   tracking_state_before_move_.has_value()) {
-            restore_tracking = tracking_state_before_move_;
-        }
+        const std::optional<bool> restore_tracking = tracking_to_restore_after_stop_locked();
         slew_in_progress_ = false;
         equatorial_slew_ = false;
         note_unlanded_zero_search_locked();
@@ -3422,13 +3416,7 @@ private:
             stop_failed = true;
         }
         // Issue #2762: Tracking comes back as AbortSlew leaves it (#2000), once the stop check has verified the stop.
-        std::optional<bool> restore_tracking;
-        if (slew_in_progress_ && equatorial_slew_) {
-            restore_tracking = true;
-        } else if ((axis_move_active_primary_ || axis_move_active_secondary_) &&
-                   tracking_state_before_move_.has_value()) {
-            restore_tracking = tracking_state_before_move_;
-        }
+        const std::optional<bool> restore_tracking = tracking_to_restore_after_stop_locked();
         slew_in_progress_ = false;
         equatorial_slew_ = false;
         axis_move_active_primary_ = false;
@@ -3446,6 +3434,14 @@ private:
         position_cache_valid_ = false;
         request_stop_verify_locked(restore_tracking);
         return true;
+    }
+
+    // Issue #2000, #2762: the Tracking a stop restores, read before the motion flags are cleared: on after an
+    // equatorial GOTO, the pre-move state after a MoveAxis, nothing otherwise (Alt/Az slew, Park, FindHome, idle).
+    std::optional<bool> tracking_to_restore_after_stop_locked() const {
+        if (slew_in_progress_ && equatorial_slew_) return true;
+        if (axis_move_active_primary_ || axis_move_active_secondary_) return tracking_state_before_move_;
+        return std::nullopt;
     }
 
     // Issue #2760: a stop that went out (AbortSlew's, the 300 s cap's, the MoveAxis dead-man's) is not a stopped
