@@ -80,6 +80,8 @@ on:
       - "AlpacaCore/tests/fake_synscan_handset.h"
       - "AlpacaCore/tests/nexstar_hc_wire.h"
       - "AlpacaCore/tests/onstep_controller_model.h"
+      - "AlpacaCore/tests/fake_onstep_mount.h"
+      - "AlpacaCore/tests/fake_zwo_mount.h"
       - "AlpacaCore/tests/conformu_telescope_factories.h"
       - "AlpacaCore/tests/fake_ioptron_mount.h"
       - "AlpacaCore/tests/fake_mount_motion_model.h"
@@ -248,8 +250,10 @@ jobs:
           # fake_mount_server.h serves the ZWO, Celestron, SynScan and OnStep rows, so a change to it selects those
           # rows only by the row's own fake name.
           VENDOR_FILES = {"AlpacaCore/tests/onstep_controller_model.h": "onstep",
-                          "AlpacaCore/tests/conformu_telescope_factories.h": ("ioptron", "synscan", "celestron", "bisque"),
-                          "AlpacaCore/tests/fake_mount_motion_model.h": ("ioptron", "synscan", "celestron", "bisque"),
+                          "AlpacaCore/tests/conformu_telescope_factories.h": ("ioptron", "synscan", "celestron", "bisque", "zwo",
+                                                                              "onstep"),
+                          "AlpacaCore/tests/fake_mount_motion_model.h": ("ioptron", "synscan", "celestron", "bisque", "zwo",
+                                                                         "onstep"),
                           "AlpacaCore/tests/nexstar_hc_wire.h": ("synscan", "celestron"),
                           "AlpacaCore/tests/conformu_skywatcher_factory.h": "skywatcher",
                           "AlpacaCore/tests/skywatcher_fake_clock.h": "skywatcher",

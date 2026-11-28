@@ -27,6 +27,19 @@
 //
 // Real-time knobs (hold_reply, set_reply_delay, delay_next) model transport latency,
 // not a driver timer; they never read the TaskClock.
+//
+// Two modes. The scripted default (the constructor with a TaskClock) is what the driver cases use. ConformU mode (the
+// constructor with a FakeMountMotionModel::Config, #2692) answers from one FakeMountMotionModel on its own clock
+// instead: a GOTO moves the reported position over its travel time, ":SMMC" and ":CM" re-label it, tracking follows
+// the sky (off, RA drifts east), a jog (":Me" ...) and a guide pulse (":Mg") move their axis, and ":hP" and ":hC"
+// reach the park and home positions. The fault knobs (rules, silence, stall, low power, holds and delays) apply in
+// both modes; the knobs that script the position (slew duration, land short, hold_running, set_moving, set_position,
+// set_tracking, set_park_state, set_second_axis_drift, set_sync_applies, set_alt_az) and the jog and drift
+// accessors (jogging, jogging_axes, slewing(), ra_hours(), at_home()...) belong to the scripted mode. ConformU mode
+// keeps the harsher AM5 firmware behaviour of the scripted one (":hP" is ignored while tracking is on, open-astro#2097,
+// ":MS" below the horizon is refused with e5) and its known gaps: no pointing model (":MS" lands exactly), a GOTO
+// leaves the tracking state as it was (no rig evidence of what an AM does at its end), and ":Gps" 3 (park error) and
+// the alt-az mode are not modelled.
 
 #include <alpacacore/util/task_clock.h>
 
@@ -38,11 +51,16 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
+#include "fake_mount_motion_model.h"
 #include "fake_mount_server.h"
 
 namespace alpacacore::test {
@@ -54,11 +72,30 @@ public:
     /// @param clock the TaskClock the driver under test also reads (a FakeTaskClock in every test)
     /// @param identity the ":GVP#" reply, an AM-family model
     explicit FakeZwoMount(util::TaskClock& clock, std::string identity = "AM5N")
-        : clock_(clock),
-          identity_(std::move(identity)),
-          server_([this](const std::string& chunk) { return receive(chunk); }) {}
+        : FakeZwoMount(clock, nullptr, std::move(identity)) {}
+
+    /// ConformU mode (#2692): answers from a FakeMountMotionModel built from @p motion (see the file comment).
+    /// @param clock the TaskClock the driver under test reads (only the fault knobs' bookkeeping uses it)
+    FakeZwoMount(util::TaskClock& clock, FakeMountMotionModel::Config motion, std::string identity = "AM5N")
+        : FakeZwoMount(clock, std::make_unique<FakeMountMotionModel>(std::move(motion)), std::move(identity)) {}
 
     ~FakeZwoMount() { release(); }
+
+    /// The model setup of the fake ConformU row: the made-up Sydney Opera House site (never a real observing site)
+    /// and a 6 degree/s GOTO, the 1440x sidereal top rate of an AM5.
+    static FakeMountMotionModel::Config conformu_motion_config() {
+        FakeMountMotionModel::Config config;
+        config.latitude_degrees = -33.856784;
+        config.longitude_degrees = 151.215297;
+        config.slew_deg_per_s = 6.0;
+        return config;
+    }
+
+    /// The motion model of a ConformU-mode mount; null for the scripted default.
+    FakeMountMotionModel* motion() const { return motion_.get(); }
+
+    /// One command in (without its '#'), the reply out: the wire exchange, for a case that drives the mount directly.
+    std::string respond_to(const std::string& command) { return answer(command); }
 
     FakeZwoMount(const FakeZwoMount&) = delete;
     FakeZwoMount& operator=(const FakeZwoMount&) = delete;
@@ -320,6 +357,15 @@ public:
     }
 
 private:
+    // The model is a member before server_, so the server's threads never see it half built. A modelled mount ignores
+    // ":hP" while tracking is on, as an AM5 on firmware 1.8.8 does (open-astro#2097).
+    FakeZwoMount(util::TaskClock& clock, std::unique_ptr<FakeMountMotionModel> motion, std::string identity)
+        : clock_(clock),
+          identity_(std::move(identity)),
+          motion_(std::move(motion)),
+          ignore_park_while_tracking_(motion_ != nullptr),
+          server_([this](const std::string& chunk) { return receive(chunk); }) {}
+
     // Slewing only while a GOTO / park is within its virtual window (or held running), a jog is on or the mount is
     // set moving.
     bool slewing_locked() {
@@ -469,6 +515,9 @@ private:
         }
         if (command == ":GVP") return identity_ + "#";
         if (command == ":GMA") return "012345ABCDEF#";
+        if (motion_) {
+            if (auto reply = answer_modelled(command)) return *reply;
+        }
         if (command == ":GU") {  // the wrapper's table: n N L H S s T t, then G or Z
             const bool moving = slewing_locked();
             const auto now = clock_.now();
@@ -623,6 +672,177 @@ private:
         return {};
     }
 
+    // ---- ConformU mode: the commands the motion model answers (#2692) ----
+
+    // "DDD*MM:SS", the unsigned azimuth the wrapper's parse_angle_triplet(.., false) reads.
+    static std::string azimuth_text(double degrees) {
+        const int total = static_cast<int>(std::lround(std::fmod(degrees + 360.0, 360.0) * 3600.0)) % (360 * 3600);
+        char buf[24];
+        std::snprintf(buf, sizeof(buf), "%03d*%02d:%02d", total / 3600, (total % 3600) / 60, total % 60);
+        return buf;
+    }
+
+    // The mount's UTC: the model's clock plus what a ":SMTI" write moved it by.
+    std::time_t mount_utc_locked() const {
+        return std::chrono::system_clock::to_time_t(motion_->now()) + static_cast<std::time_t>(clock_offset_s_);
+    }
+
+    // The park and home slews that have landed since the last read.
+    void settle_modelled_locked(const FakeMountMotionModel::State& s) {
+        if (s.slewing) return;
+        if (home_pending_) {
+            home_pending_ = false;
+            homed_ = s.at_home;
+        }
+        park_pending_ = false;
+    }
+
+    // The sidereal multiple one guide pulse runs at: ":Rg" 0.10-0.90, or that times 15 on a firmware that scales it.
+    double guide_multiple_locked() const {
+        const double payload = std::atof(guide_rate_.c_str());
+        return payload > 1.0 ? payload / 15.0 : payload;
+    }
+
+    // nullopt: the command is answered by the scripted switch below (identity, targets, rates, faults). An empty
+    // string is a blind command, which gets no reply.
+    std::optional<std::string> answer_modelled(const std::string& command) {
+        using Axis = FakeMountMotionModel::Axis;
+        auto starts = [&](const char* prefix) { return command.rfind(prefix, 0) == 0; };
+        const auto s = motion_->state();
+        settle_modelled_locked(s);
+
+        if (command == ":GU") {  // the wrapper's table: n N L H S s T t, then G or Z
+            const bool moving = s.slewing || s.axis_moving[0] || s.axis_moving[1];
+            std::string flags;
+            if (!s.tracking) flags += 'n';
+            if (!moving) flags += 'N';
+            if (low_power_) flags += 'L';
+            if (s.at_home && !moving) flags += 'H';
+            if (ra_stall_) flags += 'S';
+            if (dec_stall_) flags += 's';
+            if (motion_->pulse_active(Axis::Ra)) flags += 'T';
+            if (motion_->pulse_active(Axis::Dec)) flags += 't';
+            return flags + "G#";
+        }
+        if (command == ":GR") return hms(s.ra_hours) + "#";
+        if (command == ":GD") return dms(s.dec_degrees) + "#";
+        if (command == ":GA") return dms(motion_->altitude_degrees()) + "#";
+        if (command == ":GZ") return azimuth_text(motion_->azimuth_degrees()) + "#";
+        if (command == ":GS") return hms(motion_->lst_hours()) + "#";
+        if (command == ":Gm") return std::string(s.pier_side == 0 ? "W" : "E") + "#";
+        if (command == ":GAT") return s.tracking ? "1#" : "0#";
+        if (command == ":Gh") return homed_ ? "1#" : "0#";
+        if (command == ":Gps") return std::string(s.parked ? "2" : park_pending_ && s.slewing ? "1" : "0") + "#";
+        if (command == ":GMGE") {  // latitude & west-positive longitude
+            return dms(motion_->site_latitude_degrees()) + "&" + dms(-motion_->site_longitude_degrees()) + "#";
+        }
+        if (starts(":SMGE")) {
+            const auto amp = command.find('&');
+            if (amp == std::string::npos) return "0#";
+            motion_->set_site(sexagesimal(command.substr(5, amp - 5)), -sexagesimal(command.substr(amp + 1)));
+            return "1#";
+        }
+        if (command == ":GMTI") {
+            const std::time_t t = mount_utc_locked();
+            std::tm tm{};
+            gmtime_r(&t, &tm);
+            char buf[40];
+            std::snprintf(buf, sizeof(buf), "%02d/%02d/%02d&%02d:%02d:%02d&+00:00#", tm.tm_mon + 1, tm.tm_mday,
+                          tm.tm_year % 100, tm.tm_hour, tm.tm_min, tm.tm_sec);
+            return std::string(buf);
+        }
+        if (starts(":SMTI")) {  // "MM/DD/YY&HH:MM:SS&+HH:MM"; the zone is what is added to local time to get UTC
+            int month = 0, day = 0, year = 0, hour = 0, minute = 0, second = 0, zone_h = 0, zone_m = 0;
+            char sign = '+';
+            if (std::sscanf(command.c_str() + 5, "%d/%d/%d&%d:%d:%d&%c%d:%d", &month, &day, &year, &hour, &minute,
+                            &second, &sign, &zone_h, &zone_m) < 8) {
+                return "0#";
+            }
+            std::tm tm{};
+            tm.tm_mon = month - 1;
+            tm.tm_mday = day;
+            tm.tm_year = 100 + year;
+            tm.tm_hour = hour;
+            tm.tm_min = minute;
+            tm.tm_sec = second;
+            const int zone_s = (zone_h * 60 + zone_m) * 60 * (sign == '-' ? -1 : 1);
+            clock_offset_s_ = static_cast<std::int64_t>(timegm(&tm)) + zone_s -
+                              static_cast<std::int64_t>(std::chrono::system_clock::to_time_t(motion_->now()));
+            return "1#";
+        }
+
+        if (command == ":MS") {
+            if (goto_rejections_ != 0 && !goto_reply_.empty()) {
+                if (goto_rejections_ > 0) --goto_rejections_;
+                return goto_reply_ + "#";
+            }
+            if (motion_->altitude_degrees_of(target_ra_, target_dec_) < 0.0) return "e5#";  // under the horizon
+            (void)motion_->goto_radec(target_ra_, target_dec_);
+            park_pending_ = home_pending_ = false;
+            return "0#";
+        }
+        if (command == ":Q" && ignored_stops_ > 0) {
+            --ignored_stops_;
+            return std::string{};
+        }
+        if (command == ":Q") {
+            motion_->stop();
+            park_pending_ = home_pending_ = false;
+            return std::string{};
+        }
+        if (command == ":Qe" || command == ":Qw" || command == ":Qn" || command == ":Qs") {
+            if (!ignore_axis_stops_)
+                motion_->move_axis(command[2] == 'e' || command[2] == 'w' ? Axis::Ra : Axis::Dec, 0.0);
+            return std::string{};
+        }
+        if (command == ":Me" || command == ":Mw" || command == ":Mn" || command == ":Ms") {
+            const double rate = move_rate_ * FakeMountMotionModel::kSiderealDegPerSec;
+            const bool raise = command[2] == 'e' || command[2] == 'n';  // east raises RA, north raises Dec
+            motion_->move_axis(command[2] == 'e' || command[2] == 'w' ? Axis::Ra : Axis::Dec, raise ? rate : -rate);
+            return std::string{};
+        }
+        if (starts(":Mg") && command.size() >= 5) {  // ":Mg" + n, s, e or w + four-digit milliseconds
+            const bool ra = command[3] == 'e' || command[3] == 'w';
+            const bool raise = command[3] == 'e' || command[3] == 'n';
+            const double rate = guide_multiple_locked() * FakeMountMotionModel::kSiderealDegPerSec;
+            motion_->pulse(ra ? Axis::Ra : Axis::Dec, raise ? rate : -rate,
+                           std::chrono::milliseconds(std::atoi(command.c_str() + 4)));
+            return std::string{};
+        }
+        if (command == ":Te" || command == ":Td") {
+            motion_->set_tracking(command == ":Te");
+            return "1#";
+        }
+        if (command == ":hP") {
+            if (ignore_park_while_tracking_ && s.tracking) return std::string{};
+            motion_->park();
+            park_pending_ = true;
+            home_pending_ = false;
+            return std::string{};
+        }
+        if (command == ":hC") {
+            motion_->go_home();
+            home_pending_ = true;
+            park_pending_ = false;
+            return std::string{};
+        }
+        if (command == ":Spu") {
+            motion_->unpark();
+            return "1#";
+        }
+        if (starts(":SMMC")) {  // "HH:MM:SS&sDD*MM:SS": the mount's pointing is now the written position
+            const auto amp = command.find('&');
+            if (amp == std::string::npos) return "0#";
+            motion_->set_position(sexagesimal(command.substr(5, amp - 5)), sexagesimal(command.substr(amp + 1)));
+            return "N/A#";  // the wrapper accepts an empty or N/A answer to a sync
+        }
+        if (command == ":CM") {
+            motion_->set_position(target_ra_, target_dec_);
+            return "1#";
+        }
+        return std::nullopt;
+    }
+
     static std::size_t jog_index(char axis) {
         switch (axis) {
             case 'e':
@@ -638,6 +858,7 @@ private:
 
     util::TaskClock& clock_;
     const std::string identity_;
+    const std::unique_ptr<FakeMountMotionModel> motion_;  // ConformU mode only
 
     std::mutex mutex_;  // mount state (leaf: nothing is called while it is held but the clock's now())
     virtual_duration slew_duration_ = std::chrono::seconds(5);
@@ -658,7 +879,7 @@ private:
     double ra_hours_ = 12.0, dec_degrees_ = 45.0;
     double target_ra_ = 12.0, target_dec_ = 45.0;
     bool tracking_ = true;
-    bool ignore_park_while_tracking_ = false;
+    bool ignore_park_while_tracking_;
     int tracking_rate_ = 0;
     double move_rate_ = 0.0;
     std::string guide_rate_ = "0.50";
@@ -669,6 +890,7 @@ private:
     bool home_pending_ = false;
     bool at_home_ = false;
     bool homed_ = false;  // ":Gh#": a home search has completed since power-on
+    std::int64_t clock_offset_s_ = 0;  // ConformU mode: the mount's clock less the model's, set by ":SMTI"
     bool low_power_ = false, ra_stall_ = false, dec_stall_ = false, alt_az_ = false;
     util::TaskClock::clock::time_point ra_guide_end_{}, dec_guide_end_{};
     bool jog_[4] = {false, false, false, false};

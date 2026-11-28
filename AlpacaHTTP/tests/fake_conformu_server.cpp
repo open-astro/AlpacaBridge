@@ -141,6 +141,10 @@ const std::vector<ConformuHost> kHosts = {
      [] { return cu::synscan_mount().server.ok(); }, driver_of(cu::make_synscan_telescope)},
 #endif
 #ifdef FAKE_CONFORMU_ZWO
+    {"zwo", "telescope", "fake_mount_server.h", alpacacore::DeviceType::Telescope, "zwo-fake",
+     "ZWO AM mount (fake, test only)", "ALPACACORE_ENABLE_ZWO",
+     "FakeZwoMount (simulated ZWO AM mount over loopback TCP, motion from FakeMountMotionModel)",
+     [] { return cu::zwo_mount().ok(); }, driver_of(cu::make_zwo_telescope)},
     {"zwo", "focuser", "fake_zwo_eaf_sdk.h", alpacacore::DeviceType::Focuser, "zwo-fake",
      "ZWO EAF (fake SDK, test only)", "ALPACACORE_ENABLE_ZWO", "FakeZWOEAFSDK (simulated EAF SDK, in process)",
      [] { return true; }, driver_of(cu::make_zwo_focuser)},
@@ -152,6 +156,10 @@ const std::vector<ConformuHost> kHosts = {
      [] { return !cu::celestron_focuser().slave_path().empty(); }, driver_of(cu::make_celestron_focuser)},
 #endif
 #ifdef FAKE_CONFORMU_ONSTEP
+    {"onstep", "telescope", "fake_mount_server.h", alpacacore::DeviceType::Telescope, "onstep-fake",
+     "OnStepX mount (fake, test only)", "ALPACACORE_ENABLE_ONSTEP",
+     "FakeOnStepMount (simulated OnStepX mount over loopback TCP, motion from FakeMountMotionModel)",
+     [] { return cu::onstep_mount().server.ok(); }, driver_of(cu::make_onstep_telescope)},
     {"onstep", "focuser", "fake_mount_server.h", alpacacore::DeviceType::Focuser, "onstep-fake",
      "OnStepX focuser (fake controller, test only)", "ALPACACORE_ENABLE_ONSTEP",
      "the OnStepX controller model of onstep_controller_model.h (focuser 1, over loopback TCP)",
