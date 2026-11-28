@@ -1003,6 +1003,7 @@ public:
         status_cache_valid_ = true;
         last_status_update_ = clock_.now();
         tracking_override_until_ = last_status_update_ + std::chrono::seconds(2);
+        stop_verify_restore_tracking_.reset();  // #2762: the client's write wins over a bound stop's pending restore
         if (axis_move_active_primary_ || axis_move_active_secondary_) {
             tracking_state_before_move_ = tracking;
         } else {
@@ -1933,13 +1934,7 @@ public:
         // returns Tracking to its state before the motion. The firmware reports tracking off for a whole GOTO and
         // :Q# leaves it as it is, so a stopped GOTO would otherwise stay untracked. An Alt/Az slew needs Tracking
         // off (#1377) and Park and FindHome end without it, so those are left as the stop leaves them.
-        std::optional<bool> restore_tracking;
-        if (slew_in_progress_ && equatorial_slew_) {
-            restore_tracking = true;
-        } else if ((axis_move_active_primary_ || axis_move_active_secondary_) &&
-                   tracking_state_before_move_.has_value()) {
-            restore_tracking = tracking_state_before_move_;
-        }
+        const std::optional<bool> restore_tracking = tracking_to_restore_after_stop_locked();
         slew_in_progress_ = false;
         equatorial_slew_ = false;
         note_unlanded_zero_search_locked();
@@ -3420,6 +3415,8 @@ private:
             last_slew_error_ = failure + ", and stopping the mount failed: " + e.what();
             stop_failed = true;
         }
+        // Issue #2762: Tracking comes back as AbortSlew leaves it (#2000), once the stop check has verified the stop.
+        const std::optional<bool> restore_tracking = tracking_to_restore_after_stop_locked();
         slew_in_progress_ = false;
         equatorial_slew_ = false;
         axis_move_active_primary_ = false;
@@ -3435,16 +3432,25 @@ private:
         }
         status_cache_valid_ = false;
         position_cache_valid_ = false;
-        request_stop_verify_locked();
+        request_stop_verify_locked(restore_tracking);
         return true;
+    }
+
+    // Issue #2000, #2762: the Tracking a stop restores, read before the motion flags are cleared: on after an
+    // equatorial GOTO, the pre-move state after a MoveAxis, nothing otherwise (Alt/Az slew, Park, FindHome, idle).
+    std::optional<bool> tracking_to_restore_after_stop_locked() const {
+        if (slew_in_progress_ && equatorial_slew_) return true;
+        if (axis_move_active_primary_ || axis_move_active_secondary_) return tracking_state_before_move_;
+        return std::nullopt;
     }
 
     // Issue #2760: a stop that went out (AbortSlew's, the 300 s cap's, the MoveAxis dead-man's) is not a stopped
     // mount, so the stop check follows it. Under mutex_ this only notes the request; the caller starts the check with
     // no driver lock held (start_pending_stop_verify(), decision 0006 rule 4). The check belongs to the slew
     // operation generation current now: a newer initiator moves it and the check ends.
-    void request_stop_verify_locked() const {
+    void request_stop_verify_locked(std::optional<bool> restore_tracking = std::nullopt) const {
         stop_verify_for_generation_ = slew_operation_generation_;
+        stop_verify_restore_tracking_ = restore_tracking;
         stop_verify_pending_.store(true);
     }
 
@@ -3515,6 +3521,7 @@ private:
         try {
             if (util::run_verified_stop(ctx, clock_, hooks)) {
                 ALPACA_LOG_DEBUG("iOptron", "The stop is verified");
+                restore_tracking_after_stop(ctx, generation);
             }
         } catch (const AlpacaException& e) {
             StateLock lock(lock_gate_, StateLock::Mode::State);
@@ -3523,6 +3530,39 @@ private:
                 ALPACA_LOG_WARN("iOptron", last_slew_error_);
             }
         }
+    }
+
+    // Issue #2762: after a verified dead-man or 300 s cap stop, Tracking is set back as AbortSlew sets it (#2000),
+    // unless a client wrote Tracking meanwhile (set_tracking() clears the pending restore). A failure joins the stored
+    // bound error that Slewing raises; a lost link is the relink's to report.
+    void restore_tracking_after_stop(util::OperationContext& ctx, std::uint64_t generation) const {
+        StateLock lock(lock_gate_);
+        if (!stop_verify_restore_tracking_.has_value() || !connected_ || link_lost() ||
+            ctx.stop_reason() != util::StopReason::None || generation != slew_operation_generation_) {
+            return;
+        }
+        const bool tracking = stop_verify_restore_tracking_.value();
+        stop_verify_restore_tracking_.reset();
+        try {
+            const Wire protocol = wire();
+            if (tracking) {
+                protocol.start_tracking();
+            } else {
+                protocol.stop_tracking();
+            }
+        } catch (const std::exception& e) {
+            if (link_lost()) return;
+            last_slew_error_ +=
+                std::string(last_slew_error_.empty() ? "" : "; ") + "Tracking could not be restored: " + e.what();
+            ALPACA_LOG_WARN("iOptron", last_slew_error_);
+            return;
+        }
+        cached_status_.is_tracking = tracking;
+        cached_status_.is_slewing = false;
+        cached_status_.system_status = tracking ? 1 : 0;
+        status_cache_valid_ = true;
+        last_status_update_ = clock_.now();
+        tracking_override_until_ = last_status_update_ + std::chrono::seconds(2);
     }
 
     // Cancel and join the motion bound watchdog. Without mutex_ held; under transition_mutex_ or in the destructor.
@@ -4446,6 +4486,7 @@ private:
     mutable bool axis_move_active_primary_ = false;
     mutable bool axis_move_active_secondary_ = false;
     mutable std::optional<bool> tracking_state_before_move_{};
+    mutable std::optional<bool> stop_verify_restore_tracking_{};  // under mutex_; the Tracking a bound stop restores
     mutable std::chrono::steady_clock::time_point park_override_until_{};
     // HAE29C wedged-park finalizer state — see park()/finalize_wedged_park_locked().
     mutable bool park_finalize_pending_ = false;
