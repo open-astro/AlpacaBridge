@@ -92,6 +92,10 @@ struct LandingOffsetHandset {
     std::array<std::atomic<uint32_t>, 4> ra_offset_script{};
     std::array<std::atomic<uint32_t>, 4> commanded_ra{};
     std::array<std::atomic<uint32_t>, 4> commanded_dec{};
+    // The handset acknowledges and reports a GOTO in progress but never moves (refused), or ends it this fraction of
+    // the way to the aim (stopped by a limit); 1.0 is a normal GOTO (#2763).
+    std::atomic<bool> refuse_goto{false};
+    std::atomic<double> goto_fraction{1.0};
     // The once-a-second RA readback sawtooth (#1030), phased from `sawtooth_epoch`.
     std::atomic<bool> sawtooth{false};
     std::atomic<int> position_reads{0};  // precise `e` reads served
@@ -255,6 +259,8 @@ alpacacore::test::FakeMountServer::Responder responder(const std::shared_ptr<Lan
                     offset += st->ra_offset_script[static_cast<std::size_t>(ordinal - 1)].load();
                 }
                 const int32_t requested_dec_move = static_cast<int32_t>(dec) - static_cast<int32_t>(st->dec_raw.load());
+                const uint32_t start_ra = st->ra_now();
+                const uint32_t start_dec = st->dec_raw.load();
                 st->ra_raw.store((ra + offset) & kCountsMask);
                 int32_t dec_offset = 0;
                 if (st->dec_scripted.load() && ordinal <= static_cast<int>(st->dec_offset_script.size())) {
@@ -265,6 +271,18 @@ alpacacore::test::FakeMountServer::Responder responder(const std::shared_ptr<Lan
                         ordinal % 2 == 0 ? st->dec_short_move_scatter.load() : -st->dec_short_move_scatter.load();
                 }
                 st->dec_raw.store(static_cast<uint32_t>(static_cast<int32_t>(dec) + dec_offset) & kCountsMask);
+                if (st->refuse_goto.load() || st->goto_fraction.load() < 1.0) {
+                    const double fraction = st->refuse_goto.load() ? 0.0 : st->goto_fraction.load();
+                    const auto signed24 = [](uint32_t delta) {
+                        return static_cast<int32_t>((delta & kCountsMask) << 8) >> 8;
+                    };
+                    const int32_t ra_travel = signed24(st->ra_raw.load() - start_ra);
+                    const int32_t dec_travel = signed24(st->dec_raw.load() - start_dec);
+                    st->ra_raw.store((start_ra + static_cast<uint32_t>(std::lround(ra_travel * fraction))) &
+                                     kCountsMask);
+                    st->dec_raw.store((start_dec + static_cast<uint32_t>(std::lround(dec_travel * fraction))) &
+                                      kCountsMask);
+                }
                 st->goto_started.store(st->now().time_since_epoch().count());
                 st->goto_status_unread.store(3);
                 if (ordinal == 1) st->first_goto_at.store(st->goto_started.load());
@@ -1572,6 +1590,195 @@ TEST_CASE("SynScan GOTO landing - an async GOTO that misses by 49 arcmin twice i
 
     CHECK(error.find("arcsec") != std::string::npos);
     CHECK(st->goto_count.load() == 2);
+    driver->set_connected(false);
+}
+
+// #2763: a GOTO the handset refused (acknowledged, never moved) or that a limit stopped part-way is never repeated:
+// the one repeat of #1105 is for a mount that moved most of the way and ended far off the aim.
+TEST_CASE("SynScan GOTO safety - a GOTO the mount never moves for is not repeated and Slewing raises (#2763)",
+          "[synscan][telescope][goto-landing][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->attach(clock);
+    st->refuse_goto.store(true);
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    use_fast_guide_rate(*driver);
+    const uint32_t start_ra = st->ra_now();
+    const uint32_t start_dec = st->dec_raw.load();
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, kTargetDec));
+    const std::string error = wait_async_slew(clock, *driver);
+
+    CHECK(error.find("not repeated") != std::string::npos);
+    CHECK(st->goto_count.load() == 1);  // the ledger: one GOTO, no repeat
+    CHECK(st->commanded_ra[1].load() == 0);
+    CHECK(st->ra_now() == start_ra);  // the position: the mount never moved
+    CHECK(st->dec_raw.load() == start_dec);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan GOTO safety - a blocking GOTO the mount never moves for throws without a repeat (#2763)",
+          "[synscan][telescope][goto-landing][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->attach(clock);
+    st->refuse_goto.store(true);
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    use_fast_guide_rate(*driver);
+    const uint32_t start_ra = st->ra_now();
+
+    bool threw = false;
+    try {
+        run_virtual(clock, [&] { driver->slew_to_coordinates(kTargetRa, kTargetDec); });
+    } catch (const alpacacore::AlpacaException& e) {
+        threw = true;
+        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(e.what()).find("not repeated") != std::string::npos);
+    }
+    CHECK(threw);
+    CHECK(st->goto_count.load() == 1);
+    CHECK(st->ra_now() == start_ra);
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan GOTO safety - a GOTO a limit stops half way is not repeated and Slewing raises (#2763)",
+          "[synscan][telescope][goto-landing][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->attach(clock);
+    st->goto_fraction.store(0.5);
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    use_fast_guide_rate(*driver);
+    const uint32_t start_ra = st->ra_now();
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, kTargetDec));
+    const std::string error = wait_async_slew(clock, *driver);
+
+    CHECK(error.find("not repeated") != std::string::npos);
+    CHECK(st->goto_count.load() == 1);
+    CHECK(st->commanded_ra[1].load() == 0);
+    // The position: it moved about half of the 0.5 h to the target and stopped there.
+    const uint32_t aim = st->commanded_ra[0].load();
+    const int32_t travelled = static_cast<int32_t>(st->ra_now()) - static_cast<int32_t>(start_ra);
+    const int32_t planned = static_cast<int32_t>(aim) - static_cast<int32_t>(start_ra);
+    CHECK(std::abs(travelled - planned / 2) < 400);
+    driver->set_connected(false);
+}
+
+// #2763: the fraction rule alone repeats a limit stop in the last quarter; the repeat also needs the #1105 shape
+// (Dec within 600", RA within 1 degree of the target).
+TEST_CASE("SynScan GOTO safety - a GOTO a limit stops in the last quarter is not repeated and Slewing raises (#2763)",
+          "[synscan][telescope][goto-landing][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->attach(clock);
+    st->goto_fraction.store(0.85);
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    use_fast_guide_rate(*driver);
+    const uint32_t start_ra = st->ra_now();
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, kTargetDec));
+    const std::string error = wait_async_slew(clock, *driver);
+
+    CHECK(error.find("not repeated") != std::string::npos);
+    CHECK(st->goto_count.load() == 1);
+    CHECK(st->commanded_ra[1].load() == 0);
+    // The position: it moved about 85% of the way to the aim and stopped there.
+    const uint32_t aim = st->commanded_ra[0].load();
+    const int32_t travelled = static_cast<int32_t>(st->ra_now()) - static_cast<int32_t>(start_ra);
+    const int32_t planned = static_cast<int32_t>(aim) - static_cast<int32_t>(start_ra);
+    CHECK(std::abs(travelled - static_cast<int32_t>(planned * 0.85)) < 400);
+    driver->set_connected(false);
+}
+
+// Each half of the #1105 shape on its own: a single-axis slew a limit stops at 85% misses on that axis only, inside
+// the fraction rule, so only that axis's bound refuses the repeat.
+TEST_CASE("SynScan GOTO safety - a Dec-only GOTO a limit stops in the last quarter is not repeated (#2763)",
+          "[synscan][telescope][goto-landing][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->attach(clock);
+    st->goto_fraction.store(0.85);
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    use_fast_guide_rate(*driver);
+    const uint32_t start_dec = st->dec_raw.load();
+
+    // 10 degrees south from Dec 22.5: the landing misses by 1.5 degrees in Dec and nothing in RA.
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(driver->get_right_ascension(), 12.5));
+    const std::string error = wait_async_slew(clock, *driver);
+
+    CHECK(error.find("not repeated") != std::string::npos);
+    CHECK(st->goto_count.load() == 1);
+    CHECK(st->commanded_dec[1].load() == 0);
+    const int32_t travelled = static_cast<int32_t>(st->dec_raw.load()) - static_cast<int32_t>(start_dec);
+    const int32_t planned = static_cast<int32_t>(st->commanded_dec[0].load()) - static_cast<int32_t>(start_dec);
+    CHECK(std::abs(travelled - static_cast<int32_t>(planned * 0.85)) < 400);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan GOTO safety - an RA-only GOTO a limit stops in the last quarter is not repeated (#2763)",
+          "[synscan][telescope][goto-landing][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->attach(clock);
+    st->goto_fraction.store(0.85);
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    use_fast_guide_rate(*driver);
+    const uint32_t start_ra = st->ra_now();
+    const uint32_t start_dec = st->dec_raw.load();
+
+    // The landing misses by about 4,000" in RA and nothing in Dec.
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, driver->get_declination()));
+    const std::string error = wait_async_slew(clock, *driver);
+
+    CHECK(error.find("not repeated") != std::string::npos);
+    CHECK(st->goto_count.load() == 1);
+    CHECK(st->commanded_ra[1].load() == 0);
+    const int32_t travelled = static_cast<int32_t>(st->ra_now()) - static_cast<int32_t>(start_ra);
+    const int32_t planned = static_cast<int32_t>(st->commanded_ra[0].load()) - static_cast<int32_t>(start_ra);
+    CHECK(std::abs(travelled - static_cast<int32_t>(planned * 0.85)) < 400);
+    CHECK(std::abs(static_cast<int32_t>(st->dec_raw.load()) - static_cast<int32_t>(start_dec)) < 400);
+    driver->set_connected(false);
+}
+
+// The cap's other side: a stop at 95% of the way lands Dec within 600" and RA within 1 degree, the #1105 shape, so
+// it gets the one repeat.
+TEST_CASE("SynScan GOTO safety - a GOTO ending 95 percent of the way with a small miss is repeated once (#2763)",
+          "[synscan][telescope][goto-landing][goto-safety]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->attach(clock);
+    st->goto_fraction.store(0.95);
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    use_fast_guide_rate(*driver);
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, kTargetDec));
+    wait_async_slew(clock, *driver);
+
+    CHECK(st->goto_count.load() >= 2);
+    CHECK(st->commanded_ra[1].load() == st->commanded_ra[0].load());
     driver->set_connected(false);
 }
 
