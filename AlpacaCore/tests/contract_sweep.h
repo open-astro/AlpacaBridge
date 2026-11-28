@@ -91,6 +91,7 @@
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
 #include <alpacacore/vendor/remotealpaca/remotealpaca_covercalibrator_driver.h>
+#include <alpacacore/vendor/remotealpaca/remotealpaca_dome_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_filterwheel_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_focuser_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
@@ -204,6 +205,7 @@ inline int platform7_interface_version(DeviceType t) {
         case DeviceType::FilterWheel:
         case DeviceType::Switch:
         case DeviceType::SafetyMonitor:
+        case DeviceType::Dome:
             return 3;
         case DeviceType::CoverCalibrator:
         case DeviceType::ObservingConditions:
@@ -791,6 +793,17 @@ inline ContractEntry contract_entry_remotealpaca_focuser() {
         "RemoteAlpacaFocuserDriver::move() clamps an absolute position outside 0..MaxStep to the range (ConformU "
         "requires clamping); a relative step goes to the upstream as given");
 }
+inline ContractEntry contract_entry_remotealpaca_dome() {
+    return make_entry(
+        "remotealpaca_dome", "remotealpaca", "dome", DeviceType::Dome,
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            vendor::remotealpaca::RemoteDeviceConfig config;
+            config.host = "127.0.0.1";
+            config.port = 32323;
+            return vendor::remotealpaca::create_remotealpaca_dome(n, config);
+        },
+        kSrcAgents);
+}
 inline ContractEntry contract_entry_remotealpaca_covercalibrator() {
     return make_entry(
         "remotealpaca_covercalibrator", "remotealpaca", "covercalibrator", DeviceType::CoverCalibrator,
@@ -1071,7 +1084,8 @@ inline ContractEntry contract_entry_astroasis_focuser() {
     X(remotealpaca_safetymonitor)       \
     X(remotealpaca_rotator)             \
     X(remotealpaca_filterwheel)         \
-    X(remotealpaca_switch) X(remotealpaca_telescope) X(remotealpaca_focuser) X(remotealpaca_covercalibrator)
+    X(remotealpaca_switch)              \
+    X(remotealpaca_telescope) X(remotealpaca_focuser) X(remotealpaca_covercalibrator) X(remotealpaca_dome)
 #else
 #define CS_REMOTEALPACA(X)
 #endif
@@ -1221,6 +1235,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"remotealpaca", "switch", "fake_http_client.h"},               // the same, as a Switch
     {"remotealpaca", "telescope", "fake_http_client.h"},            // the same, as a Telescope
     {"remotealpaca", "focuser", "fake_http_client.h"},              // the same, as a Focuser
+    {"remotealpaca", "dome", "fake_http_client.h"},                 // the same, as a Dome
     {"remotealpaca", "covercalibrator", "fake_http_client.h"},      // the same, as a CoverCalibrator
     {"weewx", "observingconditions", "fake_http_client.h"},         // a scripted WeeWX JSON feed
     {"gemini", "focuser", "fake_gemini_focuser.h"},
@@ -1292,6 +1307,7 @@ inline constexpr SnapshotAdopterRow kSnapshotAdopterRoster[] = {
     {"remotealpaca_switch", "remotealpaca", "AlpacaCore/src/vendors/remotealpaca/remotealpaca_switch_driver.cpp"},
     {"remotealpaca_telescope", "remotealpaca", "AlpacaCore/src/vendors/remotealpaca/remotealpaca_telescope_driver.cpp"},
     {"remotealpaca_focuser", "remotealpaca", "AlpacaCore/src/vendors/remotealpaca/remotealpaca_focuser_driver.cpp"},
+    {"remotealpaca_dome", "remotealpaca", "AlpacaCore/src/vendors/remotealpaca/remotealpaca_dome_driver.cpp"},
     {"remotealpaca_covercalibrator", "remotealpaca",
      "AlpacaCore/src/vendors/remotealpaca/remotealpaca_covercalibrator_driver.cpp"},
 };

@@ -4,7 +4,7 @@ applyTo: "AlpacaCore/src/vendors/remotealpaca/**,AlpacaCore/include/alpacacore/v
 
 ### remotealpaca
 
-Devices: ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope, Focuser, CoverCalibrator. The vendor serves a device of an upstream Alpaca server as a proxied device on this server
+Devices: ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope, Focuser, CoverCalibrator, Dome. The vendor serves a device of an upstream Alpaca server as a proxied device on this server
 (`CONTEXT.md`: native device vs proxied device). Its contract is fixed by
 [decision 0023](../../docs/decisions/0023-outbound-clients-in-vendor-wrappers.md) and issue #1753; read both before
 adding a device type.
@@ -19,7 +19,7 @@ the pass-through of upstream errors. A driver keeps its frame and how to measure
 commands, its `transition_mutex_` and its `get_connected()`; behaviour that does not fit the shared shape stays in the
 driver. A new device type adds a driver over it, not a second copy of these rules. The first InterfaceVersion of the
 proxied type that has `Connect` is the driver's (`UpstreamProxy::Setup::platform7_version`): 2 for ObservingConditions,
-3 for SafetyMonitor, FilterWheel and Switch, 4 for Rotator, Telescope and Focuser, 2 for CoverCalibrator.
+3 for SafetyMonitor, FilterWheel, Switch and Dome, 4 for Rotator, Telescope and Focuser, 2 for CoverCalibrator.
 
 #### The upstream client (`RemoteAlpacaClient`, issue #1753 slice 2)
 
@@ -274,6 +274,50 @@ bound.
 - A refused connection on any of the three is a lost link at once; another call with no reply is `DriverException`.
   Actions and `Command*` are not forwarded.
 
+#### The Dome proxied device (issue #1753 slice 5, #2705)
+
+The same config, self-loop check, Connect (Platform 7 is `IDomeV3`; a version 2 or older upstream gets
+`Connected=true`), branded Name, snapshot, poll and link rules as the ObservingConditions device, with the same loss
+bound. No Dome member is missing by version: every one the driver calls is in `IDomeV2`.
+
+- **Connect** reads the eight capabilities once (`CanFindHome`, `CanPark`, `CanSetAltitude`, `CanSetAzimuth`,
+  `CanSetPark`, `CanSetShutter`, `CanSlave`, `CanSyncAzimuth`), each a value or the upstream's error. They are static
+  metadata: they keep answering while the link is faulted, and while disconnected (the last Connect's value, false
+  before any).
+- **Snapshot.** The frame is `Slewing`, `Azimuth`, `Altitude`, `AtHome`, `AtPark`, `ShutterStatus` and `Slaved`, each a
+  value or the upstream's error. The poll asks `Slewing` and each other member unless the Connect read its capability as
+  false (`CanSetAzimuth`, `CanSetAltitude`, `CanFindHome`, `CanPark`, `CanSetShutter`, `CanSlave`); a capability that
+  answered an error keeps its member polled. A poll makes 1 to 7 calls (7 for a dome with every capability). A member
+  the poll skips is asked once at Connect, and that answer (a value, or the upstream's `NotImplemented`) is served
+  unchanged. A stale frame is served, never refused (decision 0010 rule 6): each getter answers the last poll's value
+  until the loss bound. A latched fault refuses the frame with `DriverException`. `DeviceState` is the dome base's, from
+  the same getters, its `TimeStamp` the frame's age (`device_state_age()`).
+- **Never settled from the frame.** A dome moves hardware, and the frame can be a poll period old. A command writes only
+  its in-progress state through: `SlewToAzimuth`, `SlewToAltitude`, `FindHome` and `Park` write `Slewing` true,
+  `OpenShutter` and `CloseShutter` write `ShutterStatus` Opening or Closing, whatever the frame says. Only a poll that
+  sampled after the command writes `Slewing` false or the shutter Open or Closed. Azimuth, Altitude, AtHome and AtPark
+  stay the measured ones until the next poll. A motion or shutter PUT with no usable reply writes its in-progress state
+  too before its `DriverException` reaches the caller (the upstream may have acted); an upstream error answer writes
+  nothing.
+- **AbortSlew** is forwarded even while the link is faulted: the safety stop is refused only for a lost link
+  (`NotConnected`). It writes nothing: a dome coasts after the stop, so `Slewing` (and `Slaved`, which the stop ends)
+  reads the upstream's answer at the next poll. An AbortSlew sent while a slew's body runs waits for it (the caller
+  order above), so it reaches the upstream after the slew.
+- **The other commands**, each refused while the link is faulted and judged by the upstream (its `NotImplemented` for a
+  capability it lacks, its `InvalidValue` for an angle out of range, both unchanged): `SyncToAzimuth` reads the
+  upstream's `Azimuth` back and writes it through (a read with no reply leaves it to the next poll and does not fail the
+  sync), the `Slaved` write writes `Slaved` through, `SetPark` writes nothing. A NaN or infinite
+  angle is `InvalidValue` before the connection check; a finite one goes upstream as given.
+- **A link lost mid-slew** never reads `Slewing` false: faulted, the frame is refused (`DriverException`); lost, every
+  member is `NotConnected`. The relink's Connect measures a fresh frame before any getter answers, and sends no stop: the
+  upstream's own driver runs the motion it was given.
+- **Disconnect.** From its start (`disconnecting_`) no command body but AbortSlew's sends its PUT: each checks before
+  the PUT and answers `NotConnected`, so a command queued behind a running one, or one whose caller passed its check
+  before the Disconnect, never reaches the upstream after it. AbortSlew is still forwarded while a Disconnect runs.
+  Nothing is stopped at Disconnect: a Dome has no MoveAxis, and the upstream runs each motion it took to its end.
+- A refused connection on any command is a lost link at once; another call with no reply is `DriverException`.
+  Actions and `Command*` are not forwarded.
+
 #### The CoverCalibrator proxied device (issue #1753 slice 5, #2704)
 
 The same config, self-loop check, Connect (Platform 7 is `ICoverCalibratorV2`; a version 1 upstream gets
@@ -314,7 +358,7 @@ drop, HTTP 500, bad JSON and no-ErrorNumber modes) over the real libcurl client,
 counts calls. The device tests (`test_remotealpaca_observingconditions.cpp`, `test_remotealpaca_safetymonitor.cpp`,
 `test_remotealpaca_rotator.cpp`, `test_remotealpaca_filterwheel.cpp`, `test_remotealpaca_switch.cpp`,
 `test_remotealpaca_telescope.cpp` (its `[goto-safety]` cases cover the cap and the relink stop),
-`test_remotealpaca_focuser.cpp`, `test_remotealpaca_covercalibrator.cpp`, the contract sweep and the `[stress]` cases
+`test_remotealpaca_focuser.cpp`, `test_remotealpaca_covercalibrator.cpp`, `test_remotealpaca_dome.cpp`, the contract sweep and the `[stress]` cases
 in `test_remotealpaca_concurrency_stress.cpp`) answer from `AlpacaUpstreamScript`
 (`AlpacaCore/tests/alpaca_upstream_script.h`, a responder for `FakeHttpClient`; `Kind::SafetyMonitor` scripts a
 SafetyMonitor upstream, `Kind::Rotator` a Rotator whose moves run until `finish_move()` or a Halt, `Kind::FilterWheel`
@@ -323,7 +367,8 @@ asynchronous writes run until `finish_async()` (`set_call_hook()` gives each ups
 clock), `Kind::Telescope` a German mount whose slews land at once or, with
 `hold_motion(true)`, run until `finish_motion()` or AbortSlew, `Kind::Focuser` a Focuser whose Move runs until
 `finish_move()` or a Halt, `Kind::CoverCalibrator` a CoverCalibrator whose cover commands run until `finish_cover()` or
-a HaltCover and whose calibrator commands run until `finish_calibrator()`) with the poll on
+a HaltCover and whose calibrator commands run until `finish_calibrator()`, `Kind::Dome` a Dome whose slews run until
+`finish_move()` or an AbortSlew and whose shutter moves until `finish_shutter()`) with the poll on
 `FakeTaskClock`. The contract sweep's snapshot
 rig for the SafetyMonitor states `IsSafe`'s lost answer in `SnapshotRig::lost_answer`.
 

@@ -3553,7 +3553,8 @@ function updateRemoteAlpacaConfigFields() {
         switch: document.getElementById('remotealpaca-switch-fields'),
         telescope: document.getElementById('remotealpaca-telescope-fields'),
         focuser: document.getElementById('remotealpaca-focuser-fields'),
-        covercalibrator: document.getElementById('remotealpaca-covercalibrator-fields')
+        covercalibrator: document.getElementById('remotealpaca-covercalibrator-fields'),
+        dome: document.getElementById('remotealpaca-dome-fields')
     };
     const deviceTypeSelect = document.getElementById('device-type');
     const deviceType = deviceTypeSelect ? normalizeDeviceType(deviceTypeSelect.value) : '';
@@ -5163,8 +5164,8 @@ document.getElementById('device-form').addEventListener('submit', async function
     } else if (deviceData.vendor === 'remotealpaca') {
         // The fields of the shown sub-section: remoteAlpaca* (ObservingConditions), remoteAlpacaSafety* (SafetyMonitor),
         // remoteAlpacaRotator* (Rotator), remoteAlpacaFilterWheel* (FilterWheel), remoteAlpacaSwitch* (Switch),
-        // remoteAlpacaTelescope* (Telescope), remoteAlpacaFocuser* (Focuser) or
-        // remoteAlpacaCover* (CoverCalibrator).
+        // remoteAlpacaTelescope* (Telescope), remoteAlpacaFocuser* (Focuser),
+        // remoteAlpacaCover* (CoverCalibrator) or remoteAlpacaDome* (Dome).
         const remoteAlpacaPrefixes = {
             safetymonitor: 'remoteAlpacaSafety',
             rotator: 'remoteAlpacaRotator',
@@ -5172,7 +5173,8 @@ document.getElementById('device-form').addEventListener('submit', async function
             switch: 'remoteAlpacaSwitch',
             telescope: 'remoteAlpacaTelescope',
             focuser: 'remoteAlpacaFocuser',
-            covercalibrator: 'remoteAlpacaCover'
+            covercalibrator: 'remoteAlpacaCover',
+            dome: 'remoteAlpacaDome'
         };
         const prefix = remoteAlpacaPrefixes[normalizeDeviceType(deviceData.deviceType)] || 'remoteAlpaca';
         deviceData.upstreamHost = (formData.get(`${prefix}Host`) || '').trim();

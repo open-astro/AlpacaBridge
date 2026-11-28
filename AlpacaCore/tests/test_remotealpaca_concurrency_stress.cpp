@@ -11,13 +11,14 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // Connect/disconnect/operate concurrency stress for the remotealpaca ObservingConditions, SafetyMonitor, Rotator,
-// FilterWheel, Switch, Telescope, Focuser and CoverCalibrator proxied devices (issues #101, #1753, #2704, #2706, #2707,
-// #2708, #2709, #2710). The upstream is the scripted AlpacaUpstreamScript behind FakeHttpClient and the test-only
-// LockedHttpClient (decision 0015 rule 2), so every Connect lands and the poll and the command bodies run during the
-// storm. The last case of each device races refused-connection losses against the lifecycle and the reads.
+// FilterWheel, Switch, Telescope, Focuser, CoverCalibrator and Dome proxied devices (issues #101, #1753, #2704 to
+// #2710). The upstream is the scripted AlpacaUpstreamScript behind FakeHttpClient and the test-only LockedHttpClient
+// (decision 0015 rule 2), so every Connect lands and the poll and the command bodies run during the storm. The last
+// case of each device races refused-connection losses against the lifecycle and the reads.
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/covercalibrator_driver.h>
+#include <alpacacore/dome_driver.h>
 #include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/observingconditions_driver.h>
@@ -27,6 +28,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/http_client.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_covercalibrator_driver.h>
+#include <alpacacore/vendor/remotealpaca/remotealpaca_dome_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_filterwheel_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_focuser_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
@@ -233,6 +235,39 @@ void operate_focuser(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) 
     guard([&] { f.move(30000); });
     guard([&] { f.set_temp_comp(false); });
     guard([&] { f.halt(); });
+}
+
+std::unique_ptr<alpacacore::DomeDriver> make_dome(alpacacore::test::FakeHttpClient& http) {
+    return remote::create_remotealpaca_dome(0, stress_config(),
+                                            std::make_shared<alpacacore::test::LockedHttpClient>(http.client()), {},
+                                            alpacacore::util::default_task_clock());
+}
+
+// Every member the Dome serves and its ten commands, each in its own guard.
+void operate_dome(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
+    auto& dome = static_cast<alpacacore::DomeDriver&>(d);
+    guard([&] { static_cast<void>(dome.get_slewing()); });
+    guard([&] { static_cast<void>(dome.get_azimuth()); });
+    guard([&] { static_cast<void>(dome.get_altitude()); });
+    guard([&] { static_cast<void>(dome.get_at_home()); });
+    guard([&] { static_cast<void>(dome.get_at_park()); });
+    guard([&] { static_cast<void>(dome.get_shutter_status()); });
+    guard([&] { static_cast<void>(dome.get_slaved()); });
+    guard([&] { static_cast<void>(dome.get_can_set_azimuth()); });
+    guard([&] { static_cast<void>(dome.get_can_slave()); });
+    guard([&] { static_cast<void>(dome.get_device_state()); });
+    guard([&] { static_cast<void>(dome.get_name()); });
+    guard([&] { static_cast<void>(dome.get_link_fault()); });
+    guard([&] { dome.slew_to_azimuth(200.0); });
+    guard([&] { dome.slew_to_altitude(30.0); });
+    guard([&] { dome.sync_to_azimuth(100.0); });
+    guard([&] { dome.find_home(); });
+    guard([&] { dome.park(); });
+    guard([&] { dome.set_park(); });
+    guard([&] { dome.open_shutter(); });
+    guard([&] { dome.close_shutter(); });
+    guard([&] { dome.set_slaved(false); });
+    guard([&] { dome.abort_slew(); });
 }
 
 std::unique_ptr<alpacacore::CoverCalibratorDriver> make_covercalibrator(alpacacore::test::FakeHttpClient& http) {
@@ -888,6 +923,108 @@ TEST_CASE("Remote Alpaca focuser - refused-connection losses race connects, disc
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_link_fault().empty());  // the Disconnect ended any kept reason
     CHECK(upstream.calls("halt") > 0);        // commands ran on a connected driver, not only NotConnected
+    CHECK(http.in_flight() == 0);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}
+
+TEST_CASE("Remote Alpaca dome - concurrent connect/disconnect/operate stress", "[remotealpaca][dome][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::Dome};
+    upstream.install(http);
+    auto driver = make_dome(http);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // NotConnected while a racing disconnect has the driver down. InvalidOperation: a command started while a
+    // Disconnect joins the command slot is refused ("try again", issue #1713).
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::InvalidOperation};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { operate_dome(guard, d); });
+
+    driver->set_connected(false);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(upstream.calls("slewtoazimuth") > 0);  // the commands ran on a connected driver, not only NotConnected
+    CHECK(http.in_flight() == 0);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}
+
+TEST_CASE("Remote Alpaca dome - destruction races an in-flight connect", "[remotealpaca][dome][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::Dome};
+    upstream.install(http);
+    http.set_delay(std::chrono::milliseconds(1));
+    alpacacore::test::run_destruction_during_connect_stress([&http]() { return make_dome(http); });
+    CHECK(http.in_flight() == 0);
+}
+
+TEST_CASE("Remote Alpaca dome - racing disconnect is never dropped", "[remotealpaca][dome][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::Dome};
+    upstream.install(http);
+    http.set_delay(std::chrono::milliseconds(1));  // keeps each Connect in flight while the disconnect lands
+    auto driver = make_dome(http);
+    CHECK_FALSE(alpacacore::test::connect_then_disconnect_settles_disconnected(*driver));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, false));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, true));
+    CHECK(http.in_flight() == 0);
+}
+
+// Decision 0009 point 2(a): one call in 40 is refused (a Connect makes some twenty, so most land), so the poll and the
+// commands lose the link at once while lifecycle threads connect and disconnect it and readers race the getters. TSan
+// checks the loss path's writes (connected_, the kept reason, the dropped frame) against the getters, the command
+// bodies and their write-throughs, the Connect's capabilities and poll plan that the poll copies, and set_connected().
+TEST_CASE("Remote Alpaca dome - refused-connection losses race connects, disconnects, commands and reads",
+          "[remotealpaca][dome][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::Dome};
+    std::atomic<int> calls{0};
+    http.set_responder([&upstream, &calls](const alpacacore::test::FakeHttpClient::Request& request) {
+        if (calls.fetch_add(1) % 40 == 39) {
+            throw alpacacore::util::HttpConnectRefused("scripted refusal (connection refused)");
+        }
+        return upstream.answer(request);
+    });
+    auto driver = make_dome(http);
+
+    // A refused command is NotConnected (the loss is its answer); InvalidOperation as above.
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::InvalidOperation};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { operate_dome(guard, d); });
+
+    // The last connect() may still own its connection task (open-astro#326): settle instead of a bare Disconnect.
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());  // the Disconnect ended any kept reason
+    CHECK(upstream.calls("abortslew") > 0);   // commands ran on a connected driver, not only NotConnected
+    CHECK(http.in_flight() == 0);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}
+
+// The capabilities answer while disconnected and while connected, so no read of one throws, whatever Disconnect or
+// Connect races it: the driver picks the answer under one state-lock hold. InvalidOperation is never a capability's
+// answer; it only replaces the guard's default set, so a NotConnected is unexpected here.
+TEST_CASE("Remote Alpaca dome - the capabilities never throw while connects and disconnects race them",
+          "[remotealpaca][dome][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::Dome};
+    upstream.install(http);
+    auto driver = make_dome(http);
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::InvalidOperation};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
+        auto& dome = static_cast<alpacacore::DomeDriver&>(d);
+        for (int i = 0; i < 25; ++i) {
+            guard([&] { static_cast<void>(dome.get_can_set_shutter()); });
+            guard([&] { static_cast<void>(dome.get_can_sync_azimuth()); });
+        }
+    });
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    CHECK(driver->get_can_set_shutter());  // the last Connect's answer, kept while disconnected
     CHECK(http.in_flight() == 0);
     INFO(guard.report());
     CHECK(guard.unexpected_count() == 0);
