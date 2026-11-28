@@ -18,8 +18,8 @@
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/camera_driver.h>
-#include <alpacacore/dome_driver.h>
 #include <alpacacore/covercalibrator_driver.h>
+#include <alpacacore/dome_driver.h>
 #include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/observingconditions_driver.h>
@@ -29,8 +29,8 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/http_client.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_camera_driver.h>
-#include <alpacacore/vendor/remotealpaca/remotealpaca_dome_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_covercalibrator_driver.h>
+#include <alpacacore/vendor/remotealpaca/remotealpaca_dome_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_filterwheel_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_focuser_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
