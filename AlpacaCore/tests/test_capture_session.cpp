@@ -519,6 +519,53 @@ TEST_CASE("CaptureSession - start refuses after kStartTimeout when the old body 
     CHECK(eventually([&] { return h.session->image_ready(); }));
 }
 
+// Falsified by: capture_session.h cancel() joining the body (it blocks until the SDK returns), or not taking ownership
+// away (the state stays Exposing, or the late frame is published) (#2721).
+TEST_CASE("CaptureSession - cancel returns while the body is still in the SDK and drops its frame",
+          "[util][capture-session]") {
+    Harness h;
+    auto p = std::make_shared<Probe>();
+    auto sdk = h.gate();
+    h.session->start(10.0, sdk_blocked_body(p, sdk));
+    REQUIRE(eventually([&] { return p->entered.load(); }));
+
+    CHECK(h.returns_without_advance([&] { h.session->cancel(); }));
+    CHECK(h.session->camera_state() == CameraState::Idle);
+    CHECK(h.session->busy());  // the body has not returned
+    CHECK_FALSE(p->exited);
+
+    sdk->open();
+    REQUIRE(eventually([&] { return !h.session->busy(); }));
+    CHECK(p->reason == StopReason::Cancelled);
+    CHECK(p->accepted == 0);
+    CHECK_FALSE(h.session->image_ready());
+    CHECK_FALSE(h.session->failure().has_value());
+
+    h.session->cancel();  // idle: a no-op
+    CHECK(h.session->camera_state() == CameraState::Idle);
+}
+
+// Falsified by: capture_session.h cancel() leaving running_ at 0 for a body still in the SDK (start() runs a second
+// body beside it) (#2721).
+TEST_CASE("CaptureSession - start waits for a cancelled body and starts once it returns", "[util][capture-session]") {
+    Harness h;
+    auto p = std::make_shared<Probe>();
+    auto sdk = h.gate();
+    h.session->start(10.0, sdk_blocked_body(p, sdk));
+    REQUIRE(eventually([&] { return p->entered.load(); }));
+    h.session->cancel();
+
+    auto next = std::make_shared<Probe>();
+    auto work = std::async(std::launch::async, [&] { h.session->start(1.0, instant_body(next, 3)); });
+    REQUIRE(h.clock.wait_for_waiters(1, kBound));  // start's bounded wait
+    CHECK_FALSE(next->entered);                    // never two bodies on one camera
+    sdk->open();
+    REQUIRE(work.wait_for(kBound) == std::future_status::ready);
+    work.get();
+    REQUIRE(eventually([&] { return h.session->image_ready(); }));
+    CHECK(h.session->image()->data.front() == 3);
+}
+
 TEST_CASE("CaptureSession - two starts over a body still in the SDK start one body and getters never wait",
           "[util][capture-session]") {
     Harness h;

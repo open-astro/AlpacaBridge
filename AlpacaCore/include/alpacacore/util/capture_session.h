@@ -78,10 +78,10 @@ private:
  *
  * Locks: mutex_ is a leaf. While it is held the session calls no slot method,
  * body, log call or callback. Joins serialise on join_mutex_, taken without
- * mutex_. Call start(), abort(), disconnect_and_join() and the destructor
- * without the driver mutex; the getters, fail(), set_stopping(), discard_image()
- * and open() may run under it. A body never calls start(), abort(), disconnect_and_join()
- * or open().
+ * mutex_. Call start(), abort(), cancel(), disconnect_and_join() and the
+ * destructor without the driver mutex; the getters, fail(), set_stopping(),
+ * discard_image() and open() may run under it. A body never calls start(),
+ * abort(), cancel(), disconnect_and_join() or open().
  */
 class CaptureSession {
 public:
