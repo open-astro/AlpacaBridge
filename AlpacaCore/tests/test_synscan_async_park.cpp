@@ -252,6 +252,33 @@ bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<b
     return pred();
 }
 
+// Names the Park body's thread through the slew spawn seam, so a stepping loop waits for the body's own wait on the
+// clock. The status poll is always parked on the clock, so a waiter count is met while the body is still sending its
+// GOTO, and virtual time then runs ahead of the body (#2561, #2811). Declare it before the driver: the driver joins the
+// body thread before this goes.
+class ParkBodyThread {
+public:
+    void install(alpacacore::TelescopeDriver& driver) {
+        alpacacore::vendor::synscan::set_slew_spawn_for_testing(driver, [this](std::function<void()> body) {
+            std::thread thread([this, body = std::move(body)] {
+                body();
+                ended_.store(true);
+            });
+            id_.store(thread.get_id());
+            return thread;
+        });
+    }
+
+    // Whether the body is parked on the clock, or has ended, within 5 s of real time.
+    bool parked(alpacacore::test::FakeTaskClock& clock) const {
+        return ended_.load() || clock.wait_for_waiter_thread(id_.load(), std::chrono::seconds(5));
+    }
+
+private:
+    std::atomic<std::thread::id> id_{};
+    std::atomic<bool> ended_{false};
+};
+
 }  // namespace
 
 TEST_CASE("SynScan - get_connected() answers at once while a connect is in flight", "[synscan][telescope][async]") {
@@ -990,18 +1017,23 @@ TEST_CASE("SynScan async - a Park tracking-stop failure persists through Slewing
     st->clock = &clock;
     alpacacore::test::FakeMountServer server(synscan_responder(st));
     REQUIRE(server.ok());
+    ParkBodyThread park_body;
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
         std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+    park_body.install(*driver);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
-    REQUIRE_NOTHROW(driver->park());
+    // Armed before the Park starts, so the first tracking stop the Park sends is refused (#2811).
     st->reject_tracking_stop.store(true);
+    REQUIRE_NOTHROW(driver->park());
     bool surfaced = false;
+    // Each step waits for the Park body's own wait: on a busy host a waiter count met by the status poll let the
+    // 120 steps run out before the body had sent its tracking stop (#2811).
     for (int i = 0; i < 120 && !surfaced; ++i) {
-        clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+        REQUIRE(park_body.parked(clock));
         clock.advance(std::chrono::milliseconds(250));
-        clock.wait_for_woken_settled(std::chrono::seconds(2));
+        REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
         try {
             (void)driver->get_slewing();
         } catch (const alpacacore::AlpacaException& ex) {
