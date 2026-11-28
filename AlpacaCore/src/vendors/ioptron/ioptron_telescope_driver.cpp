@@ -3545,7 +3545,8 @@ private:
             ctx.stop_reason() != util::StopReason::None || generation != slew_operation_generation_) {
             return;
         }
-        const bool tracking = *std::exchange(stop_verify_restore_tracking_, std::nullopt);
+        const bool tracking = stop_verify_restore_tracking_.value();
+        stop_verify_restore_tracking_.reset();
         try {
             const Wire protocol = wire();
             if (tracking) {
