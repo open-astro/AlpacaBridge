@@ -173,8 +173,8 @@ clang_format_pair() {
 
 # Pinned PMD release for the duplication gate (keep PMD_VER / PMD_SHA256 in sync
 # with the `duplication` job in .github/workflows/ci.yml; docs-drift check 2).
-PMD_VER="7.29.0"
-PMD_SHA256="d27177c185b837fa57f097e482d1253468aa035379c5eb2671fa0a279109b179"
+PMD_VER="7.30.0"
+PMD_SHA256="14fbf34dbcb51e895e27c33898cd6d7e9d028b1cc22ae23a5e8b100f7538446e"
 
 # ensure_pmd: prints the path of the pinned PMD launcher, downloading the
 # checksum-verified release into the cache once. Never installs a JRE.

@@ -1645,8 +1645,8 @@ jobs:
         # install (PMD_VER / PMD_SHA256); docs-drift check 2 keeps the pins equal.
         run: |
           set -euo pipefail
-          ver=7.29.0
-          sha256=d27177c185b837fa57f097e482d1253468aa035379c5eb2671fa0a279109b179
+          ver=7.30.0
+          sha256=14fbf34dbcb51e895e27c33898cd6d7e9d028b1cc22ae23a5e8b100f7538446e
           curl -fsSL "https://github.com/pmd/pmd/releases/download/pmd_releases%2F${ver}/pmd-dist-${ver}-bin.zip" \
             -o /tmp/pmd.zip
           echo "${sha256}  /tmp/pmd.zip" | sha256sum --check --strict -
@@ -1657,4 +1657,4 @@ jobs:
         run: python3 scripts/check_duplication.py --self-test
 
       - name: Check the duplicated-line share
-        run: python3 scripts/check_duplication.py --pmd /tmp/pmd-bin-7.29.0/bin/pmd
+        run: python3 scripts/check_duplication.py --pmd /tmp/pmd-bin-7.30.0/bin/pmd
