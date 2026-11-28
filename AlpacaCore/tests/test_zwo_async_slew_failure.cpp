@@ -60,16 +60,8 @@ alpacacore::vendor::zwo::ConnectionInfo endpoint(int port, int response_timeout_
     return conn;
 }
 
-// Real-time bound on a wire event (a command reaching the mount, a driver thread storing its error), never a driver
-// timer: those advance the FakeTaskClock.
-bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
-    const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (Clock::now() < deadline) {
-        if (pred()) return true;
-        std::this_thread::yield();
-    }
-    return pred();
-}
+using alpacacore::test::wait_until;
+using namespace std::chrono_literals;
 
 // The AM5 under test, on the clock the driver reads: GOTO, park and the status flags are the mount's, so a test
 // advances the clock instead of sleeping.
@@ -152,13 +144,13 @@ constexpr auto kInitiatorBudget = std::chrono::milliseconds(1000);
 // Whether a ":MS" followed the initiator: the setup is a straight run of wire exchanges, so a GOTO that was going to
 // go out does within this real-time bound.
 bool goto_sent_within_setup_window(const FakeZwoMount& mount) {
-    return wait_until([&] { return mount.count(":MS") > 0; }, 500);
+    return wait_until([&] { return mount.count(":MS") > 0; }, 500ms);
 }
 
 // open-astro#720: the setup commands received once the fencing call returned, after the same bound, so a setup
 // thread the call did not join has had time to send whatever it was going to send.
 int setup_sent_after_return(const FakeZwoMount& mount, int at_return) {
-    static_cast<void>(wait_until([&] { return setup_count(mount) > at_return; }, 500));
+    static_cast<void>(wait_until([&] { return setup_count(mount) > at_return; }, 500ms));
     return setup_count(mount) - at_return;
 }
 
@@ -291,7 +283,7 @@ TEST_CASE("ZWO target property writes wait for a complete Sync or GOTO target tr
             return ra_write ? rig.driver->get_target_right_ascension() != 5.5
                             : rig.driver->get_target_declination() != 20.0;
         },
-        50);
+        50ms);
     rig.mount.release();  // release before any fatal assertion or future join
     setter.get();
     if (sync.valid()) {
@@ -360,7 +352,7 @@ TEST_CASE("ZWO telescope - all four equatorial slews are refused while Tracking 
 
     // Neither a target write nor a GOTO reached the mount, and the driver is not slewing.
     CHECK_FALSE(wait_until(
-        [&] { return mount.count(":MS") != 0 || mount.count(":Sr") + mount.count(":Sd") != targets_before; }, 500));
+        [&] { return mount.count(":MS") != 0 || mount.count(":Sr") + mount.count(":Sd") != targets_before; }, 500ms));
     CHECK(read_slewing(*driver) == SlewingRead::False);
 
     // With the mount tracking the same call goes through.
@@ -368,7 +360,7 @@ TEST_CASE("ZWO telescope - all four equatorial slews are refused while Tracking 
     rig.tick();
     REQUIRE(driver->get_tracking());
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    CHECK(wait_until([&] { return mount.count(":MS") >= 1; }, 5000));
+    CHECK(wait_until([&] { return mount.count(":MS") >= 1; }, 5s));
     driver->set_connected(false);
 }
 
@@ -383,7 +375,7 @@ TEST_CASE("ZWO telescope - a retarget of its own GOTO in flight is not refused f
     REQUIRE(driver->get_tracking());
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return mount.count(":MS") >= 1; }, 5000));
+    REQUIRE(wait_until([&] { return mount.count(":MS") >= 1; }, 5s));
     REQUIRE_NOTHROW(driver->command_string(":GVP", false));  // Finish the setup exchange before advancing.
     mount.hold_running(true);                                // a GOTO that reports no tracking and never settles
     mount.set_tracking(false);
@@ -392,7 +384,7 @@ TEST_CASE("ZWO telescope - a retarget of its own GOTO in flight is not refused f
     CHECK(read_slewing(*driver) == SlewingRead::True);
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(6.0, 25.0));
-    CHECK(wait_until([&] { return mount.count(":MS") >= 2; }, 5000));
+    CHECK(wait_until([&] { return mount.count(":MS") >= 2; }, 5s));
 
     // Tracking=false during the GOTO is a commanded off: the next slew is refused, nothing more sent.
     driver->set_tracking(false);
@@ -402,7 +394,7 @@ TEST_CASE("ZWO telescope - a retarget of its own GOTO in flight is not refused f
     } catch (const alpacacore::AlpacaException& ex) {
         CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
     }
-    CHECK_FALSE(wait_until([&] { return mount.count(":MS") > 2; }, 500));
+    CHECK_FALSE(wait_until([&] { return mount.count(":MS") > 2; }, 500ms));
     driver->set_connected(false);
 }
 
@@ -460,13 +452,13 @@ TEST_CASE("ZWO own GOTO remains retargetable until arrival is published unless T
     rig.connect(std::chrono::seconds(5));
     REQUIRE(driver->get_tracking());
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return mount.count(":MS") == 1; }, 5000));
+    REQUIRE(wait_until([&] { return mount.count(":MS") == 1; }, 5s));
     rig.await_poll_resumed();
     mount.hold_running(true);  // the GOTO keeps reporting motion, and no tracking
     mount.set_tracking(false);
     const int pairs_before = mount.count(":GD");
     rig.tick();
-    REQUIRE(wait_until([&] { return mount.count(":GD") > pairs_before; }, 5000));  // a complete pair while moving
+    REQUIRE(wait_until([&] { return mount.count(":GD") > pairs_before; }, 5s));  // a complete pair while moving
     // The force window alone would permit a retarget even if GU cleared ownership too early.
     rig.tick(std::chrono::milliseconds(5500));
     mount.override_reply(rejected, "bad");  // the final pair of the stop is refused
@@ -488,7 +480,7 @@ TEST_CASE("ZWO own GOTO remains retargetable until arrival is published unless T
             CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
         }
         CHECK_FALSE(wait_until(
-            [&] { return mount.count(":MS") != gotos || mount.count(":Sr") + mount.count(":Sd") != targets; }, 500));
+            [&] { return mount.count(":MS") != gotos || mount.count(":Sr") + mount.count(":Sd") != targets; }, 500ms));
     };
 
     if (command_tracking_off) {
@@ -497,13 +489,13 @@ TEST_CASE("ZWO own GOTO remains retargetable until arrival is published unless T
         require_refused_without_writes();
     } else {
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(6.0, 25.0));
-        REQUIRE(wait_until([&] { return mount.count(":MS") == 2; }, 5000));
+        REQUIRE(wait_until([&] { return mount.count(":MS") == 2; }, 5s));
         REQUIRE_NOTHROW(driver->command_string(":GVP", false));
         CHECK(driver->get_slewing());
         mount.override_reply(rejected, "", 0);
         rig.await_poll_resumed();
         rig.tick(std::chrono::milliseconds(5500));
-        REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 8000));
+        REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 8s));
         CHECK(std::abs(driver->get_right_ascension() - 6.0) < 1e-9);  // the retarget's landing, as the mount reports
         CHECK(std::abs(driver->get_declination() - 25.0) < 1e-9);
         REQUIRE_FALSE(driver->get_tracking());
@@ -656,7 +648,7 @@ TEST_CASE("ZWO horizon rejection never retries with mirrored longitude", "[zwo][
     const int writes_before = site_writes(false);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     std::string error;
-    REQUIRE(wait_until([&] { return read_slewing(*driver, &error) == SlewingRead::Threw; }, 10000));
+    REQUIRE(wait_until([&] { return read_slewing(*driver, &error) == SlewingRead::Threw; }, 10s));
     CHECK(error.find("e5") != std::string::npos);
     CHECK(mount.count(":MS") == 1);  // #2408: an e5 refusal is not sent again
     CHECK(site_writes(false) >= writes_before + 1);
@@ -674,12 +666,12 @@ TEST_CASE("ZWO async - a GOTO the mount rejects surfaces through Slewing (#575)"
 
     mount.reject_goto("2");
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return mount.count(":MS") >= 1; }, 5000));  // ":MS" went out on the GOTO thread
+    REQUIRE(wait_until([&] { return mount.count(":MS") >= 1; }, 5s));  // ":MS" went out on the GOTO thread
 
     // Today: "GOTO failed: Mount rejected GOTO request" in the log, then
     // Slewing=false after the 5 s force window. Must read as an error.
     std::string message;
-    REQUIRE(wait_until([&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, 10000));
+    REQUIRE(wait_until([&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, 10s));
     CHECK_FALSE(message.empty());
     CHECK(message.find("Slew") != std::string::npos);
     CHECK(read_slewing(*driver) == SlewingRead::Threw);  // preserved, not one-shot
@@ -722,11 +714,11 @@ TEST_CASE("ZWO async - AbortSlew during GOTO setup is not reported as a slew fai
     // open-astro#720: abort while the ":Sr" is in flight. The fence lets that
     // one round trip finish and nothing after it, and nothing at all once
     // AbortSlew has returned.
-    REQUIRE(wait_until([&] { return mount.count(":Sr") > 0; }, 5000));
+    REQUIRE(wait_until([&] { return mount.count(":Sr") > 0; }, 5s));
     REQUIRE_NOTHROW(driver->abort_slew());
     const int setup_at_return = setup_count(mount);
     // Outlast the setup (site sync + delayed ":Sr" + ":Sd" + ":MS").
-    CHECK_FALSE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 500));
+    CHECK_FALSE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 500ms));
     CHECK(mount.count(":MS") == 0);  // the aborted GOTO was never sent
     CHECK(setup_sent_after_return(mount, setup_at_return) == 0);
     CHECK(mount.count(":Sd") == 0);
@@ -749,7 +741,7 @@ TEST_CASE("ZWO async - a MoveAxis during GOTO setup owns the error slot (#575)",
     std::chrono::microseconds elapsed{0};
     REQUIRE_NOTHROW(elapsed = timed([&] { driver->move_axis(0, 1.0); }));
     CHECK(elapsed < kInitiatorBudget);
-    CHECK_FALSE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 500));
+    CHECK_FALSE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 500ms));
     // open-astro#720: the jog fences the pending GOTO, so its ":MS" never
     // lands on top of the jog.
     CHECK(mount.count(":MS") == 0);
@@ -771,7 +763,7 @@ TEST_CASE("ZWO async - Park during GOTO setup cancels the pending GOTO (#720)",
 
     mount.delay_next(":Sr", std::chrono::milliseconds(150));
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return mount.count(":Sr") > 0; }, 5000));
+    REQUIRE(wait_until([&] { return mount.count(":Sr") > 0; }, 5s));
     std::chrono::microseconds elapsed{0};
     REQUIRE_NOTHROW(elapsed = timed([&] { driver->park(); }));
     const int setup_at_return = setup_count(mount);
@@ -856,7 +848,7 @@ TEST_CASE("ZWO async - a cancelled GOTO whose setup then fails leaves no slew bo
     mount.override_reply(":Sr", "0");
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     // Cancel while the ":Sr" is in flight, not at an earlier checkpoint.
-    REQUIRE(wait_until([&] { return mount.count(":Sr") > 0; }, 5000));
+    REQUIRE(wait_until([&] { return mount.count(":Sr") > 0; }, 5s));
     REQUIRE_NOTHROW(driver->move_axis(0, 0.0));
     CHECK_FALSE(goto_sent_within_setup_window(mount));
     rig.await_poll_resumed();
@@ -877,7 +869,7 @@ TEST_CASE("ZWO async - Disconnect during GOTO setup cancels the pending GOTO (#7
 
     mount.delay_next(":Sr", std::chrono::milliseconds(150));
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return mount.count(":Sr") > 0; }, 5000));
+    REQUIRE(wait_until([&] { return mount.count(":Sr") > 0; }, 5s));
     std::chrono::microseconds elapsed{0};
     REQUIRE_NOTHROW(elapsed = timed([&] { driver->set_connected(false); }));
     const int setup_at_return = setup_count(mount);
@@ -902,7 +894,7 @@ TEST_CASE("ZWO async - Disconnect during the GOTO's site/time sync sends no targ
     mount.delay_next(":SMTI", std::chrono::milliseconds(150));
     const int smti_before = mount.count(":SMTI");
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return mount.count(":SMTI") > smti_before; }, 5000));
+    REQUIRE(wait_until([&] { return mount.count(":SMTI") > smti_before; }, 5s));
     std::chrono::microseconds elapsed{0};
     REQUIRE_NOTHROW(elapsed = timed([&] { driver->set_connected(false); }));
     const int setup_at_return = setup_count(mount);
@@ -925,7 +917,7 @@ TEST_CASE("ZWO async - position reports mount feedback after GOTO", "[zwo][teles
     CHECK(std::abs(driver->get_right_ascension() - 12.0) < 1e-6);
     CHECK(std::abs(driver->get_declination() - 45.0) < 1e-6);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(6.0, 22.0));
-    REQUIRE(wait_until([&] { return mount.count(":MS") == 1; }, 5000));
+    REQUIRE(wait_until([&] { return mount.count(":MS") == 1; }, 5s));
     REQUIRE_NOTHROW(driver->command_string(":GVP", false));
     rig.await_poll_resumed();
     rig.tick(std::chrono::milliseconds(5500));
@@ -945,7 +937,7 @@ TEST_CASE("ZWO blocking slew - position reports mount feedback after GOTO", "[zw
 
     mount.set_land_short_by(300.0);  // inside the 600 arcsec landing check (#2408)
     auto slew = std::async(std::launch::async, [&] { driver->slew_to_coordinates(4.0, -12.0); });
-    const bool sent = wait_until([&] { return mount.count(":MS") == 1; }, 5000);
+    const bool sent = wait_until([&] { return mount.count(":MS") == 1; }, 5s);
     CHECK(sent);
     CHECK_NOTHROW(driver->command_string(":GVP", false));
     try {
@@ -994,7 +986,7 @@ TEST_CASE("ZWO async - redundant Connected=true preserves a stored slew failure"
 
     mount.override_reply(":Sr", "0");
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 5000));
+    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 5s));
     CHECK(read_slewing(*driver) == SlewingRead::Threw);
 
     // Platform 7 may resend Connected=true while already connected. That is
@@ -1022,7 +1014,7 @@ TEST_CASE("ZWO async - a PulseGuide keeps a stored slew failure (#2093)", "[zwo]
 
     mount.override_reply(":Sr", "0");
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 5000));
+    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 5s));
     REQUIRE_NOTHROW(driver->pulse_guide(0, 250));
     REQUIRE(mount.wait_for_count(":Mg", 1, std::chrono::seconds(5)));  // the pulse was accepted and sent
     CHECK(read_slewing(*driver) == SlewingRead::Threw);
@@ -1053,7 +1045,7 @@ TEST_CASE("ZWO async - a second GOTO returns while the first body is blocked in 
 
     // The replaced body ends without sending a target or recording a failure; only the second GOTO reaches ":MS".
     REQUIRE(mount.wait_for_count(":MS", 1, std::chrono::seconds(5)));
-    CHECK(wait_until([&] { return read_slewing(*driver) == SlewingRead::True; }, 5000));
+    CHECK(wait_until([&] { return read_slewing(*driver) == SlewingRead::True; }, 5s));
     CHECK(mount.count(":MS") == 1);
     CHECK(read_slewing(*driver) != SlewingRead::Threw);
     driver->set_connected(false);
@@ -1112,7 +1104,7 @@ TEST_CASE("ZWO async - Park or a jog during a held GOTO target write waits one e
         }
     });
     // The fencing command queues behind the exchange in flight and never reaches the mount before it ends.
-    const bool sent_while_held = wait_until(fence_sent, 200);
+    const bool sent_while_held = wait_until(fence_sent, 200ms);
     mount.release();  // before any REQUIRE can unwind, so the future's destructor never waits on the held reply
     const bool returned = fence.wait_for(kInitiatorBudget) == std::future_status::ready;
     fence.wait();
@@ -1203,7 +1195,7 @@ TEST_CASE("ZWO async - a SlewAsync during a fencing initiator's fence-to-command
         if (name == label) latch.block();
     });
     alpacacore::vendor::zwo::set_goto_send_hook_for_testing(*driver, [&](std::string_view name) {
-        if (name == ":MS") static_cast<void>(wait_until([&] { return sent() > 0; }, 2000));
+        if (name == ":MS") static_cast<void>(wait_until([&] { return sent() > 0; }, 2s));
     });
     rig.connect();
 
@@ -1493,7 +1485,7 @@ TEST_CASE("ZWO async - AbortSlew, Park or FindHome during a guide pulse send wai
         if (label == "Park") driver->park();
         if (label == "FindHome") driver->find_home();
     });
-    const bool sent_while_counted = wait_until([&] { return sent() > 0; }, 200);
+    const bool sent_while_counted = wait_until([&] { return sent() > 0; }, 200ms);
     latch.release();  // before any REQUIRE can unwind, so the future's destructor never waits on the latch
     const bool returned = initiator.wait_for(kInitiatorBudget) == std::future_status::ready;
     initiator.wait();
@@ -1600,7 +1592,7 @@ TEST_CASE("ZWO async - AbortSlew during a held GOTO target write resumes the pol
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     REQUIRE(mount.wait_until_held(std::chrono::seconds(5)));
     auto abort = std::async(std::launch::async, [&] { driver->abort_slew(); });
-    static_cast<void>(wait_until([&] { return mount.count(":Q") > 0; }, 200));
+    static_cast<void>(wait_until([&] { return mount.count(":Q") > 0; }, 200ms));
     mount.release();
     const bool returned = abort.wait_for(kInitiatorBudget) == std::future_status::ready;
     abort.wait();
@@ -1629,11 +1621,11 @@ TEST_CASE("ZWO async - a GOTO fenced while its :MS is answered e3 sends no stop 
     mount.reject_goto("e3", 1);
     mount.delay_next(":MS", std::chrono::milliseconds(150));
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return mount.count(":MS") > 0; }, 5000));
+    REQUIRE(wait_until([&] { return mount.count(":MS") > 0; }, 5s));
     std::chrono::microseconds elapsed{0};
     REQUIRE_NOTHROW(elapsed = timed([&] { driver->move_axis(0, 1.0); }));
     CHECK(elapsed < kInitiatorBudget);
-    CHECK_FALSE(wait_until([&] { return mount.count(":Q") > 0; }, 500));
+    CHECK_FALSE(wait_until([&] { return mount.count(":Q") > 0; }, 500ms));
     CHECK(mount.count(":MS") == 1);
     CHECK(jog_count(mount) == 1);
     REQUIRE_NOTHROW(driver->move_axis(0, 0.0));
@@ -1765,7 +1757,7 @@ namespace {
 void start_held_goto(Rig& rig) {
     rig.mount.hold_running(true);
     REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 22.0));
-    REQUIRE(wait_until([&] { return rig.mount.count(":MS") == 1; }, 5000));
+    REQUIRE(wait_until([&] { return rig.mount.count(":MS") == 1; }, 5s));
     REQUIRE_NOTHROW(rig.driver->command_string(":GVP", false));
     rig.await_poll_resumed();
 }
@@ -1784,9 +1776,9 @@ TEST_CASE("ZWO goto-safety - an N/A reply to :MS is not acceptance: the mount is
     rig.connect();
     rig.mount.override_reply(":MS", "N/A", 1);
     REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 22.0));
-    REQUIRE(wait_until([&] { return count_exact(rig.mount, ":Q") == 1; }, 5000));
+    REQUIRE(wait_until([&] { return count_exact(rig.mount, ":Q") == 1; }, 5s));
     std::string message;
-    REQUIRE(wait_until([&] { return read_slewing(*rig.driver, &message) == SlewingRead::Threw; }, 5000));
+    REQUIRE(wait_until([&] { return read_slewing(*rig.driver, &message) == SlewingRead::Threw; }, 5s));
     CHECK(message.find("GOTO not confirmed") != std::string::npos);
     CHECK(rig.mount.count(":MS") == 1);  // never sent again
 }
@@ -1797,9 +1789,9 @@ TEST_CASE("ZWO goto-safety - :MS with no reply is not acceptance: the mount is s
     rig.connect();
     rig.mount.go_silent(":MS", 1);
     REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 22.0));
-    REQUIRE(wait_until([&] { return count_exact(rig.mount, ":Q") == 1; }, 5000));
+    REQUIRE(wait_until([&] { return count_exact(rig.mount, ":Q") == 1; }, 5s));
     std::string message;
-    REQUIRE(wait_until([&] { return read_slewing(*rig.driver, &message) == SlewingRead::Threw; }, 5000));
+    REQUIRE(wait_until([&] { return read_slewing(*rig.driver, &message) == SlewingRead::Threw; }, 5s));
     CHECK(message.find("GOTO not confirmed") != std::string::npos);
     CHECK(rig.mount.count(":MS") == 1);
 }
@@ -1812,7 +1804,7 @@ TEST_CASE("ZWO goto-safety - a target write with no reply fails the GOTO before 
     rig.mount.go_silent(silent, 1);
     REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 22.0));
     std::string message;
-    REQUIRE(wait_until([&] { return read_slewing(*rig.driver, &message) == SlewingRead::Threw; }, 5000));
+    REQUIRE(wait_until([&] { return read_slewing(*rig.driver, &message) == SlewingRead::Threw; }, 5s));
     CHECK(message.find("did not confirm target") != std::string::npos);
     CHECK(rig.mount.count(":MS") == 0);
 }
@@ -1827,7 +1819,7 @@ TEST_CASE("ZWO goto-safety - an e5 refusal is an error and the GOTO is not sent 
     const int q_before = count_exact(rig.mount, ":Q");
     REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 22.0));
     std::string message;
-    REQUIRE(wait_until([&] { return read_slewing(*rig.driver, &message) == SlewingRead::Threw; }, 5000));
+    REQUIRE(wait_until([&] { return read_slewing(*rig.driver, &message) == SlewingRead::Threw; }, 5s));
     CHECK(message.find(refusal) != std::string::npos);
     CHECK(rig.mount.count(":MS") == 1);
     CHECK(count_exact(rig.mount, ":Q") == q_before);  // a refused GOTO started nothing to stop
@@ -1843,7 +1835,7 @@ TEST_CASE("ZWO goto-safety - an async GOTO still running at the slew bound is st
     CHECK(read_slewing(*rig.driver) == SlewingRead::True);
     // The poll's own 250 ms step, so the stop is verified (two still reads 500 ms apart) inside its first round.
     run_polls(rig, std::chrono::seconds(8), std::chrono::milliseconds(250));
-    REQUIRE(wait_until([&] { return count_exact(rig.mount, ":Q") == 1; }, 5000));
+    REQUIRE(wait_until([&] { return count_exact(rig.mount, ":Q") == 1; }, 5s));
     std::string message;
     CHECK(read_slewing(*rig.driver, &message) == SlewingRead::Threw);
     CHECK(message.find("did not end within 15 min") != std::string::npos);
@@ -1855,7 +1847,7 @@ TEST_CASE("ZWO goto-safety - a GOTO that comes to rest far from its target fails
     rig.connect();
     rig.mount.set_land_short_by(3600.0);  // 1 degree short in Dec
     REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 22.0));
-    REQUIRE(wait_until([&] { return rig.mount.count(":MS") == 1; }, 5000));
+    REQUIRE(wait_until([&] { return rig.mount.count(":MS") == 1; }, 5s));
     REQUIRE_NOTHROW(rig.driver->command_string(":GVP", false));
     rig.await_poll_resumed();
     rig.tick(std::chrono::milliseconds(5500));
@@ -1878,7 +1870,7 @@ TEST_CASE("ZWO goto-safety - a MoveAxis that is not renewed is stopped after 60 
     CHECK(read_slewing(*rig.driver) == SlewingRead::True);
     // The cap's verified stop reads once per 250 ms round (#2651), so its 60 s is crossed in the poll's own steps.
     run_polls(rig, std::chrono::seconds(8), std::chrono::milliseconds(250));
-    REQUIRE(wait_until([&] { return rig.mount.count(":Qe") == 1 && rig.mount.count(":Qw") == 1; }, 5000));
+    REQUIRE(wait_until([&] { return rig.mount.count(":Qe") == 1 && rig.mount.count(":Qw") == 1; }, 5s));
     std::string message;
     CHECK(read_slewing(*rig.driver, &message) == SlewingRead::Threw);
     CHECK(message.find("ran 60 s with no new MoveAxis") != std::string::npos);
@@ -1924,7 +1916,7 @@ TEST_CASE("ZWO goto-safety - the MoveAxis dead-man sends :Q only when the other 
     const int q_before = count_exact(rig.mount, ":Q");
     run_polls(rig, std::chrono::seconds(16));
     run_polls(rig, std::chrono::seconds(8), std::chrono::milliseconds(250));  // the cap at 60 s and its verified stop
-    REQUIRE(wait_until([&] { return rig.mount.count(":Qe") == 1; }, 5000));
+    REQUIRE(wait_until([&] { return rig.mount.count(":Qe") == 1; }, 5s));
     if (both) {
         CHECK(count_exact(rig.mount, ":Q") == q_before);  // ":Q" would also stop the jog on axis 1
         CHECK(rig.mount.count(":Qn") == 0);
@@ -2076,7 +2068,7 @@ TEST_CASE("ZWO goto-safety - a MoveAxis on the other axis that lands as the cap 
     alpacacore::vendor::zwo::set_initiator_hook_for_testing(*rig.driver, [&](std::string_view name) {
         if (name == hold_at && hold.exchange(false)) {
             held.store(true);
-            static_cast<void>(wait_until([&] { return cap_counted.load(); }, 10000));
+            static_cast<void>(wait_until([&] { return cap_counted.load(); }, 10s));
         }
     });
     alpacacore::vendor::zwo::set_goto_send_hook_for_testing(*rig.driver, [&](std::string_view label) {
@@ -2085,7 +2077,7 @@ TEST_CASE("ZWO goto-safety - a MoveAxis on the other axis that lands as the cap 
         // times out. Ungated, or waiting only in fence_goto(), its ":Mn" is on the wire before this call's ":Q".
         // Waiting for the claim instead would let the cap's stops race ":Rv" and ":Mn" for the exchange lock, and
         // usually win.
-        static_cast<void>(wait_until([&] { return rig.mount.count(":Mn") > 0; }, 500));
+        static_cast<void>(wait_until([&] { return rig.mount.count(":Mn") > 0; }, 500ms));
     });
     rig.connect();
     REQUIRE_NOTHROW(
@@ -2096,12 +2088,12 @@ TEST_CASE("ZWO goto-safety - a MoveAxis on the other axis that lands as the cap 
     const bool held_jog = landing != Landing::WhileSending;
     hold.store(held_jog);
     std::jthread jog([&] {
-        if (!held_jog) static_cast<void>(wait_until([&] { return cap_counted.load(); }, 10000));
+        if (!held_jog) static_cast<void>(wait_until([&] { return cap_counted.load(); }, 10s));
         rig.driver->move_axis(1, 1.0);
     });
-    if (held_jog) REQUIRE(wait_until([&] { return held.load(); }, 5000));
+    if (held_jog) REQUIRE(wait_until([&] { return held.load(); }, 5s));
     run_polls(rig, std::chrono::seconds(8), std::chrono::milliseconds(250));
-    REQUIRE(wait_until([&] { return cap_counted.load() && rig.mount.count(":Mn") > 0; }, 5000));
+    REQUIRE(wait_until([&] { return cap_counted.load() && rig.mount.count(":Mn") > 0; }, 5s));
     jog.join();
     const auto all = rig.mount.commands();
     const auto mn = std::find(all.begin() + from, all.end(), std::string(":Mn"));
@@ -2128,7 +2120,7 @@ TEST_CASE("ZWO goto-safety - site and time writes are accepted again once a GOTO
         REQUIRE_NOTHROW(rig.driver->find_home());
     } else {
         REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 22.0));
-        REQUIRE(wait_until([&] { return rig.mount.count(":MS") == 1; }, 5000));
+        REQUIRE(wait_until([&] { return rig.mount.count(":MS") == 1; }, 5s));
         REQUIRE_NOTHROW(rig.driver->command_string(":GVP", false));
         rig.await_poll_resumed();
     }
@@ -2226,7 +2218,7 @@ TEST_CASE("ZWO goto-safety - the slew bound's :Q is checked and sent again while
     CAPTURE(ignored);
     rig.mount.ignore_stops(ignored);
     run_polls(rig, std::chrono::minutes(15) + std::chrono::seconds(4));
-    REQUIRE(wait_until([&] { return count_exact(rig.mount, ":Q") >= 1; }, 5000));
+    REQUIRE(wait_until([&] { return count_exact(rig.mount, ":Q") >= 1; }, 5s));
     // The poll's own 250 ms step: the shared verifier needs two still reads 500 ms apart within a 1 s round.
     run_polls(rig, std::chrono::seconds(4), std::chrono::milliseconds(250));
     std::string message;
@@ -2280,7 +2272,7 @@ TEST_CASE("ZWO goto-safety - an e3 (busy) refusal is an error: no stop and the G
     const int q_before = count_exact(rig.mount, ":Q");
     REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 22.0));
     std::string message;
-    REQUIRE(wait_until([&] { return read_slewing(*rig.driver, &message) == SlewingRead::Threw; }, 5000));
+    REQUIRE(wait_until([&] { return read_slewing(*rig.driver, &message) == SlewingRead::Threw; }, 5s));
     CHECK(message.find("e3") != std::string::npos);
     CHECK(rig.mount.count(":MS") == 1);
     CHECK(count_exact(rig.mount, ":Q") == q_before);
@@ -2357,7 +2349,7 @@ TEST_CASE("ZWO goto-safety - a redundant Connected=true keeps a running jog or P
         run_polls(rig, std::chrono::seconds(46));  // 56 s after the MoveAxis
         CHECK(rig.mount.count(":Qe") == 0);
         run_polls(rig, std::chrono::seconds(8), std::chrono::milliseconds(250));  // the cap's verified stop (#2651)
-        REQUIRE(wait_until([&] { return rig.mount.count(":Qe") == 1 && rig.mount.count(":Qw") == 1; }, 5000));
+        REQUIRE(wait_until([&] { return rig.mount.count(":Qe") == 1 && rig.mount.count(":Qw") == 1; }, 5s));
         CHECK_FALSE(rig.mount.jogging());
         std::string message;
         CHECK(read_slewing(*rig.driver, &message) == SlewingRead::Threw);
@@ -2412,7 +2404,7 @@ TEST_CASE(
     if (site_on_wire) REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 22.0));
     REQUIRE_NOTHROW(refresh.get());
     REQUIRE(site_on_wire);
-    REQUIRE(wait_until([&] { return mark.load() != 0; }, 5000));
+    REQUIRE(wait_until([&] { return mark.load() != 0; }, 5s));
     REQUIRE(rig.mount.wait_for_count(":MS", 1, std::chrono::seconds(5)));
     const auto all = rig.mount.commands();
     int sites = 0;

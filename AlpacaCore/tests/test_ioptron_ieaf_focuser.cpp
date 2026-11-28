@@ -357,16 +357,7 @@ namespace {
 using alpacacore::test::ReplugPort;
 using std::chrono::milliseconds;
 
-// Real time: these waits are for the fake's reader thread to see a command on the wire.
-template <typename Pred>
-bool wait_until(Pred pred, milliseconds limit) {
-    const auto deadline = std::chrono::steady_clock::now() + limit;
-    while (!pred()) {
-        if (std::chrono::steady_clock::now() >= deadline) return false;
-        std::this_thread::sleep_for(milliseconds(2));
-    }
-    return true;
-}
+using alpacacore::test::wait_until;
 
 constexpr int kNotConnected = static_cast<int>(alpacacore::AlpacaError::NotConnected);
 

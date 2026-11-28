@@ -62,6 +62,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_skywatcher_mount.h"
 #include "fake_skywatcher_serial_board.h"
 #include "fake_task_clock.h"
@@ -98,16 +99,8 @@ sw::ConnectionInfo endpoint(FakeSkyWatcherSerialBoard& board) {
     return info;
 }
 
-bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (pred()) {
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    return pred();
-}
+using alpacacore::test::wait_until;
+using namespace std::chrono_literals;
 
 double wrap_ha(double hours) {
     double h = std::fmod(hours, 24.0);
@@ -566,7 +559,7 @@ TEST_CASE("SkyWatcher pointing - tracking holds the physical hour angle in both 
         driver->set_connected(true);
         mount.jump_axis_degrees(2, 45.0);  // off the pole, where hour angle means something
         driver->set_tracking(true);
-        REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+        REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3s));
 
         const double lst0 = driver->get_sidereal_time();
         const double a1_0 = mount.physical_degrees(1);
@@ -619,7 +612,7 @@ TEST_CASE("SkyWatcher pointing - an East guide pulse with Tracking off runs the 
     const double a1_before = mount.physical_degrees(1);
     driver->pulse_guide(2, 1500);  // East, 1.5 s, no tracking to fold it into
     REQUIRE(driver->get_is_pulse_guiding());
-    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 8000));
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 8s));
     const double moved = mount.physical_degrees(1) - a1_before;
 
     INFO("south, Tracking off, East pulse: axis 1 moved " << moved << " deg");
@@ -646,13 +639,13 @@ TEST_CASE("SkyWatcher pointing - a southern East guide pulse stays on the in-pla
     driver->set_connected(true);
     mount.jump_axis_degrees(2, 45.0);
     driver->set_tracking(true);
-    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3s));
     std::this_thread::sleep_for(std::chrono::milliseconds(500));  // past the ramp
     const int stops_before = mount.stop_count(1);
 
     driver->pulse_guide(2, 1200);  // East, at the 0.5x default guide rate
     REQUIRE(driver->get_is_pulse_guiding());
-    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 8000));
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 8s));
 
     INFO("south, tracking, East pulse: RA stops " << stops_before << " -> " << mount.stop_count(1));
     CHECK(mount.stop_count(1) == stops_before);
@@ -673,7 +666,7 @@ TEST_CASE("SkyWatcher pointing - an East guide pulse slows the axis in the track
     driver->set_connected(true);
     mount.jump_axis_degrees(2, 45.0);
     driver->set_tracking(true);
-    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3s));
     std::this_thread::sleep_for(std::chrono::milliseconds(500));  // past the ramp
 
     const double sidereal_deg_per_sec = 360.0 / 86164.0905;
@@ -682,7 +675,7 @@ TEST_CASE("SkyWatcher pointing - an East guide pulse slows the axis in the track
     const auto t0 = std::chrono::steady_clock::now();
     driver->pulse_guide(2, 2000);  // East, 2 s at the 0.5x default guide rate
     REQUIRE(driver->get_is_pulse_guiding());
-    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 10000));
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 10s));
     const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     const double moved = mount.physical_degrees(1) - a1_before;
     const double ra_after = driver->get_right_ascension();

@@ -322,13 +322,7 @@ namespace {
 
 using namespace std::chrono_literals;
 
-// Spins (real time, bounded) until `cond` holds; the driver's own threads
-// make progress in the meantime. Virtual time never moves here.
-template <typename Cond>
-bool spin_until(Cond cond) {
-    for (int i = 0; i < 5000 && !cond(); ++i) std::this_thread::sleep_for(1ms);
-    return cond();
-}
+using alpacacore::test::wait_until;
 
 alpacacore::test::FakeToupTekSDK make_fake_camera(bool pulse_guide = false) {
     alpacacore::test::FakeToupTekSDK fake;
@@ -349,14 +343,14 @@ TEST_CASE("ToupTek Camera Driver - thermal poll waits on the task clock", "[toup
 
     // The first tick primes the cache at once, then the poller waits out the
     // interval on the clock.
-    REQUIRE(spin_until([&] { return fake.call_count("get_temperature_deciC") >= 1; }));
+    REQUIRE(wait_until([&] { return fake.call_count("get_temperature_deciC") >= 1; }));
     REQUIRE(clock.wait_for_wait_count(1, 5s));
     const int primed = fake.call_count("get_temperature_deciC");
 
     clock.advance(999ms);
     CHECK(fake.call_count("get_temperature_deciC") == primed);
     clock.advance(1ms);
-    CHECK(spin_until([&] { return fake.call_count("get_temperature_deciC") > primed; }));
+    CHECK(wait_until([&] { return fake.call_count("get_temperature_deciC") > primed; }));
     driver->set_connected(false);
 }
 
@@ -366,7 +360,7 @@ TEST_CASE("ToupTek Camera Driver - thermal cache ages on the task clock", "[toup
     fake.deliver_frame = false;
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake, clock);
     driver->set_connected(true);
-    REQUIRE(spin_until([&] { return fake.call_count("get_temperature_deciC") >= 1; }));
+    REQUIRE(wait_until([&] { return fake.call_count("get_temperature_deciC") >= 1; }));
     REQUIRE(clock.wait_for_wait_count(1, 5s));
 
     // The poller skips its reads while a frame integrates, so the cache ages.
@@ -401,7 +395,7 @@ TEST_CASE("ToupTek Camera Driver - TEC cache ages on the task clock", "[touptek]
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake, clock);
     driver->set_connected(true);
     REQUIRE(driver->get_can_get_cooler_power());
-    REQUIRE(spin_until([&] { return fake.call_count("get_tec_voltage_deciV") >= 1; }));
+    REQUIRE(wait_until([&] { return fake.call_count("get_tec_voltage_deciV") >= 1; }));
     REQUIRE(clock.wait_for_wait_count(1, 5s));
 
     // The poller skips its reads while a frame integrates, so the cache ages.
@@ -482,7 +476,7 @@ TEST_CASE("ToupTek Camera Driver - pulse guide timer waits on the task clock", "
     clock.advance(499ms);
     CHECK(driver->get_is_pulse_guiding());
     clock.advance(1ms);
-    CHECK(spin_until([&] { return !driver->get_is_pulse_guiding(); }));
+    CHECK(wait_until([&] { return !driver->get_is_pulse_guiding(); }));
     driver->set_connected(false);
 }
 
@@ -545,7 +539,7 @@ TEST_CASE("ToupTek Camera Driver - a superseded pulse timer leaves the new pulse
     REQUIRE(clock.wait_for_woken_settled(5s));
     CHECK(driver->get_is_pulse_guiding());
     clock.advance(1ms);
-    CHECK(spin_until([&] { return !driver->get_is_pulse_guiding(); }));
+    CHECK(wait_until([&] { return !driver->get_is_pulse_guiding(); }));
     driver->set_connected(false);
 }
 
@@ -578,7 +572,7 @@ TEST_CASE("ToupTek Camera Driver - the thermal poll stops on disconnect and rest
     auto fake = make_fake_camera();
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake, clock);
     driver->set_connected(true);
-    REQUIRE(spin_until([&] { return fake.call_count("get_temperature_deciC") >= 1; }));
+    REQUIRE(wait_until([&] { return fake.call_count("get_temperature_deciC") >= 1; }));
     REQUIRE(clock.wait_for_wait_count(1, 5s));
 
     driver->set_connected(false);
@@ -588,11 +582,11 @@ TEST_CASE("ToupTek Camera Driver - the thermal poll stops on disconnect and rest
     CHECK(fake.call_count("get_temperature_deciC") == after_disconnect);
 
     driver->set_connected(true);
-    REQUIRE(spin_until([&] { return fake.call_count("get_temperature_deciC") > after_disconnect; }));
+    REQUIRE(wait_until([&] { return fake.call_count("get_temperature_deciC") > after_disconnect; }));
     const int primed = fake.call_count("get_temperature_deciC");
     REQUIRE(clock.wait_for_wait_count(2, 5s));  // the restarted poller waits out its interval
     clock.advance(1000ms);
-    CHECK(spin_until([&] { return fake.call_count("get_temperature_deciC") > primed; }));
+    CHECK(wait_until([&] { return fake.call_count("get_temperature_deciC") > primed; }));
     driver->set_connected(false);
 }
 
@@ -875,7 +869,7 @@ TEST_CASE("ToupTek Camera Driver - The FakeToupTekSDK frame follows the exposure
     driver->start_exposure(0.6, true);
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
     CHECK_FALSE(driver->get_image_ready());
-    REQUIRE(spin_until([&] { return driver->get_image_ready(); }));
+    REQUIRE(wait_until([&] { return driver->get_image_ready(); }));
     CHECK(std::chrono::steady_clock::now() - started >= 550ms);
 
     // ConformU's abort-then-expose: the abort's stop() ends the 1 s timer, so the 2 s exposure is still running
@@ -883,7 +877,7 @@ TEST_CASE("ToupTek Camera Driver - The FakeToupTekSDK frame follows the exposure
     const int triggers = fake.call_count("trigger");
     const auto aborted_start = std::chrono::steady_clock::now();
     driver->start_exposure(1.0, true);
-    REQUIRE(spin_until([&] { return fake.call_count("trigger") == triggers + 1; }));
+    REQUIRE(wait_until([&] { return fake.call_count("trigger") == triggers + 1; }));
     driver->abort_exposure();
     REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
     driver->start_exposure(2.0, true);
@@ -975,7 +969,7 @@ TEST_CASE("ToupTek Camera Driver - a failed exposure is kept until the next Star
     driver->set_connected(true);
     driver->start_exposure(0.01, true);
     const int driver_error = alpacacore::AlpacaError::DriverException;
-    REQUIRE(spin_until([&] { return error_code_of([&] { (void)driver->get_image_ready(); }) == driver_error; }));
+    REQUIRE(wait_until([&] { return error_code_of([&] { (void)driver->get_image_ready(); }) == driver_error; }));
 
     for (int poll = 0; poll < 3; ++poll) {
         CHECK(error_code_of([&] { (void)driver->get_image_ready(); }) == driver_error);
@@ -1017,7 +1011,7 @@ TEST_CASE("ToupTek Camera Driver - AbortExposure during an exposure wakes the SD
     // The body is gone, so the fake may change; the next exposure restarts the stopped stream.
     fake.deliver_frame = true;
     driver->start_exposure(0.01, true);
-    CHECK(spin_until([&] { return frame_ready(*driver); }));
+    CHECK(wait_until([&] { return frame_ready(*driver); }));
     CHECK(fake.call_count("start_pull_mode") == 2);
     driver->set_connected(false);
 }
@@ -1041,7 +1035,7 @@ TEST_CASE("ToupTek Camera Driver - the exposure body waits on the task clock for
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
 
     fake.release_wait_image();  // the camera raises the frame event
-    REQUIRE(spin_until([&] { return frame_ready(*driver); }));
+    REQUIRE(wait_until([&] { return frame_ready(*driver); }));
     CHECK(fake.call_count("pull_image") == 1);
     driver->set_connected(false);
 }
@@ -1103,7 +1097,7 @@ TEST_CASE("ToupTek Camera Driver - a disconnect during an exposure stops the SDK
           alpacacore::AlpacaError::InvalidOperation);
     fake.deliver_frame = true;
     driver->start_exposure(0.01, true);
-    CHECK(spin_until([&] { return frame_ready(*driver); }));
+    CHECK(wait_until([&] { return frame_ready(*driver); }));
     driver->set_connected(false);
 }
 
@@ -1126,7 +1120,7 @@ TEST_CASE("ToupTek Camera Driver - a StartExposure during an exposure is refused
     CHECK(fake.call_count("trigger") == 1);
 
     fake.release_wait_image();
-    REQUIRE(spin_until([&] { return frame_ready(*driver); }));
+    REQUIRE(wait_until([&] { return frame_ready(*driver); }));
     CHECK(driver->get_last_exposure_duration() == 5.0);
     driver->set_connected(false);
 }
@@ -1146,7 +1140,7 @@ TEST_CASE("ToupTek Camera Driver - an exposure body that fails stops the stream 
     driver->set_connected(true);
     const int stops = fake.call_count("stop");
     driver->start_exposure(0.01, true);
-    REQUIRE(spin_until([&] {
+    REQUIRE(wait_until([&] {
         return error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException;
     }));
     CHECK(fake.call_count("stop") == stops + 1);
@@ -1154,7 +1148,7 @@ TEST_CASE("ToupTek Camera Driver - an exposure body that fails stops the stream 
     fail_wait = false;
     fake.deliver_frame = true;
     driver->start_exposure(0.01, true);
-    CHECK(spin_until([&] { return frame_ready(*driver); }));
+    CHECK(wait_until([&] { return frame_ready(*driver); }));
     CHECK(fake.call_count("start_pull_mode") == 2);  // the stopped stream was restarted
     driver->set_connected(false);
 }
@@ -1178,7 +1172,7 @@ TEST_CASE("ToupTek Camera Driver - a StartExposure wakes a body the watchdog lef
     const auto t0 = std::chrono::steady_clock::now();
     CHECK(error_code_of([&] { driver->start_exposure(0.01, true); }) == 0);
     CHECK(std::chrono::steady_clock::now() - t0 < 1s);
-    CHECK(spin_until([&] { return frame_ready(*driver); }));
+    CHECK(wait_until([&] { return frame_ready(*driver); }));
     CHECK(driver->get_last_exposure_duration() == 0.01);
     driver->set_connected(false);
 }
@@ -1289,7 +1283,7 @@ TEST_CASE("ToupTek Camera Driver - an AbortExposure during a StartExposure still
     watch_stop = true;
     std::atomic<int> start_error{-1};
     std::thread starter([&] { start_error = worker_code_of([&] { driver->start_exposure(0.5, true); }); });
-    REQUIRE(spin_until([&] { return start_in_window.load(); }));
+    REQUIRE(wait_until([&] { return start_in_window.load(); }));
     // Runs while the start holds its session reservation, before session_.start() publishes Exposing.
     CHECK(error_code_of([&] { driver->abort_exposure(); }) == 0);
 
@@ -1301,7 +1295,7 @@ TEST_CASE("ToupTek Camera Driver - an AbortExposure during a StartExposure still
     starter.join();
     CHECK(start_error.load() == 0);
     // The recorded abort was applied as the start published (decision 0020 rule 9): no body ran, no frame.
-    CHECK(spin_until([&] { return driver->get_camera_state() == alpacacore::CameraState::Idle; }));
+    CHECK(wait_until([&] { return driver->get_camera_state() == alpacacore::CameraState::Idle; }));
     std::this_thread::sleep_for(200ms);  // room for an exposure the abort missed to publish its frame
     CHECK_FALSE(frame_ready(*driver));
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);

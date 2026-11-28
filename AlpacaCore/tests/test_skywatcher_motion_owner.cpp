@@ -27,6 +27,7 @@
 #include <thread>
 
 #include "catch2_compat.h"
+#include "driver_rig.h"
 #include "fake_skywatcher_mount.h"
 #include "fake_task_clock.h"
 
@@ -52,16 +53,8 @@ std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(const FakeSkyWatch
     return driver;
 }
 
-bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (pred()) {
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    return pred();
-}
+using alpacacore::test::wait_until;
+using namespace std::chrono_literals;
 
 // One step of virtual time once a driver thread besides the poller is parked on the clock.
 bool step_clock(FakeTaskClock& clock) {
@@ -81,7 +74,7 @@ bool run_clock_until(FakeTaskClock& clock, const std::function<bool()>& pred, st
             return pred();
         }
     }
-    return wait_until(pred, 200);
+    return wait_until(pred, 200ms);
 }
 
 struct SinkGuard {

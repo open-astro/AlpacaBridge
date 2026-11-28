@@ -48,6 +48,7 @@ using Clock = std::chrono::steady_clock;
 using alpacacore::test::FakeSynScanHandset;
 using alpacacore::test::SynScanGotoLanding;
 using alpacacore::test::wait_until;
+using namespace std::chrono_literals;
 
 // This file's handset: a GOTO lands on its aim, and the mount starts at RA 0, Dec 0.
 std::shared_ptr<FakeSynScanHandset> make_handset(
@@ -138,7 +139,7 @@ TEST_CASE("SynScan - get_connected() answers at once while a connect is in fligh
         alpacacore::vendor::synscan::create_synscan_telescope(0, info, alpacacore::vendor::synscan::SynScanVersion::V4);
 
     driver->connect();
-    REQUIRE(wait_until([&] { return driver->get_connecting(); }, 1000));
+    REQUIRE(wait_until([&] { return driver->get_connecting(); }, 1s));
     // Past the port open and the echo, inside the stalled firmware query:
     // the connect task is in the handshake for the next few hundred milliseconds; it holds transition_mutex_ and
     // never mutex_ across an exchange.
@@ -175,7 +176,7 @@ TEST_CASE("SynScan - a silent handset fails the connect instead of reporting a p
 
     const auto t0 = Clock::now();
     driver->connect();
-    REQUIRE(wait_until([&] { return !driver->get_connecting(); }, 5000));
+    REQUIRE(wait_until([&] { return !driver->get_connecting(); }, 5s));
     const auto connect_ms = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count();
     CHECK_FALSE(driver->get_connected());
     CHECK(connect_ms < 1000);     // one echo timeout, not five swallowed query timeouts
@@ -279,7 +280,7 @@ TEST_CASE("SynScan - a persistently garbled echo fails the connect rather than p
 
     const auto t0 = Clock::now();
     driver->connect();
-    REQUIRE(wait_until([&] { return !driver->get_connecting(); }, 5000));
+    REQUIRE(wait_until([&] { return !driver->get_connecting(); }, 5s));
     const auto connect_ms = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count();
     CHECK_FALSE(driver->get_connected());
     CHECK(connect_ms < 1000);     // two quick mismatched replies, not five swallowed query timeouts
@@ -333,7 +334,7 @@ TEST_CASE("SynScan async - Park returns immediately, AtPark flips when the slew 
     CHECK(park_ms < 1000);           // ConformU 4.5 STANDARD target for an async initiator
     REQUIRE(driver->get_slewing());  // parking reports Slewing until AtPark
     REQUIRE_FALSE(driver->get_at_park());
-    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));  // the GOTO was dispatched
+    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5s));  // the GOTO was dispatched
     // Park while a park is in flight is a no-op: the running slew is neither
     // cancelled nor restarted (still exactly one GOTO on the wire).
     driver->park();
@@ -366,7 +367,7 @@ TEST_CASE("SynScan async - Park survives dropped status replies below the thresh
         std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     driver->park();
-    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5s));
     st->drop_slew_status.store(2);
     REQUIRE(advance_until(clock, [&] { return driver->get_at_park(); }));
     CHECK(st->drop_slew_status.load() == 0);  // both drops were consumed by Park polls
@@ -383,7 +384,7 @@ TEST_CASE("SynScan async - Park failure count resets on a good status reply", "[
         std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     driver->park();
-    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5s));
     st->goto_never_ends.store(true);
     st->drop_slew_status.store(2);
     REQUIRE(advance_until(clock, [&] { return st->drop_slew_status.load() == 0; }));
@@ -411,7 +412,7 @@ TEST_CASE("SynScan async - a new Park starts its failure count at zero", "[synsc
         std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     driver->park();
-    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5s));
     st->drop_slew_status.store(1000);
     bool park_failed = false;
     REQUIRE(advance_until(clock, [&] {
@@ -429,7 +430,7 @@ TEST_CASE("SynScan async - a new Park starts its failure count at zero", "[synsc
     st->goto_seen.store(false);
     // The second Park meets one dropped reply; a count left at three would fail it at once.
     driver->park();
-    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5s));
     st->drop_slew_status.store(1);
     // The first Park's fault stays latched until a poll is answered, and AtPark refuses meanwhile.
     REQUIRE(advance_until(clock, [&] {
@@ -455,7 +456,7 @@ TEST_CASE("SynScan async - Park fails after three consecutive dropped status rep
     // drops too.
     alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
     driver->park();
-    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5s));
     // Exactly three: the stop after the failure is verified (#2412), and its reads must answer.
     st->drop_slew_status.store(3);
     // The failed Park surfaces on the next Slewing read as its stored error.
@@ -492,7 +493,7 @@ TEST_CASE("SynScan SetPark - parked hour angle follows sidereal-time shifts", "[
     st->set_position("40000000,00000000#");  // six hours later, the same mount position reads RA=6h
     driver->set_site_longitude(90.0);        // longitude +90 degrees has the same six-hour LST effect
     driver->park();
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
 
     const auto gotos = st->goto_snapshot();
     REQUIRE(gotos.size() == 1);
@@ -516,7 +517,7 @@ TEST_CASE("SynScan SetPark - Alt-Az mount retains azimuth and altitude", "[synsc
     driver->set_park();
     st->set_position("00000000,00000000#");
     driver->park();
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
 
     const auto gotos = st->goto_snapshot();
     REQUIRE(gotos.size() == 1);
@@ -543,7 +544,7 @@ TEST_CASE("SynScan SetPark - AZ-EQ park follows the configured alignment mode (#
         driver->set_park();
         st->set_position("00000000,00000000#");
         driver->park();
-        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
 
         const auto gotos = st->goto_snapshot();
         REQUIRE(gotos.size() == 1);
@@ -572,7 +573,7 @@ TEST_CASE("SynScan SetPark - AZ-EQ park follows the configured alignment mode (#
         st->set_position("40000000,00000000#");  // six hours later, the same mount position reads RA=6h
         driver->set_site_longitude(90.0);        // longitude +90 degrees has the same six-hour LST effect
         driver->park();
-        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
 
         const auto gotos = st->goto_snapshot();
         REQUIRE(gotos.size() == 1);
@@ -599,7 +600,7 @@ TEST_CASE("SynScan ambiguous or unknown mount - Park keeps the RA/Dec fallback",
                 CHECK_NOTHROW(driver->set_park());
             }
             CHECK_NOTHROW(driver->park());
-            REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+            REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
             driver->set_connected(false);
         }
     }
@@ -620,7 +621,7 @@ TEST_CASE("SynScan equatorial mount without a site - Park keeps the RA/Dec fallb
             CHECK_NOTHROW(driver->set_park());
         }
         CHECK_NOTHROW(driver->park());
-        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
         driver->set_connected(false);
     }
 }
@@ -642,7 +643,7 @@ TEST_CASE("SynScan hour-angle park after a reconnect without a site - Park uses 
     st->no_location.store(true);  // the reconnected handset reports no site
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     CHECK_NOTHROW(driver->park());
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
 
     // Same mechanical position at +90 degrees longitude reads RA=6h, plus the
     // sidereal time the reconnect took (an RA/Dec fallback would read 0h).
@@ -667,7 +668,7 @@ TEST_CASE("SynScan async - Unpark during a park cancels it", "[synscan][telescop
     REQUIRE(driver->get_slewing());
     alpacacore::test::call_stepping(clock, [&] { driver->unpark(); });  // its park stop is verified (#2412)
     REQUIRE_FALSE(driver->get_at_park());
-    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5s));
     // The cancelled park task must never flip AtPark afterwards.
     // Virtual time well past the GOTO and the start grace.
     CHECK_FALSE(advance_until(clock, [&] { return driver->get_at_park(); }, std::chrono::milliseconds(250), 12));
@@ -692,7 +693,7 @@ TEST_CASE("SynScan async - Unpark during a park cancels it", "[synscan][telescop
     // ...but AbortSlew may cancel it (its stop verified on the task clock, #2412)
     alpacacore::test::call_stepping(clock, [&] { driver->abort_slew(); });
     REQUIRE_FALSE(driver->get_at_park());
-    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5s));
 
     // Disconnect with a park in flight joins the task cleanly.
     driver->park();
@@ -720,7 +721,7 @@ TEST_CASE("SynScan async - Unpark over a lost link reports the stop and Slewing 
 
     driver->park();
     REQUIRE(driver->get_slewing());
-    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));  // the park slew is on the wire
+    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5s));  // the park slew is on the wire
     REQUIRE(server.drop_connections());
 
     try {
@@ -781,9 +782,9 @@ TEST_CASE("SynScan async - a park over a lost link logs the stop it could not se
     // No driver call until the link is down: the park task holds the driver
     // mutex while it waits on the GOTO, so a getter here would block until
     // the GOTO failed and the stops had already gone out on a live link.
-    REQUIRE(wait_until([&] { return st->goto_held.load(); }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_held.load(); }, 5s));
     REQUIRE(server.drop_connections());
-    REQUIRE(wait_until([&] { return stop_errors.load() > 0; }, 10000));
+    REQUIRE(wait_until([&] { return stop_errors.load() > 0; }, 10s));
     CHECK(stop_errors.load() == 1);
     // The reset connection is a lost link at once (decision 0009 rule 2a, #2718): every read answers NotConnected.
     CHECK_FALSE(driver->get_connected());
@@ -936,7 +937,7 @@ TEST_CASE("SynScan sync slew - superseded by AbortSlew, Park or MoveAxis throws 
             }
             done.store(true);
         });
-        REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));  // the GOTO is on the wire
+        REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5s));  // the GOTO is on the wire
         c.supersede(*driver, clock);
         // The slewer sleeps on the task clock between polls; step it until it has noticed.
         const bool finished = advance_until(clock, [&] { return done.load(); });

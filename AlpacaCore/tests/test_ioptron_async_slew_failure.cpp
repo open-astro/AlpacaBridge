@@ -71,14 +71,8 @@ alpacacore::vendor::ioptron::ConnectionInfo endpoint(int port) {
     return conn;
 }
 
-bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
-    const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (Clock::now() < deadline) {
-        if (pred()) return true;
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    return pred();
-}
+using alpacacore::test::wait_until;
+using namespace std::chrono_literals;
 
 using alpacacore::test::advance_polling;
 using alpacacore::test::age_past_connect_grace;
@@ -220,12 +214,12 @@ TEST_CASE("iOptron async - a GOTO the mount rejects surfaces through Slewing ins
 
     mount.set_reject_goto(true);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 1; }, 5000));  // the dispatch ran on the task
+    REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 1; }, 5s));  // the dispatch ran on the task
 
     // Today: "Slew rejected by mount - treating as no-op for async slew" in
     // the log, Slewing=false to the client. Must read as an error.
     std::string message;
-    REQUIRE(wait_until([&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, 10000));
+    REQUIRE(wait_until([&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, 10s));
     CHECK_FALSE(message.empty());
     CHECK(message.find("Slew") != std::string::npos);
     CHECK(read_slewing(*driver) == SlewingRead::Threw);  // preserved, not one-shot
@@ -233,7 +227,7 @@ TEST_CASE("iOptron async - a GOTO the mount rejects surfaces through Slewing ins
     // A retried initiator the mount accepts clears it.
     mount.set_reject_goto(false);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 2; }, 5000));
+    REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 2; }, 5s));
     const SlewingRead after_retry = read_slewing(*driver);
     CHECK((after_retry == SlewingRead::True || after_retry == SlewingRead::False));
     REQUIRE(advance_until_not_slewing(*driver, clock));
@@ -249,7 +243,7 @@ TEST_CASE("iOptron async - AbortSlew clears a stored slew failure (#575)", "[iop
 
     mount.set_reject_goto(true);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10000));
+    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10s));
 
     REQUIRE_NOTHROW(driver->abort_slew());
     CHECK(read_slewing(*driver) == SlewingRead::False);
@@ -269,7 +263,7 @@ TEST_CASE("iOptron async AltAz retry clears its prior error before worker prepar
 
     mount.set_reject_goto(true);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10000));
+    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10s));
 
     require_alpaca_error([&] { driver->slew_to_alt_az_async(91.0, 90.0); }, alpacacore::AlpacaError::InvalidValue);
     CHECK(read_slewing(*driver) == SlewingRead::Threw);
@@ -284,7 +278,7 @@ TEST_CASE("iOptron async AltAz retry clears its prior error before worker prepar
     REQUIRE(worker_paused);
     CHECK(read_slewing(*driver) == SlewingRead::True);
     gate.release();
-    REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 2; }, 5000));
+    REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 2; }, 5s));
     REQUIRE(advance_until_not_slewing(*driver, clock));
     driver->set_connected(false);
 }
@@ -312,13 +306,13 @@ TEST_CASE("iOptron async - a stale worker cannot publish over a newer accepted s
             retry_error = std::current_exception();
         }
     });
-    const bool newer_target_published = wait_until([&] { return driver->get_target_right_ascension() == 6.5; }, 5000);
+    const bool newer_target_published = wait_until([&] { return driver->get_target_right_ascension() == 6.5; }, 5s);
     gate.release();
     retry.join();
     REQUIRE(newer_target_published);
     if (retry_error) std::rethrow_exception(retry_error);
 
-    REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 1; }, 5000));
+    REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 1; }, 5s));
     CHECK(mount.count(":MS1#") == 1);
     REQUIRE(advance_until_not_slewing(*driver, clock));
     driver->set_connected(false);
@@ -375,7 +369,7 @@ TEST_CASE("iOptron async - a newer slew supersedes the body in flight without jo
     CHECK(returned_while_held);
     if (newer_error) std::rethrow_exception(newer_error);
 
-    REQUIRE(wait_until([&] { return bodies_returned.load() == 2; }, 5000));
+    REQUIRE(wait_until([&] { return bodies_returned.load() == 2; }, 5s));
     // The superseded body wrote nothing: no stored failure, the newer target stands.
     CHECK(read_slewing(*driver) != SlewingRead::Threw);
     CHECK(driver->get_target_right_ascension() == 6.5);
@@ -404,9 +398,9 @@ TEST_CASE("iOptron async - a superseded GOTO already on the wire lands before th
 
     mount.set_command_reply_delay(":MS1#", std::chrono::milliseconds(300));
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 1; }, 5000));  // the older body is in its exchange
+    REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 1; }, 5s));  // the older body is in its exchange
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(6.5, 25.0));
-    REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 2; }, 5000));
+    REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 2; }, 5s));
     mount.set_command_reply_delay(":MS1#", std::chrono::milliseconds(0));
     driver->set_connected(false);
 
@@ -432,7 +426,7 @@ TEST_CASE("iOptron - rejected synchronous GOTO clears the prior async failure",
 
     mount.set_reject_goto(true);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10000));
+    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10s));
 
     try {
         driver->slew_to_coordinates(6.5, 25.0);
@@ -464,7 +458,7 @@ TEST_CASE("iOptron - MoveAxis clears a superseded dispatch before its stale work
 
     REQUIRE_NOTHROW(driver->move_axis(0, 0.0));
     gate.release();
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::False; }, 2000));
+    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::False; }, 2s));
     driver->set_connected(false);  // joins the stale dispatch before checking the wire
     CHECK(mount.count(":MS1#") == 0);
     CHECK(mount.count(":Z") == 0);  // a ghost GOTO must not trigger the HAE16 RA trim
@@ -504,7 +498,7 @@ TEST_CASE("iOptron motion owner - a MoveAxis on either axis supersedes an async 
 
             REQUIRE_NOTHROW(driver->move_axis(axis, jog ? driver->get_axis_rate_range(axis).first : 0.0));
             gate.release();
-            REQUIRE(wait_until([&] { return body_returned.load(); }, 5000));
+            REQUIRE(wait_until([&] { return body_returned.load(); }, 5s));
             CHECK(mount.count(":MS1#") == 0);
             CHECK(mount.count(":Z") == 0);  // no ghost GOTO, so no HAE16 RA trim either
             if (jog) driver->move_axis(axis, 0.0);
@@ -558,7 +552,7 @@ TEST_CASE("iOptron async - a newer initiator cannot be reaped by an older handof
             newer_error = std::current_exception();
         }
     });
-    REQUIRE(wait_until([&] { return newer_call_started.load(std::memory_order_acquire); }, 5000));
+    REQUIRE(wait_until([&] { return newer_call_started.load(std::memory_order_acquire); }, 5s));
     REQUIRE(handoff.wait_for_attempts(2, std::chrono::seconds(5)));
     CHECK_FALSE(handoff.wait_for_reaps(2, std::chrono::milliseconds(100)));
     CHECK(driver->get_target_right_ascension() == 5.5);
@@ -573,7 +567,7 @@ TEST_CASE("iOptron async - a newer initiator cannot be reaped by an older handof
     if (newer_error) std::rethrow_exception(newer_error);
 
     CHECK(driver->get_target_right_ascension() == 6.5);
-    REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 1; }, 5000));
+    REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 1; }, 5s));
     REQUIRE(advance_until_not_slewing(*driver, clock));
     driver->set_connected(false);
 }
@@ -595,8 +589,8 @@ TEST_CASE("iOptron - a refused GOTO never writes the altitude limit or meridian 
     CHECK(goto_attempts == 1);  // no retry after a limit rewrite
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return mount.count(":MS1#") >= goto_attempts + 1; }, 5000));
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10000));
+    REQUIRE(wait_until([&] { return mount.count(":MS1#") >= goto_attempts + 1; }, 5s));
+    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10s));
     CHECK(mount.count(":MS1#") == goto_attempts + 1);
 
     REQUIRE_NOTHROW(driver->abort_slew());
@@ -736,7 +730,7 @@ TEST_CASE("iOptron goto-safety - a GOTO refused on :MS1# is never re-aimed count
         if (initiator.async) {
             CHECK_FALSE(error);
             std::string message;
-            REQUIRE(wait_until([&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, 10000));
+            REQUIRE(wait_until([&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, 10s));
             // SlewToTargetAsync reports under the SlewToCoordinatesAsync label it forwards to.
             CHECK(contains(message, " failed: mount rejected the target"));
             // Decision 0007 rule 9: the client chose the target, so the refusal is INFO, never WARN.
@@ -783,7 +777,7 @@ TEST_CASE("iOptron goto-safety - a GOTO with no reply that the mount did not sta
             std::string message;
             if (async) {
                 CHECK_FALSE(error);
-                REQUIRE(wait_until([&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, 10000));
+                REQUIRE(wait_until([&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, 10s));
             } else {
                 int code = 0;
                 message = message_of(error, &code);
@@ -816,7 +810,7 @@ TEST_CASE("iOptron goto-safety - a GOTO with no reply that the mount runs is con
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     // One :GLS# before the :MS1# (was the mount already moving?) and one after it (is it moving now?).
-    REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 1 && mount.count(":GLS#") > status_reads + 1; }, 10000));
+    REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 1 && mount.count(":GLS#") > status_reads + 1; }, 10s));
     advance_polling(clock, std::chrono::seconds(6));  // past the dispatch window: the mount's status decides
     CHECK(read_slewing(*driver) == SlewingRead::True);
     CHECK(mount.count(":Q#") == stops_before);
@@ -852,14 +846,14 @@ TEST_CASE("iOptron goto-safety - an unanswered GOTO sent while the mount was alr
         std::string message;
         if (async) {
             CHECK_FALSE(error);
-            REQUIRE(wait_until([&] { return mount.count(":Q#") > stops_before; }, 10000));
+            REQUIRE(wait_until([&] { return mount.count(":Q#") > stops_before; }, 10s));
             mount.set_system_status(1);  // the old motion ends
             REQUIRE(wait_until(
                 [&] {
                     advance_polling(clock, std::chrono::milliseconds(100));
                     return read_slewing(*driver, &message) == SlewingRead::Threw;
                 },
-                10000));
+                10s));
         } else {
             int code = 0;
             message = message_of(error, &code);
@@ -948,7 +942,7 @@ TEST_CASE("iOptron goto-safety - a superseded synchronous GOTO that times out do
     const std::exception_ptr error = run_stepping_clock(clock, [&] {
         auto newer = std::async(std::launch::async, [&] {
             // No REQUIRE off the test thread; the count check below catches a GOTO that never went out.
-            if (wait_until([&] { return mount.count(":MS1#") == 1; }, 10000)) {
+            if (wait_until([&] { return mount.count(":MS1#") == 1; }, 10s)) {
                 driver->slew_to_coordinates_async(6.0, 25.0);  // another client
             }
         });

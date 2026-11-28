@@ -45,14 +45,7 @@ using namespace std::chrono_literals;
 using namespace alpacacore;
 using alpacacore::test::time_stamp_of;
 
-bool eventually(const std::function<bool()>& predicate) {
-    const auto deadline = std::chrono::steady_clock::now() + 5s;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (predicate()) return true;
-        std::this_thread::yield();
-    }
-    return predicate();
-}
+using alpacacore::test::wait_until;
 
 void error(const std::function<void()>& call, int code, const std::string& text = {}) {
     try {
@@ -222,13 +215,13 @@ TEST_CASE("ZWO pulse and GOTO workers keep their endpoint after a sibling connec
     a.connect();
     b.connect();
     a.driver->pulse_guide(0, 100);
-    REQUIRE(eventually([&] { return a.mount.count(":Mg") == 1; }));
+    REQUIRE(wait_until([&] { return a.mount.count(":Mg") == 1; }));
     REQUIRE(a.clock.wait_for_waiters(2, 5s));
     a.clock.advance(100ms);
     REQUIRE(a.clock.wait_for_woken_settled(5s));
     CHECK(b.mount.count(":Mg") == 0);
     a.driver->slew_to_coordinates_async(6.0, 20.0);
-    REQUIRE(eventually([&] { return a.mount.count(":MS") == 1; }));
+    REQUIRE(wait_until([&] { return a.mount.count(":MS") == 1; }));
     CHECK(b.mount.count(":MS") == 0);
     a.driver->abort_slew();
     CHECK(a.stops() == 1);
@@ -434,7 +427,7 @@ TEST_CASE("ZWO an in-flight failed pair faults an active pulse without reporting
     REQUIRE(rig.driver->get_is_pulse_guiding());
     rig.mount.release();
     REQUIRE(rig.clock.wait_for_woken_settled(5s));
-    REQUIRE(eventually([&] { return rig.mount.count(":Mg") == 1; }));
+    REQUIRE(wait_until([&] { return rig.mount.count(":Mg") == 1; }));
     REQUIRE(rig.clock.wait_for_waiters(2, 5s));
     const auto fault = rig.driver->get_link_fault();
     REQUIRE_FALSE(fault.empty());
@@ -580,7 +573,7 @@ TEST_CASE("ZWO mandatory telemetry alone controls fault recovery and loss", "[zw
     rig.connect();
     REQUIRE(rig.driver->get_slewing());
     rig.driver->slew_to_coordinates_async(6.0, 20.0);
-    REQUIRE(eventually([&] { return rig.mount.count(":MS") > 0; }));
+    REQUIRE(wait_until([&] { return rig.mount.count(":MS") > 0; }));
     rig.driver->command_string(":GVP", false);  // Drain the MS exchange before advancing virtual time.
     // A completed wire exchange does not prove the GOTO worker has resumed the poll loop.
     const int paused_polls = rig.mount.count(":GU");
@@ -911,7 +904,7 @@ TEST_CASE("ZWO disconnect and destruction stay bounded under a silent telemetry 
     const int polls = rig.mount.count(":GU");
     rig.silence(true);
     rig.clock.advance(250ms);
-    REQUIRE(eventually([&] { return rig.mount.count(":GU") > polls; }));
+    REQUIRE(wait_until([&] { return rig.mount.count(":GU") > polls; }));
     if (queued_goto) rig.driver->slew_to_coordinates_async(6.0, 20.0);
     const auto begin = std::chrono::steady_clock::now();
     rig.driver->set_connected(false);
@@ -964,13 +957,13 @@ TEST_CASE("ZWO a silent pulse reconciliation cannot delay the next guide command
     Rig rig(5000);
     rig.connect();
     rig.driver->pulse_guide(0, 100);
-    REQUIRE(eventually([&] { return rig.mount.count(":Mg") == 1; }));
+    REQUIRE(wait_until([&] { return rig.mount.count(":Mg") == 1; }));
     REQUIRE(rig.clock.wait_for_waiters(2, 5s));
     rig.driver->pulse_guide(1, 100);
     rig.mount.go_silent(":GR");
     const int pairs = rig.mount.count(":GR");
     rig.clock.advance(100ms);
-    REQUIRE(eventually([&] { return rig.mount.count(":GR") > pairs; }));
+    REQUIRE(wait_until([&] { return rig.mount.count(":GR") > pairs; }));
     const auto begin = std::chrono::steady_clock::now();
     while (rig.mount.count(":Mg") < 2 && std::chrono::steady_clock::now() - begin < 1s) {
         std::this_thread::yield();
@@ -985,7 +978,7 @@ TEST_CASE("ZWO a late pulse reconciliation reply cannot poison the next poll",
     rig.connect();
     rig.driver->pulse_guide(0, 100);
     const auto expected_dec = rig.driver->get_declination();
-    REQUIRE(eventually([&] { return rig.mount.count(":Mg") == 1; }));
+    REQUIRE(wait_until([&] { return rig.mount.count(":Mg") == 1; }));
     REQUIRE(rig.clock.wait_for_waiters(2, 5s));
     rig.mount.delay_next(dec ? ":GD" : ":GR", 650ms);  // Transport latency, not a driver timer.
     rig.clock.advance(100ms);
@@ -1276,7 +1269,7 @@ TEST_CASE("ZWO failed initialization clears a UTC write made during the handshak
     REQUIRE(rig.mount.wait_until_held(5s));
     rig.driver->set_utc_date(std::chrono::sys_days{std::chrono::year{2001} / 1 / 2});
     rig.mount.release();
-    REQUIRE(eventually([&] { return !rig.driver->get_connecting(); }));
+    REQUIRE(wait_until([&] { return !rig.driver->get_connecting(); }));
     CHECK_FALSE(rig.driver->get_connected());
     error([&] { rig.driver->get_utc_date(); }, AlpacaError::NotConnected);
     CHECK_FALSE(vendor::zwo::utc_anchor_for_testing(*rig.driver));
@@ -1405,7 +1398,7 @@ TEST_CASE("ZWO host time synchronization seeds UTC at connect refresh and before
     rig.driver->set_connected(true);
     CHECK(rig.driver->get_utc_date() == client);
     rig.driver->slew_to_coordinates_async(6.0, 20.0);
-    REQUIRE(eventually([&] { return rig.mount.count(":MS") == 1; }));
+    REQUIRE(wait_until([&] { return rig.mount.count(":MS") == 1; }));
     REQUIRE_NOTHROW(rig.driver->command_string(":GVP", false));  // Drain the setup exchange.
     CHECK(rig.driver->get_utc_date() == client);
     rig.tick(1234ms);
@@ -1447,7 +1440,7 @@ TEST_CASE("ZWO SiderealTime and the pre-GOTO time write follow a client's UTCDat
     REQUIRE(rig.mount.wait_until_held(5s));
     rig.clock.advance(5s);
     rig.mount.release();
-    REQUIRE(eventually([&] { return rig.mount.count(":MS") == 1; }));
+    REQUIRE(wait_until([&] { return rig.mount.count(":MS") == 1; }));
     REQUIRE_NOTHROW(rig.driver->command_string(":GVP", false));  // Drain the setup exchange.
     CHECK(rig.mount.count(":SMTI") == 2);
     CHECK(abs_diff(last_time_write(rig), client) <= 1s);
@@ -1515,7 +1508,7 @@ TEST_CASE("ZWO writing an unsynchronized host clock to the mount warns once per 
     CHECK(warns.count == (host_synchronized ? 0 : 1));
     rig.driver->set_connected(true);  // the refresh writes host time again
     rig.driver->slew_to_coordinates_async(6.0, 20.0);
-    REQUIRE(eventually([&] { return rig.mount.count(":MS") == 1; }));
+    REQUIRE(wait_until([&] { return rig.mount.count(":MS") == 1; }));
     REQUIRE_NOTHROW(rig.driver->command_string(":GVP", false));
     CHECK(rig.mount.count(":SMTI") == 3);
     CHECK(warns.count == (host_synchronized ? 0 : 1));
@@ -1534,7 +1527,7 @@ TEST_CASE("ZWO the pre-GOTO time write warns on an unsynchronized host only when
     CHECK(warns.count == 0);
     if (client_wrote) rig.driver->set_utc_date(std::chrono::system_clock::now() + 1h);
     rig.driver->slew_to_coordinates_async(6.0, 20.0);
-    REQUIRE(eventually([&] { return rig.mount.count(":MS") == 1; }));
+    REQUIRE(wait_until([&] { return rig.mount.count(":MS") == 1; }));
     REQUIRE_NOTHROW(rig.driver->command_string(":GVP", false));
     CHECK(rig.mount.count(":SMTI") == (client_wrote ? 2 : 1));
     CHECK(warns.count == (client_wrote ? 0 : 1));
@@ -1559,7 +1552,7 @@ TEST_CASE("ZWO a management health read cannot expire the connect warmup", "[zwo
     rig.mount.release();
     // Also release the failed-handshake retry timer on the red path before joining the async connect.
     if (rig.clock.wait_for_waiters(1, 1s)) rig.clock.advance(1s);
-    REQUIRE(eventually([&] { return !rig.driver->get_connecting(); }));
+    REQUIRE(wait_until([&] { return !rig.driver->get_connecting(); }));
     CHECK(rig.driver->get_connected() == !sever_transport);
     CHECK(rig.driver->get_link_fault().empty());
     if (sever_transport) {

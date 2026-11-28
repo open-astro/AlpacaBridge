@@ -1692,7 +1692,8 @@ TEST_CASE("OnStep network - Connected drops when the controller hangs up with no
 
     // The management listing alone notices the hangup: no exchange runs. The real-time wait is for the kernel to
     // deliver the controller's FIN to the driver's socket, not for any driver timer.
-    REQUIRE(alpacacore::test::wait_until([&] { return !driver->get_link_fault().empty(); }, 2000));
+    REQUIRE(alpacacore::test::wait_until([&] { return !driver->get_link_fault().empty(); },
+                                         std::chrono::milliseconds(2000)));
     const std::string fault = driver->get_link_fault();
     INFO("fault: " << fault);
     CHECK(fault.find("127.0.0.1:" + std::to_string(mount.port())) != std::string::npos);

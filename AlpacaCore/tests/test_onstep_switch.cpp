@@ -401,7 +401,8 @@ TEST_CASE("OnStep shared link - telescope then switch share one link", "[onstep]
     CHECK_FALSE(aux->get_connected());
     CHECK(telescope->get_connected());
     const int polls = controller.state->count(":GU#");
-    CHECK(alpacacore::test::wait_until([&] { return controller.state->count(":GU#") >= polls + 1; }, 3000));
+    CHECK(alpacacore::test::wait_until([&] { return controller.state->count(":GU#") >= polls + 1; },
+                                       std::chrono::milliseconds(3000)));
     CHECK_NOTHROW((void)telescope->get_right_ascension());
 
     aux->set_connected(true);
@@ -428,7 +429,8 @@ TEST_CASE("OnStep shared link - switch then telescope share one link", "[onstep]
     CHECK_FALSE(telescope->get_connected());
     CHECK(aux->get_connected());
     const int polls = controller.state->count(":GXX1#");
-    CHECK(alpacacore::test::wait_until([&] { return controller.state->count(":GXX1#") >= polls + 2; }, 4000));
+    CHECK(alpacacore::test::wait_until([&] { return controller.state->count(":GXX1#") >= polls + 2; },
+                                       std::chrono::milliseconds(4000)));
     aux->set_switch(0, true);
     CHECK(controller.state->count(":SXX1,V1#") == 1);
     CHECK(controller.server.accepted_connections() == 1);
@@ -449,7 +451,7 @@ TEST_CASE("OnStep shared link - a link loss reaches the telescope and the switch
     onstep::set_onstep_switch_poll_paused_for_testing(*aux, true);
 
     REQUIRE(controller.server.drop_connections());
-    CHECK(alpacacore::test::wait_until([&] { return !telescope->get_connected(); }, 2000));
+    CHECK(alpacacore::test::wait_until([&] { return !telescope->get_connected(); }, std::chrono::milliseconds(2000)));
     CHECK_FALSE(aux->get_connected());
     CHECK(aux->get_link_fault().find("lost") != std::string::npos);
     require_alpaca_error([&] { (void)aux->get_switch_value(0); }, AlpacaError::NotConnected);

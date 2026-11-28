@@ -13,7 +13,8 @@
 #pragma once
 
 // Helpers and a polled-driver rig every driver test file shares: free functions, plus PolledRig;
-// a file includes this header instead of keeping its own copy.
+// a file includes this header instead of keeping its own copy. wait_until is the one real-time predicate wait:
+// scripts/check_docs_drift.py check 32 fails a test file that defines its own, under any of its old names.
 
 #include <alpacacore/alpacadriver.h>
 #include <alpacacore/telescope_driver.h>
@@ -148,6 +149,20 @@ std::chrono::microseconds timed(Fn&& fn) {
     const auto start = std::chrono::steady_clock::now();
     fn();
     return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
+}
+
+// Waits until another thread brings `pred` true: polls it every 1 ms of real time (steady_clock) and once more at
+// the deadline. Returns as soon as it holds, so a passing wait never costs the bound; false after `bound`. A case that
+// asserts something must NOT happen passes its own short bound. Never use it to wait out a driver timer: that goes
+// through the fake clock (decision 0005 rule 2).
+template <typename Pred>
+bool wait_until(Pred&& pred, std::chrono::milliseconds bound = std::chrono::seconds(20)) {
+    const auto deadline = std::chrono::steady_clock::now() + bound;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return static_cast<bool>(pred());
 }
 
 // Runs `fn`, a call that waits on `clock` (a verified AbortSlew, #2412), on its own thread and steps the clock by

@@ -57,6 +57,7 @@ using alpacacore::test::require_alpaca_error;
 using alpacacore::test::FakeSynScanHandset;
 using alpacacore::test::SynScanGotoLanding;
 using alpacacore::test::wait_until;
+using namespace std::chrono_literals;
 
 // This file's handset: a GOTO lands on its aim (a case may turn land_on_goto off), and the mount starts at
 // 12AB0500,20000500.
@@ -144,7 +145,7 @@ void run_virtual(alpacacore::test::FakeTaskClock& clock, Fn&& fn, const std::fun
         }
         done.store(true);
     });
-    const bool began = !started || wait_until([&] { return started() || done.load(); }, 5000);
+    const bool began = !started || wait_until([&] { return started() || done.load(); }, 5s);
     const bool finished = began && advance_until(clock, [&] { return done.load(); });
     while (!done.load()) {
         clock.advance(std::chrono::hours(1));  // release a hung caller (it may park again) so the thread can join
@@ -218,7 +219,7 @@ TEST_CASE("SynScan async - a GOTO the handset never acknowledges surfaces throug
     // The dispatch times out on the task thread. Today Slewing then reads
     // FALSE as if the mount had arrived; it must read as an error.
     std::string message;
-    REQUIRE(wait_until([&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, 10000));
+    REQUIRE(wait_until([&] { return read_slewing(*driver, &message) == SlewingRead::Threw; }, 10s));
     CHECK_FALSE(message.empty());
     CHECK(message.find("Slew") != std::string::npos);
     CHECK(read_slewing(*driver) == SlewingRead::Threw);  // preserved, not one-shot
@@ -227,8 +228,8 @@ TEST_CASE("SynScan async - a GOTO the handset never acknowledges surfaces throug
     st->reject_goto.store(false);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     CHECK(read_slewing(*driver) == SlewingRead::True);
-    REQUIRE(wait_until([&] { return st->goto_count.load() == 1; }, 5000));
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::False; }, 15000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() == 1; }, 5s));
+    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::False; }, 15s));
     driver->set_connected(false);
 }
 
@@ -246,7 +247,14 @@ TEST_CASE("SynScan MoveAxis - a dispatch on a reset connection loses the link at
 
     st->reject_goto.store(true);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10000));
+    // The old 50 ms cadence, kept on purpose: this case races the 1 s status poll for the reset (#2795), and polling
+    // every 1 ms drops the connections sooner after the refusal, which made it lose that race about four times as
+    // often.
+    bool refused = false;
+    for (int i = 0; i < 200 && !(refused = read_slewing(*driver) == SlewingRead::Threw); ++i) {
+        std::this_thread::sleep_for(50ms);
+    }
+    REQUIRE(refused);
 
     st->reject_goto.store(false);
     REQUIRE(server.drop_connections());
@@ -272,7 +280,7 @@ TEST_CASE("SynScan MoveAxis - successful dispatch clears a stored slew error",
 
     st->reject_goto.store(true);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10000));
+    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10s));
 
     st->reject_goto.store(false);
     REQUIRE_NOTHROW(driver->move_axis(0, 1.0));
@@ -292,7 +300,7 @@ TEST_CASE("SynScan Unpark - a no-op Unpark clears a stored slew error", "[synsca
 
     st->reject_goto.store(true);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10000));
+    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10s));
 
     REQUIRE_NOTHROW(driver->unpark());
     CHECK(read_slewing(*driver) == SlewingRead::False);
@@ -309,7 +317,7 @@ TEST_CASE("SynScan async - AbortSlew clears a stored slew failure (#575)", "[syn
 
     st->reject_goto.store(true);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10000));
+    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10s));
 
     REQUIRE_NOTHROW(driver->abort_slew());
     CHECK(read_slewing(*driver) == SlewingRead::False);
@@ -351,7 +359,7 @@ TEST_CASE("SynScan AbortSlew - a stop failure still reaps the cancelled slew tas
     REQUIRE_NOTHROW(driver->set_connected(true));
     const int before = st->goto_count.load();
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    CHECK(wait_until([&] { return st->goto_count.load() > before; }, 5000));
+    CHECK(wait_until([&] { return st->goto_count.load() > before; }, 5s));
     driver->set_connected(false);
 }
 
@@ -452,7 +460,7 @@ TEST_CASE("SynScan PulseGuide - cross-axis pulses keep the RA tracking restore",
     const auto started = std::chrono::steady_clock::now();
     driver->pulse_guide(2, 1500);  // East, RA
     driver->pulse_guide(0, 300);   // North, Dec; must not cancel the RA timer
-    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 5000));
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 5s));
     // The RA pulse ran its whole 1.5 s: a cancelled timer would also end it with T, but early.
     CHECK(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(1500));
 
@@ -535,7 +543,7 @@ TEST_CASE("SynScan async slew - position reports mount feedback after PulseGuide
         std::abs(position_before_pulse_ra - target_ra) > 0.1 || std::abs(position_before_pulse_dec - target_dec) > 1.0;
     REQUIRE(position_is_distinct);
     driver->slew_to_coordinates_async(target_ra, target_dec);
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     // The mount never moves, so the slew ends with the far-miss failure after one repeat GOTO (#1105).
     REQUIRE(advance_until(clock, [&] { return read_slewing(*driver) != SlewingRead::True; }));
 
@@ -583,7 +591,7 @@ TEST_CASE("SynScan - get_link_fault does not wait on a connect holding the drive
     // with headroom for the sanitizer builds on a loaded runner.
     CHECK(ms < 1000);
     CHECK(fault.empty());
-    REQUIRE(wait_until([&] { return !driver->get_connecting(); }, 30000));
+    REQUIRE(wait_until([&] { return !driver->get_connecting(); }, 30s));
 }
 
 TEST_CASE("SynScan pulse state refuses a latched link fault without I/O and recovers",
@@ -974,7 +982,7 @@ TEST_CASE("SynScan async - a reaper's cancel is not lost between a parked task's
         }
     });
     driver->pulse_guide(0, 2000);  // North: its timer parks on the clock
-    REQUIRE(wait_until([&] { return at_window.load(); }, 3000));
+    REQUIRE(wait_until([&] { return at_window.load(); }, 3s));
 
     // The superseding pulse reaps the parked one: cancel, notify, join.
     std::atomic<bool> reaped{false};
@@ -982,7 +990,7 @@ TEST_CASE("SynScan async - a reaper's cancel is not lost between a parked task's
         driver->pulse_guide(0, 300);
         reaped.store(true);
     });
-    CHECK(wait_until([&] { return reaped.load(); }, 2000));
+    CHECK(wait_until([&] { return reaped.load(); }, 2s));
 
     // Whatever happened, reaching the timer's deadline wakes it, so the case ends instead of hanging in a join.
     clock.advance(std::chrono::seconds(5));
@@ -1009,7 +1017,7 @@ TEST_CASE("SynScan hold window - a GOTO the handset reports done keeps Slewing u
 
     const auto start = clock.now();
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     REQUIRE(advance_until(clock, [&] { return clock.now() - start >= std::chrono::milliseconds(7750); }));
     CHECK_FALSE(st->goto_in_progress());
     CHECK(driver->get_slewing());
@@ -1032,7 +1040,7 @@ TEST_CASE("SynScan hold window - AbortSlew inside the hold clears Slewing at onc
 
     const auto start = clock.now();
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     REQUIRE(advance_until(clock, [&] { return clock.now() - start >= std::chrono::seconds(2); }));
     REQUIRE(driver->get_slewing());
     // The stop is verified on the task clock (#2412).
@@ -1197,7 +1205,7 @@ TEST_CASE("SynScan PulseGuide - the end of an RA pulse does not turn tracking ba
     auto driver = connect_with_stale_tracking(st, server);
     const int writes_before = st->command_count('T');
     driver->pulse_guide(2, 200);
-    REQUIRE(wait_until([&]() { return !driver->get_is_pulse_guiding(); }, 3000));
+    REQUIRE(wait_until([&]() { return !driver->get_is_pulse_guiding(); }, 3s));
     CHECK(st->command_count('T') == writes_before);
     CHECK(st->tracking_mode.load() == 0);
     driver->set_connected(false);
@@ -1267,7 +1275,7 @@ TEST_CASE("SynScan stops - restore the mode the handset held when the motion sta
             driver->move_axis(0, 0.0);
         } else {
             driver->pulse_guide(2, 200);
-            REQUIRE(wait_until([&]() { return !driver->get_is_pulse_guiding(); }, 3000));
+            REQUIRE(wait_until([&]() { return !driver->get_is_pulse_guiding(); }, 3s));
         }
         const auto commands = st->command_snapshot();
         REQUIRE(st->command_count('T') == writes_before + 1);
@@ -1479,7 +1487,7 @@ TEST_CASE("SynScan PulseGuide - a pulse replaced mid-pulse restores the mode hel
     driver->pulse_guide(2, 1500);
     REQUIRE(driver->get_is_pulse_guiding());
     driver->pulse_guide(2, 200);
-    REQUIRE(wait_until([&]() { return !driver->get_is_pulse_guiding(); }, 4000));
+    REQUIRE(wait_until([&]() { return !driver->get_is_pulse_guiding(); }, 4s));
     CHECK(last_tracking_write(*st) == 2);
     CHECK(st->tracking_mode.load() == 2);
     driver->set_connected(false);
@@ -1522,7 +1530,7 @@ TEST_CASE("SynScan PulseGuide - the end of an RA pulse leaves a Tracking write t
     const int stops_before = st->command_count('P');
     // Stepped until the body's timer fires: it may not have parked on the clock yet when the pulse call returned.
     // The write is still parked, so the body can only be woken, not past its turn.
-    REQUIRE(wait_until([&]() { return clock.waiter_count() >= 1; }, 4000));
+    REQUIRE(wait_until([&]() { return clock.waiter_count() >= 1; }, 4s));
     clock.advance(std::chrono::milliseconds(600));
     clock.wait_for_woken_settled(std::chrono::milliseconds(300));
     st->release_tracking_write();
@@ -1796,7 +1804,7 @@ bool step_pulse_to_end(alpacacore::test::FakeTaskClock& clock, alpacacore::Teles
         !clock.wait_for_waiter_thread(body.get(), std::chrono::milliseconds(5000))) {
         return false;
     }
-    return advance_until(clock, [&] { return !driver.get_is_pulse_guiding(); }) && wait_until(ended, 5000);
+    return advance_until(clock, [&] { return !driver.get_is_pulse_guiding(); }) && wait_until(ended, 5s);
 }
 
 // Zero-rate variable-rate commands on `device` (16 RA, 17 Dec): two per axis stop.
@@ -1963,7 +1971,7 @@ TEST_CASE("SynScan PulseGuide - refused while a slew or a park runs, which keeps
         auto driver = make_tracking_driver(clock, server.port());
 
         c.start(*driver);
-        REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
+        REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5s));
         const int rate_commands = st->command_count('P');
         const int cancels = st->command_count('M');
         for (const int direction : {0, 3}) {
@@ -2010,7 +2018,7 @@ TEST_CASE("SynScan PulseGuide - an older pulse whose end waits behind the replac
             return turn_waits->load() >= 2 ||
                    first.ended.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready;
         },
-        5000));
+        5s));
     pointing->release();
     second.get();
     REQUIRE(returned(first));
@@ -2036,7 +2044,7 @@ TEST_CASE("SynScan PulseGuide - a replacement takes over from an older pulse who
     const int tracking_writes = st->command_count('T');
     st->reject_tracking.store(true);  // the pulse end's `T` times out
     clock.advance(std::chrono::milliseconds(250));
-    REQUIRE(wait_until([&] { return st->command_count('T') > tracking_writes; }, 5000));
+    REQUIRE(wait_until([&] { return st->command_count('T') > tracking_writes; }, 5s));
     REQUIRE(clock.wait_for_waiter_thread(first.body, std::chrono::milliseconds(5000)));  // parked before its retry
     st->reject_tracking.store(false);
 
@@ -2082,7 +2090,7 @@ TEST_CASE("SynScan PulseGuide - an older pulse whose stop failed leaves the repl
     for (int attempt = 0; attempt < 3; ++attempt) {
         const int before = st->command_count('T');
         clock.advance(std::chrono::milliseconds(attempt == 0 ? 250 : 100));
-        REQUIRE(wait_until([&] { return st->command_count('T') > before; }, 5000));
+        REQUIRE(wait_until([&] { return st->command_count('T') > before; }, 5s));
         REQUIRE(clock.wait_for_waiter_thread(first.body, std::chrono::milliseconds(5000)));
     }
     st->reject_tracking.store(false);
@@ -2157,8 +2165,8 @@ TEST_CASE("SynScan PulseGuide - a slew or Park supersedes a running pulse withou
         });
         // Past the pulse: returned (asynchronous), or its stop is on the wire (synchronous).
         const bool past_pulse = op == Op::SlewToCoordinates
-                                    ? wait_until([&] { return zero_rate_commands(*st, 17) > stops; }, 2000)
-                                    : wait_until([&] { return done.load(); }, 2000);
+                                    ? wait_until([&] { return zero_rate_commands(*st, 17) > stops; }, 2s)
+                                    : wait_until([&] { return done.load(); }, 2s);
         const bool body_still_held = pulse.ended.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready;
         const int stops_while_held = zero_rate_commands(*st, 17);
         release->set_value();
@@ -2166,7 +2174,7 @@ TEST_CASE("SynScan PulseGuide - a slew or Park supersedes a running pulse withou
         CHECK(body_still_held);
         CHECK(stops_while_held == stops + 2);  // one stop (two zero-rate commands), the slew's
         CHECK(returned(pulse));
-        CHECK(wait_until([&] { return st->goto_count.load() > gotos; }, 5000));
+        CHECK(wait_until([&] { return st->goto_count.load() > gotos; }, 5s));
         CHECK(zero_rate_commands(*st, 17) == stops + 2);  // the superseded body sent no stop of its own
         CHECK_FALSE(driver->get_is_pulse_guiding());
         // The synchronous slew waits for its landing on the clock; the asynchronous ones have returned.
@@ -2253,7 +2261,7 @@ TEST_CASE("SynScan async - a GOTO past its deadline stops the mount and keeps th
     const int tracking_writes_before = st->command_count('T');
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     // 1 s steps to just short of the deadline, then 50 ms steps: the deadline's stop is verified (#2412), and its
     // reads must land inside its rounds.
     const auto started = clock.now();
@@ -2299,7 +2307,7 @@ TEST_CASE("SynScan SlewToCoordinates - a blocking GOTO past its deadline stops t
         }
         done.store(true);
     });
-    const bool began = wait_until([&] { return st->goto_count.load() > 0 || done.load(); }, 5000);
+    const bool began = wait_until([&] { return st->goto_count.load() > 0 || done.load(); }, 5s);
     // 1 s steps to just short of the deadline, then 50 ms steps for the verified stop's reads (#2412).
     const auto started = clock.now();
     const bool finished =
@@ -2340,7 +2348,7 @@ TEST_CASE("SynScan async - a deadline stop over a lost link answers NotConnected
     auto driver = connect_with_hanging_goto(*st, server, clock);
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     const auto started = clock.now();
     // Up to just short of the deadline, then the link goes: the status reads that follow fail. The SynScan stops are
     // blind sends, so only a dead link can fail them. Over TCP the hangup is a lost link at once (decision 0009
@@ -2610,7 +2618,7 @@ TEST_CASE("SynScan - site, time and Sync writes are refused while the mount move
     if (goto_motion) {
         rig.st->goto_never_ends.store(true);  // the GOTO body keeps waiting on it
         REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
-        REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+        REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5s));
     } else {
         rig.start_move(0);
     }
@@ -2663,7 +2671,7 @@ TEST_CASE("SynScan - site, time and Sync writes are accepted after AbortSlew whi
     } else {
         REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
     }
-    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5s));
 
     // AbortSlew verifies its stop on the task clock (#2412).
     REQUIRE_NOTHROW(alpacacore::test::call_stepping(rig.clock, [&] { rig.driver->abort_slew(); }));
@@ -2687,7 +2695,7 @@ TEST_CASE("SynScan - site, time and Sync writes are accepted after AbortSlew whi
         CHECK(std::string("WHs").find(after_writes[i][0]) != std::string::npos);
     }
     held.release();
-    REQUIRE(wait_until([&] { return body_ended->load(); }, 5000));
+    REQUIRE(wait_until([&] { return body_ended->load(); }, 5s));
     CHECK(rig.st->command_snapshot().size() == after_writes.size());  // its tail sent nothing either
     CHECK(rig.st->goto_count.load() == 1);
     sc_bound::set_slew_body_exit_hook_for_testing(*rig.driver, {});
@@ -2863,7 +2871,7 @@ std::unique_ptr<alpacacore::TelescopeDriver> start_hanging_goto(FakeSynScanHands
                                                                 alpacacore::test::FakeTaskClock& clock) {
     auto driver = connect_with_hanging_goto(st, server, clock);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return st.goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st.goto_count.load() > 0; }, 5s));
     return driver;
 }
 
@@ -2931,7 +2939,7 @@ TEST_CASE("SynScan async - a GOTO the mount never starts fails with a stop and n
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     REQUIRE(advance_until(clock, [&] { return read_slewing(*driver) != SlewingRead::True; }));
 
     std::string message;
@@ -2953,7 +2961,7 @@ TEST_CASE("SynScan V3 - a 16-bit GOTO that comes to rest far from its target fai
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     REQUIRE(advance_until(clock, [&] { return read_slewing(*driver) != SlewingRead::True; }));
 
     std::string message;
@@ -2997,7 +3005,7 @@ TEST_CASE("SynScan - the client-silence watchdog stops driver motion no client r
     if (goto_motion) {
         st->goto_never_ends.store(true);
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+        REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     } else {
         REQUIRE_NOTHROW(driver->move_axis(1, 1.0));
     }
@@ -3104,7 +3112,7 @@ TEST_CASE("SynScan Park - a Park that fails while the mount ignores the stop fai
     auto driver = connect_with_hanging_goto(*st, server, clock);
     st->ignore_cancels.store(100);
     REQUIRE_NOTHROW(driver->park());
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     const auto started = clock.now();
 
     std::string message;
@@ -3127,7 +3135,7 @@ TEST_CASE("SynScan Unpark - a park stop the mount ignores is resent and fails af
     REQUIRE(server.ok());
     auto driver = connect_with_hanging_goto(*st, server, clock);
     REQUIRE_NOTHROW(driver->park());
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     st->ignore_cancels.store(100);
 
     std::string thrown;
@@ -3196,7 +3204,7 @@ TEST_CASE("SynScan V3 - a 16-bit GOTO that never comes to rest after the handset
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
     st->drift_counts.store(4);  // about 79 arcsec per 16-bit read: the mount never holds still
     REQUIRE(advance_until(
         clock, [&] { return read_slewing(*driver) != SlewingRead::True; }, std::chrono::milliseconds(250), 200));

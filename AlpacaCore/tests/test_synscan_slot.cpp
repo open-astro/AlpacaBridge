@@ -46,6 +46,7 @@ using alpacacore::test::require_alpaca_error;
 using alpacacore::test::FakeSynScanHandset;
 using alpacacore::test::SynScanGotoLanding;
 using alpacacore::test::wait_until;
+using namespace std::chrono_literals;
 
 // This file's handset: a GOTO is timed but never moves the mount, which stays at 12AB0500,20000500.
 std::shared_ptr<FakeSynScanHandset> make_handset(
@@ -90,7 +91,7 @@ struct Rig {
 void refused_slot_start_stops_mount(const std::function<void(alpacacore::TelescopeDriver&)>& second) {
     Rig rig;
     rig.driver->slew_to_coordinates_async(5.5, 20.0);
-    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5s));
     REQUIRE(rig.driver->get_slewing());
     const int cancels_before = rig.st->command_count('M');
 
@@ -180,7 +181,7 @@ TEST_CASE("SynScan slot - a refused goto-over-goto start restores tracking after
     Rig rig;
     rig.driver->set_tracking(true);
     rig.driver->slew_to_coordinates_async(5.5, 20.0);
-    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5s));
     const int tracking_before = rig.st->command_count('T');
 
     refuse_slot_threads(*rig.driver);

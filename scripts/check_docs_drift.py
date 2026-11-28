@@ -286,6 +286,16 @@ Checks:
      copies, and fails on any MODE whose last digit grants access to others.
      A missing script, a debian/rules with no call (or a call before a rule is
      installed), and finding no installed rule at all are findings too.
+ 32. No test file under AlpacaCore/tests or AlpacaHTTP/tests other than
+     AlpacaCore/tests/driver_rig.h defines a free predicate wait named
+     wait_until, eventually, wait_for, spin_until or wait_until_true (issue
+     #2687): the testing instructions' one-helper rule, which 29 copies had
+     broken. A free function is one defined at namespace or file scope, which
+     this tree writes at column 0; a class member (FakeTaskClock::wait_for, a
+     TaskClock override) is indented and not read. It takes a predicate when
+     a parameter is a std::function<bool()> or a type the template line above
+     it declares. driver_rig.h must itself define wait_until, so an extractor
+     that stops matching fails instead of passing.
 """
 
 import glob
@@ -3605,6 +3615,55 @@ def check_installed_udev_rules_not_world(root=ROOT):
     return findings
 
 
+# --- check 32: one real-time predicate wait, in driver_rig.h (issue #2687) ----
+
+PREDICATE_WAIT_HOME = "AlpacaCore/tests/driver_rig.h"
+PREDICATE_WAIT_PREFIXES = ("AlpacaCore/tests/", "AlpacaHTTP/tests/")
+# A free definition (or declaration) at column 0, with the template line above it when there is one. The parameter
+# list allows one level of nested parentheses, for std::function<bool()>.
+_PREDICATE_WAIT_RE = re.compile(
+    r"^(?:template\s*<(?P<tparams>[^<>]*)>\s*)?(?:(?:static|inline|constexpr|\[\[nodiscard\]\])\s+)*"
+    r"(?:bool|auto|void)\s+(?P<name>wait_until|eventually|wait_for|spin_until|wait_until_true)\s*"
+    r"\((?P<params>(?:[^()]|\([^()]*\))*)\)", re.MULTILINE)
+
+
+def _takes_predicate(tparams, params):
+    if re.search(r"std::function\s*<\s*bool\s*\(\s*\)\s*>", params):
+        return True
+    types = re.findall(r"\b(?:typename|class)\s+(\w+)", tparams or "")
+    return any(re.search(r"(?:^|,)\s*(?:const\s+)?%s\b" % re.escape(t), params) for t in types)
+
+
+def _predicate_wait_findings(files, home=PREDICATE_WAIT_HOME):
+    """Check 32 over {path: text}. Pure, so --self-test can drive it."""
+    findings = []
+    home_found = False
+    for path, text in sorted(files.items()):
+        code = _CPP_COMMENT_OR_LITERAL_RE.sub(lambda m: "\n" * m.group(0).count("\n") or " ", text)
+        for m in _PREDICATE_WAIT_RE.finditer(code):
+            if not _takes_predicate(m.group("tparams"), m.group("params")):
+                continue
+            if path == home:
+                home_found = home_found or m.group("name") == "wait_until"
+                continue
+            line = code.count("\n", 0, m.start("name")) + 1
+            findings.append("%s:%d: defines its own predicate wait %s(); use wait_until from %s (testing "
+                            "instructions, shared test helpers)" % (path, line, m.group("name"), home))
+    if not home_found:
+        findings.insert(0, "%s defines no wait_until(pred, bound): the helper moved or the extractor is stale" % home)
+    return findings
+
+
+def check_predicate_wait_single_home(root=ROOT):
+    tracked = _run_git(["-c", "core.quotePath=false", "ls-files"], root=root).stdout.splitlines()
+    files = {}
+    for f in tracked:
+        if f.startswith(PREDICATE_WAIT_PREFIXES) and f.endswith(LICENSE_HEADER_EXTENSIONS) \
+                and (Path(root) / f).is_file():
+            files[f] = read(f, root)
+    return _predicate_wait_findings(files)
+
+
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
@@ -3639,6 +3698,7 @@ CHECKS = [
     ("Each serial device's USB identity is its wrapper's token list", check_usb_identity_single_source),
     ("Fake ConformU run list matches the fake-connectable roster", check_conformu_run_list_matches_roster),
     ("No udev rule the package installs lets every user open a device", check_installed_udev_rules_not_world),
+    ("Test files use the one predicate wait in driver_rig.h", check_predicate_wait_single_home),
 ]
 
 
@@ -5229,6 +5289,41 @@ def self_test():
           len(f) == 1 and "does not match it" in f[0])
     f = _usb_identity_findings({"w.cpp": usb_wrapper}, {"c_catalog.cpp": usb_catalog}, floor=2)
     check("usb identity: fewer definitions than the floor is a finding", len(f) == 1 and "floor 2" in f[0])
+
+    # check 32: one predicate wait, in driver_rig.h (issue #2687; literal fixtures).
+    pw_home = ("namespace alpacacore::test {\ntemplate <typename Pred>\n"
+               "bool wait_until(Pred&& pred, std::chrono::milliseconds bound = std::chrono::seconds(20)) {\n"
+               "    return pred();\n}\n}\n")
+    # The two TaskClock waits the check must not read: a fake-clock override and a test clock's member.
+    pw_overrides = ("class FakeTaskClock : public TaskClock {\npublic:\n"
+                    "    bool wait_for(std::unique_lock<std::mutex>& lock, std::condition_variable& cv, "
+                    "std::chrono::nanoseconds timeout,\n                  const std::function<bool()>& pred) override {\n"
+                    "        return pred();\n    }\n};\n"
+                    "struct StepClock final : TaskClock {\n"
+                    "    bool wait_for(std::unique_lock<std::mutex>& l, std::condition_variable& cv, "
+                    "std::chrono::nanoseconds t,\n                  const std::function<bool()>& p) override {\n"
+                    "        return p();\n    }\n};\n"
+                    "// bool eventually(const std::function<bool()>& p) { return p(); }  (a comment)\n"
+                    "bool wait_for(int n) { return n > 0; }\n")
+    pw_ok = {PREDICATE_WAIT_HOME: pw_home, "AlpacaCore/tests/fake_task_clock.h": pw_overrides}
+    check("predicate waits: the rig helper and the TaskClock overrides are clean", _predicate_wait_findings(pw_ok) == [])
+    restored = ("namespace {\n\ntemplate <typename Pred>\nbool eventually(Pred pred) {\n    return pred();\n}\n\n"
+                "}  // namespace\n")
+    f = _predicate_wait_findings({**pw_ok, "AlpacaCore/tests/test_x.cpp": restored})
+    check("predicate waits: a restored template copy is reported by file and line",
+          len(f) == 1 and f[0].startswith("AlpacaCore/tests/test_x.cpp:4:") and "eventually()" in f[0])
+    for name in ("wait_until", "wait_for", "spin_until", "wait_until_true"):
+        f = _predicate_wait_findings({**pw_ok, "AlpacaHTTP/tests/t.cpp":
+                                      "static bool %s(const std::function<bool()>& pred, int timeout_ms) {\n"
+                                      "    return pred();\n}\n" % name})
+        check("predicate waits: a std::function copy named %s is reported" % name,
+              len(f) == 1 and f[0].startswith("AlpacaHTTP/tests/t.cpp:1:"))
+    f = _predicate_wait_findings({"AlpacaCore/tests/fake_mount_server.h":
+                                  "inline bool wait_until(const std::function<bool()>& pred, int timeout_ms) {\n"
+                                  "    return pred();\n}\n", PREDICATE_WAIT_HOME: pw_home})
+    check("predicate waits: a second home in a fake header is reported", len(f) == 1 and "fake_mount_server.h:1:" in f[0])
+    f = _predicate_wait_findings({PREDICATE_WAIT_HOME: "namespace alpacacore::test {}\n"})
+    check("predicate waits: a rig with no wait_until is a floor finding", len(f) == 1 and "defines no wait_until" in f[0])
 
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()

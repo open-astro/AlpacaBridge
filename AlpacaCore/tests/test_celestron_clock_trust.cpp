@@ -146,15 +146,7 @@ std::string clock_reply(ClockMount& st, const std::string& chunk) {
     }
 }
 
-template <typename Pred>
-bool eventually(Pred pred) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (!pred()) {
-        if (std::chrono::steady_clock::now() > deadline) return false;
-        std::this_thread::yield();
-    }
-    return true;
-}
+using alpacacore::test::wait_until;
 
 // The Celestron log lines at Info and above, for the case's lifetime.
 class CelestronLog {
@@ -313,7 +305,7 @@ TEST_CASE("Celestron host clock - a host clock that becomes trusted while connec
 
     alpacacore::util::HostClockTrust::mark_set("test");
     rig.driver->on_host_clock_changed(kBecameTrusted);
-    REQUIRE(eventually([&] { return rig.finished.load() == 1; }));
+    REQUIRE(wait_until([&] { return rig.finished.load() == 1; }));
     CHECK(rig.st->time_writes.load() == 1);
     CHECK(distance(rig.driver->get_utc_date(), Clock::now()) < std::chrono::seconds(5));
     CHECK(log.contains("Host clock became trusted; the mount clock was set from the host clock"));
@@ -329,7 +321,7 @@ TEST_CASE("Celestron host clock - a host clock step while connected re-syncs the
     REQUIRE(rig.st->time_writes.load() == 1);
 
     rig.driver->on_host_clock_changed(kStepped);
-    REQUIRE(eventually([&] { return rig.finished.load() == 1; }));
+    REQUIRE(wait_until([&] { return rig.finished.load() == 1; }));
     CHECK(rig.st->alignment_queries.load() == 1);  // the re-sync asked, and an unaligned hand controller gets "H"
     CHECK(rig.st->time_writes.load() == 2);
     CHECK(log.contains("Host clock stepped by 5000 ms; the mount clock was set from the host clock"));
@@ -357,7 +349,7 @@ TEST_CASE("Celestron host clock - a re-sync leaves an aligned hand controller's 
 
     alpacacore::util::HostClockTrust::mark_set("test");
     rig.driver->on_host_clock_changed(kBecameTrusted);
-    REQUIRE(eventually([&] { return rig.finished.load() == 1; }));
+    REQUIRE(wait_until([&] { return rig.finished.load() == 1; }));
     CHECK(rig.st->alignment_queries.load() == 1);
     CHECK(rig.st->time_writes.load() == 0);
     CHECK(rig.written.load() == 0);
@@ -385,7 +377,7 @@ TEST_CASE("Celestron host clock - a re-sync whose alignment query fails writes n
 
     alpacacore::util::HostClockTrust::mark_set("test");
     rig.driver->on_host_clock_changed(kBecameTrusted);
-    REQUIRE(eventually([&] { return rig.finished.load() == 1; }));
+    REQUIRE(wait_until([&] { return rig.finished.load() == 1; }));
     CHECK(rig.st->alignment_queries.load() == 1);
     CHECK(rig.st->time_writes.load() == 0);
     CHECK(rig.written.load() == 0);
@@ -448,7 +440,7 @@ TEST_CASE("Celestron host clock - a re-sync waits out a MoveAxis and writes once
 
     alpacacore::util::HostClockTrust::mark_set("test");
     rig.driver->on_host_clock_changed(kStepped);
-    REQUIRE(eventually([&] { return log.contains(kWaitsForMotion); }));
+    REQUIRE(wait_until([&] { return log.contains(kWaitsForMotion); }));
     REQUIRE(rig.clock.wait_for_waiters(3, std::chrono::seconds(5)));  // poll, re-sync, MoveAxis cap
     CHECK(rig.st->time_writes.load() == 0);
     rig.advance(std::chrono::seconds(1));  // still moving: it checks again and waits again
@@ -457,7 +449,7 @@ TEST_CASE("Celestron host clock - a re-sync waits out a MoveAxis and writes once
 
     rig.driver->move_axis(0, 0.0);
     rig.advance(std::chrono::seconds(1));
-    REQUIRE(eventually([&] { return rig.finished.load() == 1; }));
+    REQUIRE(wait_until([&] { return rig.finished.load() == 1; }));
     CHECK(rig.st->time_writes.load() == 1);
     CHECK(distance(rig.driver->get_utc_date(), Clock::now()) < std::chrono::seconds(5));
     rig.driver->set_connected(false);
@@ -474,7 +466,7 @@ TEST_CASE("Celestron host clock - a re-sync waiting out a MoveAxis asks the alig
 
     alpacacore::util::HostClockTrust::mark_set("test");
     rig.driver->on_host_clock_changed(kStepped);
-    REQUIRE(eventually([&] { return log.contains(kWaitsForMotion); }));
+    REQUIRE(wait_until([&] { return log.contains(kWaitsForMotion); }));
     for (int poll = 0; poll < 3; ++poll) {
         REQUIRE(rig.clock.wait_for_waiters(3, std::chrono::seconds(5)));  // poll, re-sync, MoveAxis cap
         rig.advance(std::chrono::seconds(1));                             // still moving: no wire turn
@@ -484,7 +476,7 @@ TEST_CASE("Celestron host clock - a re-sync waiting out a MoveAxis asks the alig
 
     rig.driver->move_axis(0, 0.0);
     rig.advance(std::chrono::seconds(1));
-    REQUIRE(eventually([&] { return rig.finished.load() == 1; }));
+    REQUIRE(wait_until([&] { return rig.finished.load() == 1; }));
     CHECK(rig.st->alignment_queries.load() == queries_before + 1);
     CHECK(rig.st->time_writes.load() == 1);
     rig.driver->set_connected(false);
@@ -504,13 +496,13 @@ TEST_CASE("Celestron host clock - a MoveAxis that starts after the re-sync was d
 
     alpacacore::util::HostClockTrust::mark_set("test");
     rig.driver->on_host_clock_changed(kBecameTrusted);
-    REQUIRE(eventually([&] { return log.contains(kWaitsForMotion) || rig.finished.load() == 1; }));
+    REQUIRE(wait_until([&] { return log.contains(kWaitsForMotion) || rig.finished.load() == 1; }));
     REQUIRE(rig.clock.wait_for_waiters(3, std::chrono::seconds(5)));  // poll, re-sync, MoveAxis cap
     CHECK(rig.st->time_writes.load() == 0);
 
     rig.driver->move_axis(1, 0.0);
     rig.advance(std::chrono::seconds(1));
-    REQUIRE(eventually([&] { return rig.finished.load() == 1; }));
+    REQUIRE(wait_until([&] { return rig.finished.load() == 1; }));
     CHECK(rig.st->time_writes.load() == 1);
     rig.at_step(nullptr);
     rig.driver->set_connected(false);
@@ -530,13 +522,13 @@ TEST_CASE("Celestron host clock - a MoveAxis that starts just before the re-sync
 
     alpacacore::util::HostClockTrust::mark_set("test");
     rig.driver->on_host_clock_changed(kBecameTrusted);
-    REQUIRE(eventually([&] { return log.contains(kWaitsForMotion) || rig.finished.load() == 1; }));
+    REQUIRE(wait_until([&] { return log.contains(kWaitsForMotion) || rig.finished.load() == 1; }));
     REQUIRE(rig.clock.wait_for_waiters(3, std::chrono::seconds(5)));  // poll, re-sync, MoveAxis cap
     CHECK(rig.st->time_writes.load() == 0);
 
     rig.driver->move_axis(1, 0.0);
     rig.advance(std::chrono::seconds(1));
-    REQUIRE(eventually([&] { return rig.finished.load() == 1; }));
+    REQUIRE(wait_until([&] { return rig.finished.load() == 1; }));
     CHECK(rig.st->time_writes.load() == 1);
     rig.at_step(nullptr);
     rig.driver->set_connected(false);
@@ -557,7 +549,7 @@ TEST_CASE("Celestron host clock - a re-sync waits out a GOTO and writes once it 
 
     alpacacore::util::HostClockTrust::mark_set("test");
     rig.driver->on_host_clock_changed(kStepped);
-    REQUIRE(eventually([&] { return log.contains(kWaitsForMotion); }));
+    REQUIRE(wait_until([&] { return log.contains(kWaitsForMotion); }));
     REQUIRE(rig.clock.wait_for_waiters(3, std::chrono::seconds(5)));  // the paused poll, the slew and the re-sync
     CHECK(rig.st->time_writes.load() == 0);
     for (int step = 0; step < 8; ++step) rig.advance(std::chrono::milliseconds(250));  // 2 s, still under way
@@ -599,7 +591,7 @@ TEST_CASE("Celestron host clock - a re-sync after a GOTO that landed with no cli
     rig.st->aligned = false;  // the re-sync leaves an aligned hand controller alone
 
     rig.driver->on_host_clock_changed(kStepped);
-    REQUIRE(eventually([&] { return rig.finished.load() == 1; }));
+    REQUIRE(wait_until([&] { return rig.finished.load() == 1; }));
     CHECK(rig.st->time_writes.load() == 2);
     CHECK(log.count(kWaitsForMotion) == 0);
     CHECK(distance(rig.driver->get_utc_date(), Clock::now()) < std::chrono::seconds(5));
@@ -618,7 +610,7 @@ TEST_CASE("Celestron host clock - a re-sync waits out a PulseGuide and writes on
     REQUIRE(rig.driver->get_is_pulse_guiding());
 
     rig.driver->on_host_clock_changed(kStepped);
-    REQUIRE(eventually([&] { return log.contains(kWaitsForMotion); }));
+    REQUIRE(wait_until([&] { return log.contains(kWaitsForMotion); }));
     REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
     rig.advance(std::chrono::seconds(1));
     rig.advance(std::chrono::seconds(1));  // 2 s in: the pulse and its completion delay are still running
@@ -647,7 +639,7 @@ TEST_CASE(
     rig.at_step([&](cel::ClockResyncStep step) {
         if (step != cel::ClockResyncStep::PulseSent || fired.exchange(true)) return;
         rig.driver->on_host_clock_changed(kStepped);
-        waited = eventually([&] { return log.contains(kWaitsForMotion) || rig.finished.load() == 1; });
+        waited = wait_until([&] { return log.contains(kWaitsForMotion) || rig.finished.load() == 1; });
         writes_meanwhile = rig.st->time_writes.load();
     });
     rig.driver->pulse_guide(0, 2000);
@@ -679,13 +671,13 @@ TEST_CASE("Celestron host clock - a client UTCDate write still waiting for the w
             alpacacore::util::HostClockTrust::mark_set("test");
             rig.driver->on_host_clock_changed(kBecameTrusted);
         } else if (step == cel::ClockResyncStep::Exchange && !body_waited.exchange(true)) {
-            (void)eventually([&] { return client_done.load(); });
+            (void)wait_until([&] { return client_done.load(); });
         }
     });
 
     rig.driver->set_utc_date(client);
     client_done = true;
-    REQUIRE(eventually([&] { return rig.finished.load() == 1; }));
+    REQUIRE(wait_until([&] { return rig.finished.load() == 1; }));
     CHECK(rig.st->time_writes.load() == 1);  // the client's alone
     CHECK(rig.written.load() == 0);
     CHECK(distance(rig.driver->get_utc_date(), client) < std::chrono::seconds(5));
@@ -710,7 +702,7 @@ TEST_CASE(
         if (step != cel::ClockResyncStep::ClientWritten) return;
         alpacacore::util::HostClockTrust::mark_set("test");
         rig.driver->on_host_clock_changed(kBecameTrusted);
-        body_done = eventually([&] { return rig.finished.load() == 1; });
+        body_done = wait_until([&] { return rig.finished.load() == 1; });
     });
 
     rig.driver->set_utc_date(client);
@@ -741,7 +733,7 @@ TEST_CASE("Celestron host clock - a host clock change as a set_connected() call 
 
     rig.driver->set_connected(true);  // already connected: returns at once
     REQUIRE(fired.load());
-    REQUIRE(eventually([&] { return rig.finished.load() == 1; }));
+    REQUIRE(wait_until([&] { return rig.finished.load() == 1; }));
     CHECK(rig.st->time_writes.load() == 1);
     CHECK(distance(rig.driver->get_utc_date(), Clock::now()) < std::chrono::seconds(5));
     rig.at_step(nullptr);
@@ -771,14 +763,14 @@ TEST_CASE("Celestron host clock - a change whose gate try fails during a set_con
             alpacacore::util::HostClockTrust::mark_set("test");
             rig.driver->on_host_clock_changed(kBecameTrusted);
         });
-        REQUIRE(eventually([&] { return hook_busy.load(); }));
+        REQUIRE(wait_until([&] { return hook_busy.load(); }));
     });
 
     rig.driver->set_connected(true);  // already connected: returns at once
     release_hook = true;
     timer.join();
     REQUIRE(fired.load());
-    REQUIRE(eventually([&] { return rig.finished.load() == 1; }));
+    REQUIRE(wait_until([&] { return rig.finished.load() == 1; }));
     CHECK(rig.st->time_writes.load() == 1);
     CHECK(distance(rig.driver->get_utc_date(), Clock::now()) < std::chrono::seconds(5));
     rig.at_step(nullptr);
@@ -805,7 +797,7 @@ TEST_CASE("Celestron host clock - a host clock change as a set_connected() call 
 
     rig.driver->set_connected(true);  // already connected: returns at once
     REQUIRE(fired.load());
-    REQUIRE(eventually([&] { return rig.finished.load() == 1; }));
+    REQUIRE(wait_until([&] { return rig.finished.load() == 1; }));
     CHECK(rig.st->time_writes.load() == 1);
     CHECK(distance(rig.driver->get_utc_date(), Clock::now()) < std::chrono::seconds(5));
     rig.at_step(nullptr);
@@ -831,15 +823,15 @@ TEST_CASE("Celestron host clock - a re-sync superseded after its write still pub
 
     alpacacore::util::HostClockTrust::mark_set("test");
     rig.driver->on_host_clock_changed(kBecameTrusted);
-    REQUIRE(eventually([&] { return rig.finished.load() == 1; }));  // the first body; the second is waiting
-    REQUIRE(eventually([&] { return log.contains(kWaitsForMotion); }));
+    REQUIRE(wait_until([&] { return rig.finished.load() == 1; }));  // the first body; the second is waiting
+    REQUIRE(wait_until([&] { return log.contains(kWaitsForMotion); }));
     CHECK(rig.st->time_writes.load() == 1);
     CHECK(distance(rig.driver->get_utc_date(), Clock::now()) < std::chrono::seconds(5));  // the mount's clock
 
     REQUIRE(rig.clock.wait_for_waiters(3, std::chrono::seconds(5)));  // poll, second body, MoveAxis cap
     rig.driver->move_axis(0, 0.0);
     rig.advance(std::chrono::seconds(1));
-    REQUIRE(eventually([&] { return rig.finished.load() == 2; }));
+    REQUIRE(wait_until([&] { return rig.finished.load() == 2; }));
     CHECK(rig.st->time_writes.load() == 2);
     CHECK(distance(rig.driver->get_utc_date(), Clock::now()) < std::chrono::seconds(5));
     rig.at_step(nullptr);
@@ -856,10 +848,10 @@ TEST_CASE("Celestron host clock - a re-sync leaves the mount clock alone when a 
 
     alpacacore::util::HostClockTrust::mark_set("test");
     rig.driver->on_host_clock_changed(kStepped);
-    REQUIRE(eventually([&] { return log.contains(kWaitsForMotion); }));
+    REQUIRE(wait_until([&] { return log.contains(kWaitsForMotion); }));
     REQUIRE(rig.clock.wait_for_waiters(3, std::chrono::seconds(5)));
     rig.clock.advance(std::chrono::minutes(15));
-    REQUIRE(eventually([&] { return rig.finished.load() == 1; }));
+    REQUIRE(wait_until([&] { return rig.finished.load() == 1; }));
     CHECK(rig.st->time_writes.load() == 0);
     CHECK(log.count("the mount was still moving after 15 min", alpacacore::logging::LogLevel::Warn) == 1);
     rig.driver->move_axis(0, 0.0);
@@ -880,7 +872,7 @@ TEST_CASE("Celestron host clock - a client UTCDate write before the re-sync's wr
 
     alpacacore::util::HostClockTrust::mark_set("test");
     rig.driver->on_host_clock_changed(kBecameTrusted);
-    REQUIRE(eventually([&] { return rig.finished.load() == 1; }));
+    REQUIRE(wait_until([&] { return rig.finished.load() == 1; }));
     CHECK(rig.st->time_writes.load() == 1);  // the client's alone
     CHECK(rig.written.load() == 0);
     CHECK(distance(rig.driver->get_utc_date(), client) < std::chrono::seconds(5));
@@ -903,7 +895,7 @@ TEST_CASE("Celestron host clock - a client UTCDate write after the re-sync's wri
 
     alpacacore::util::HostClockTrust::mark_set("test");
     rig.driver->on_host_clock_changed(kBecameTrusted);
-    REQUIRE(eventually([&] { return rig.finished.load() == 1; }));
+    REQUIRE(wait_until([&] { return rig.finished.load() == 1; }));
     CHECK(rig.st->time_writes.load() == 2);
     CHECK(distance(rig.driver->get_utc_date(), client) < std::chrono::seconds(5));
     rig.at_step(nullptr);
@@ -919,7 +911,7 @@ TEST_CASE("Celestron host clock - a disconnect ends a waiting re-sync and a reco
     rig.driver->move_axis(0, 1.0);
     alpacacore::util::HostClockTrust::mark_set("test");
     rig.driver->on_host_clock_changed(kStepped);
-    REQUIRE(eventually([&] { return log.contains(kWaitsForMotion); }));
+    REQUIRE(wait_until([&] { return log.contains(kWaitsForMotion); }));
     REQUIRE(rig.clock.wait_for_waiters(3, std::chrono::seconds(5)));
 
     rig.driver->set_connected(false);  // joins the waiting body
@@ -949,7 +941,7 @@ TEST_CASE("Celestron host clock - a host clock change during a held connect re-s
     connecting.join();
     REQUIRE(rig.driver->get_connected());
 
-    REQUIRE(eventually([&] { return rig.finished.load() == 1; }));
+    REQUIRE(wait_until([&] { return rig.finished.load() == 1; }));
     CHECK(rig.st->time_writes.load() == 1);
     CHECK(distance(rig.driver->get_utc_date(), Clock::now()) < std::chrono::seconds(5));
     rig.driver->set_connected(false);
@@ -965,7 +957,7 @@ TEST_CASE("Celestron host clock - a failed re-sync write is logged and leaves Co
 
     alpacacore::util::HostClockTrust::mark_set("test");
     rig.driver->on_host_clock_changed(kBecameTrusted);
-    REQUIRE(eventually([&] { return rig.finished.load() == 1; }));
+    REQUIRE(wait_until([&] { return rig.finished.load() == 1; }));
     CHECK(rig.st->time_writes.load() == 1);
     CHECK(log.count("the mount clock re-sync failed", alpacacore::logging::LogLevel::Warn) == 1);
     CHECK(rig.driver->get_connected());
@@ -994,7 +986,7 @@ TEST_CASE("Celestron host clock - a blocking SlewToCoordinates whose dispatch th
     CHECK_FALSE(rig.driver->get_slewing());
 
     rig.driver->on_host_clock_changed(kStepped);
-    REQUIRE(eventually([&] { return rig.finished.load() == 1; }));
+    REQUIRE(wait_until([&] { return rig.finished.load() == 1; }));
     CHECK(rig.st->time_writes.load() == 2);
     CHECK(log.count(kWaitsForMotion) == 0);
     rig.driver->set_connected(false);
@@ -1025,14 +1017,14 @@ TEST_CASE("Celestron host clock - a blocking SlewToCoordinates that times out ho
         rig.clock.advance(std::chrono::seconds(1));
         (void)rig.clock.wait_for_woken_settled(std::chrono::seconds(5));
     }
-    REQUIRE(eventually([&] { return done.load(); }));
+    REQUIRE(wait_until([&] { return done.load(); }));
     slewing.join();
     rig.st->aligned = false;  // the re-sync leaves an aligned hand controller alone
     CHECK(error.find("Slew timed out") != std::string::npos);
     CHECK_THROWS(rig.driver->get_slewing());  // the failure is kept for Slewing
 
     rig.driver->on_host_clock_changed(kStepped);
-    REQUIRE(eventually([&] { return rig.finished.load() == 1; }));
+    REQUIRE(wait_until([&] { return rig.finished.load() == 1; }));
     CHECK(rig.st->time_writes.load() == 2);
     CHECK(log.count(kWaitsForMotion) == 0);
     rig.driver->set_connected(false);

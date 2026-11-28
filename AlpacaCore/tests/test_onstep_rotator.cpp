@@ -579,7 +579,8 @@ TEST_CASE("OnStep shared link - telescope then rotator share one link", "[onstep
     CHECK_FALSE(rotator->get_connected());
     CHECK(telescope->get_connected());
     const int polls = controller.state->count(":GU#");
-    CHECK(alpacacore::test::wait_until([&] { return controller.state->count(":GU#") >= polls + 1; }, 3000));
+    CHECK(alpacacore::test::wait_until([&] { return controller.state->count(":GU#") >= polls + 1; },
+                                       std::chrono::milliseconds(3000)));
     CHECK_NOTHROW((void)telescope->get_right_ascension());
 
     // The rotator joins again, still on the one link.
@@ -609,7 +610,8 @@ TEST_CASE("OnStep shared link - rotator then telescope share one link", "[onstep
     CHECK_FALSE(telescope->get_connected());
     CHECK(rotator->get_connected());
     const int polls = controller.state->count(":rT#");
-    CHECK(alpacacore::test::wait_until([&] { return controller.state->count(":rT#") >= polls + 2; }, 3000));
+    CHECK(alpacacore::test::wait_until([&] { return controller.state->count(":rT#") >= polls + 2; },
+                                       std::chrono::milliseconds(3000)));
     rotator->move_absolute(60.0);
     CHECK(controller.state->count(":rS+060*00:00#") == 1);
     CHECK(controller.server.accepted_connections() == 1);
@@ -632,7 +634,7 @@ TEST_CASE("OnStep shared link - a link loss reaches the telescope and the rotato
     onstep::set_onstep_rotator_poll_paused_for_testing(*rotator, true);
 
     REQUIRE(controller.server.drop_connections());
-    CHECK(alpacacore::test::wait_until([&] { return !telescope->get_connected(); }, 2000));
+    CHECK(alpacacore::test::wait_until([&] { return !telescope->get_connected(); }, std::chrono::milliseconds(2000)));
     CHECK_FALSE(rotator->get_connected());
     CHECK(rotator->get_link_fault().find("lost") != std::string::npos);
     require_alpaca_error([&] { (void)rotator->get_position(); }, AlpacaError::NotConnected);

@@ -47,14 +47,7 @@ using Control = alpacacore::vendor::ioptron::IGuiderControl;
 
 using alpacacore::test::require_alpaca_error;
 
-bool wait_until(const std::function<bool()>& predicate, std::chrono::milliseconds timeout = std::chrono::seconds(3)) {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (!predicate()) {
-        if (std::chrono::steady_clock::now() >= deadline) return false;
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    }
-    return true;
-}
+using alpacacore::test::wait_until;
 
 // The fake behind the locked decorator, and a driver over them. The camera is
 // declared last, so it is destroyed (and its stream worker joined) first.

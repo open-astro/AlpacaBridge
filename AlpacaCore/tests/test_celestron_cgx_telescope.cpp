@@ -60,14 +60,7 @@ alpacacore::vendor::celestron::CelestronCgxConnectionInfo test_info() {
     return info;
 }
 
-template <typename Predicate>
-bool wait_until(Predicate predicate, std::chrono::milliseconds timeout = std::chrono::seconds(2)) {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (!predicate() && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    return predicate();
-}
+using alpacacore::test::wait_until;
 
 // One state poll on the calling thread: the coordinate getters serve its frame, never the wire (#1940).
 void poll_now(alpacacore::TelescopeDriver& driver) {

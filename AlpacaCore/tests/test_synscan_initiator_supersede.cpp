@@ -53,6 +53,7 @@ using Clock = std::chrono::steady_clock;
 using alpacacore::test::FakeSynScanHandset;
 using alpacacore::test::SynScanGotoLanding;
 using alpacacore::test::wait_until;
+using namespace std::chrono_literals;
 
 // This file's handset: a GOTO is timed but never moves the mount, which stays at 12AB0500,20000500.
 std::shared_ptr<FakeSynScanHandset> make_handset(
@@ -104,7 +105,7 @@ Timing time_second_initiator(const char* name, const std::function<void(alpacaco
     Rig rig(model);
     rig.st->gate_ms.store(kHoldMs);
     first(*rig.driver);
-    REQUIRE(wait_until([&] { return rig.st->gate_entered.load() != 0; }, 5000));
+    REQUIRE(wait_until([&] { return rig.st->gate_entered.load() != 0; }, 5s));
     const auto entered = Clock::time_point(Clock::duration(rig.st->gate_entered.load()));
     Timing timing;
     // AtPark takes the driver lock and sends nothing: it answers only if the body does not hold the lock across its
@@ -212,7 +213,7 @@ TEST_CASE("SynScan initiator supersede - AbortSlew during a Park on a fresh conn
     Rig rig;
     rig.st->gate_ms.store(kHoldMs);
     rig.driver->park();
-    REQUIRE(wait_until([&] { return rig.st->gate_entered.load() != 0; }, 5000));
+    REQUIRE(wait_until([&] { return rig.st->gate_entered.load() != 0; }, 5s));
     std::atomic<bool> aborted{false};
     std::thread abort([&] {
         rig.driver->abort_slew();
@@ -237,7 +238,7 @@ TEST_CASE("SynScan initiator supersede - a superseded slew body sends nothing af
           "[synscan][initiator-supersede]") {
     Rig rig;
     rig.driver->slew_to_coordinates_async(5.5, 20.0);
-    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5s));
     rig.st->report_slewing.store(true);
     // The initiator publishes an 8 s Slewing window during which the body asks the handset nothing: step past it.
     rig.clock.advance(std::chrono::seconds(9));
@@ -247,7 +248,7 @@ TEST_CASE("SynScan initiator supersede - a superseded slew body sends nothing af
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         rig.clock.advance(std::chrono::milliseconds(260));
     }
-    REQUIRE(wait_until([&] { return rig.st->gate_l_entered.load() != 0; }, 5000));
+    REQUIRE(wait_until([&] { return rig.st->gate_l_entered.load() != 0; }, 5s));
     const int reads_before = rig.st->command_count('e');
     const int gotos_before = rig.st->command_count('r') + rig.st->command_count('R');
     rig.driver->move_axis(0, 0.5);  // waits out the held exchange, then owns the axes
@@ -279,7 +280,7 @@ TEST_CASE("SynScan initiator supersede - a queued goto never reaches the mount a
             rig.clock.advance(std::chrono::milliseconds(1100));
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
-        REQUIRE(wait_until([&] { return rig.st->gate_l_entered.load() != 0; }, 2000));
+        REQUIRE(wait_until([&] { return rig.st->gate_l_entered.load() != 0; }, 2s));
         {
             std::lock_guard<std::mutex> l(rig.st->command_mutex);
             rig.st->commands.clear();
@@ -323,7 +324,7 @@ TEST_CASE("SynScan initiator supersede - a superseded Park body does not count i
     });
     Rig rig;
     rig.driver->park();
-    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5s));
     rig.st->report_slewing.store(true);
     rig.clock.advance(std::chrono::seconds(9));  // past the 8 s Slewing window: the Park polls ask the handset now
     REQUIRE(rig.clock.wait_for_woken_settled(std::chrono::seconds(5)));
@@ -333,7 +334,7 @@ TEST_CASE("SynScan initiator supersede - a superseded Park body does not count i
         rig.clock.advance(std::chrono::milliseconds(260));
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    REQUIRE(wait_until([&] { return rig.st->gate_l_entered.load() != 0; }, 5000));
+    REQUIRE(wait_until([&] { return rig.st->gate_l_entered.load() != 0; }, 5s));
     const auto entered = Clock::time_point(Clock::duration(rig.st->gate_l_entered.load()));
     std::atomic<bool> unparked{false};
     std::atomic<std::thread::id> unpark_id{};
@@ -371,7 +372,7 @@ TEST_CASE("SynScan initiator supersede - a failed AbortSlew during a Park ends t
           "[synscan][initiator-supersede]") {
     Rig rig;
     rig.driver->park();
-    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5s));
     REQUIRE(rig.server->drop_connections());
     const auto error_of = [](const std::function<void()>& call) -> std::pair<int, std::string> {
         try {
@@ -404,7 +405,7 @@ TEST_CASE(
     Rig rig;
     rig.st->gate_t_ms.store(600);
     std::thread pulse([&] { rig.driver->pulse_guide(2, 60000); });  // west: the RA axis reads the tracking mode
-    REQUIRE(wait_until([&] { return rig.st->gate_t_entered.load() != 0; }, 5000));
+    REQUIRE(wait_until([&] { return rig.st->gate_t_entered.load() != 0; }, 5s));
     std::thread tracking([&] { rig.driver->set_tracking(false); });
     // The write takes its ticket well inside the 600 ms the `t` reply is held; tickets are served in order, so a
     // pulse that left the turn after its read would queue its rate command behind the write.
@@ -437,7 +438,7 @@ TEST_CASE("SynScan initiator supersede - Park waits for a SyncToCoordinates whos
     const double ra = rig.driver->get_right_ascension();
     const double dec = rig.driver->get_declination();
     std::thread sync([&] { rig.driver->sync_to_coordinates(ra, dec); });
-    REQUIRE(wait_until([&] { return rig.st->gate_s_entered.load() != 0; }, 5000));
+    REQUIRE(wait_until([&] { return rig.st->gate_s_entered.load() != 0; }, 5s));
     std::atomic<bool> park_returned{false};
     std::thread park([&] {
         rig.driver->park();
@@ -459,7 +460,7 @@ TEST_CASE("SynScan initiator supersede - concurrent SiteLatitude and SiteLongitu
     Rig rig;
     rig.st->gate_w_ms.store(800);
     std::thread lat([&] { rig.driver->set_site_latitude(-33.856784); });
-    REQUIRE(wait_until([&] { return rig.st->gate_w_entered.load() != 0; }, 5000));
+    REQUIRE(wait_until([&] { return rig.st->gate_w_entered.load() != 0; }, 5s));
     std::thread lon([&] { rig.driver->set_site_longitude(151.215297); });
     lat.join();
     lon.join();
@@ -483,7 +484,7 @@ TEST_CASE("SynScan initiator supersede - a UTCDate write cut by a disconnect rep
             write_error = ex.error_code();
         }
     });
-    REQUIRE(wait_until([&] { return rig.st->gate_h_entered.load() != 0; }, 5000));
+    REQUIRE(wait_until([&] { return rig.st->gate_h_entered.load() != 0; }, 5s));
     rig.driver->set_connected(false);
     write.join();
     CHECK(write_error.load() == alpacacore::AlpacaError::NotConnected);

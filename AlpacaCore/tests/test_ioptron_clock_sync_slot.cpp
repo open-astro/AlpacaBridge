@@ -102,15 +102,7 @@ std::chrono::system_clock::time_point sut_time(const std::string& command) {
            std::chrono::milliseconds(std::stoll(command.substr(4, 13)));
 }
 
-template <typename Pred>
-bool eventually(Pred pred) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (!pred()) {
-        if (std::chrono::steady_clock::now() > deadline) return false;
-        std::this_thread::yield();
-    }
-    return true;
-}
+using alpacacore::test::wait_until;
 
 // The iOptron log lines at Info and above, for the case's lifetime.
 class IoptronLog {
@@ -176,7 +168,7 @@ struct UntrustedConnect {
         driver->set_connected(true);
         REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
         clock.advance(std::chrono::milliseconds(250));
-        REQUIRE(eventually([&] { return passes.load() == 1; }));
+        REQUIRE(wait_until([&] { return passes.load() == 1; }));
         refuse_motion_bound_watchdog();
     }
     void set_host(std::chrono::system_clock::time_point utc) {
@@ -540,7 +532,7 @@ TEST_CASE("iOptron Telescope Driver - a host clock step after an untrusted conne
     rig.set_host(kRealHost);
     alpacacore::util::HostClockTrust::mark_set("test step");
     rig.host_clock_changed(kStepped);
-    REQUIRE(eventually([&] { return rig.passes.load() == 2; }));
+    REQUIRE(wait_until([&] { return rig.passes.load() == 2; }));
 
     // :GUT# (the old mount clock), the full body, :SUT with the host time, then :GUT# again (the new one).
     const auto commands = rig.mount.commands();
@@ -556,7 +548,7 @@ TEST_CASE("iOptron Telescope Driver - a host clock step after an untrusted conne
     CHECK(log.contains("Host clock stepped by 24507000 ms; mount UTC 2017-01-01T12:00:42Z -> "));
 
     // UTCDate now follows the host clock.
-    REQUIRE(eventually([&] {
+    REQUIRE(wait_until([&] {
         const auto utc = rig.driver->get_utc_date();
         return utc >= kRealHost && utc - kRealHost < std::chrono::seconds(2);
     }));
@@ -573,7 +565,7 @@ TEST_CASE("iOptron Telescope Driver - a host clock that becomes trusted with no 
     // NTP slewed the clock in, or a client confirmed it: trusted, never stepped.
     alpacacore::util::ClientUtcWarning::set_host_synchronized_probe([] { return true; });
     rig.host_clock_changed(kBecameTrusted);
-    REQUIRE(eventually([&] { return rig.passes.load() == 2; }));
+    REQUIRE(wait_until([&] { return rig.passes.load() == 2; }));
     rig.driver->set_connected(false);
     REQUIRE(rig.mount.count(":SUT") == 1);
     for (const auto& command : rig.mount.commands()) {
@@ -593,7 +585,7 @@ TEST_CASE("iOptron Telescope Driver - a host clock change leaves a mount clock t
     rig.mount.set_utc_reply(gut_reply_for(kStaleHost + std::chrono::milliseconds(1500)));
     alpacacore::util::HostClockTrust::mark_set("test step");
     rig.host_clock_changed(kStepped);
-    REQUIRE(eventually([&] { return log.contains("already agrees, no re-sync"); }));
+    REQUIRE(wait_until([&] { return log.contains("already agrees, no re-sync"); }));
     rig.driver->set_connected(false);
     CHECK(rig.mount.count(":GUT") == 2);  // the connect's sample and the re-sync's check
     CHECK(rig.mount.count(":SLA") == sla);
@@ -643,7 +635,7 @@ TEST_CASE("iOptron Telescope Driver - a host clock re-sync waits for a MoveAxis 
     rig.set_host(kRealHost);
     alpacacore::util::HostClockTrust::mark_set("test step");
     rig.host_clock_changed(kStepped);
-    REQUIRE(eventually([&] { return log.contains("waits for the motion to end"); }));
+    REQUIRE(wait_until([&] { return log.contains("waits for the motion to end"); }));
     // Parked in its 1 s wait: nothing went to the mount clock while the axis moved.
     REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
     CHECK(rig.mount.count(":SUT") == 0);
@@ -653,7 +645,7 @@ TEST_CASE("iOptron Telescope Driver - a host clock re-sync waits for a MoveAxis 
 
     rig.driver->move_axis(0, 0.0);
     rig.clock.advance(std::chrono::seconds(1));
-    REQUIRE(eventually([&] { return rig.passes.load() == 2; }));
+    REQUIRE(wait_until([&] { return rig.passes.load() == 2; }));
     rig.driver->set_connected(false);
     CHECK(rig.mount.count(":SUT") == 1);
 }
@@ -677,7 +669,7 @@ TEST_CASE("iOptron Telescope Driver - a MoveAxis that starts after the re-sync's
     rig.set_host(kRealHost);
     alpacacore::util::HostClockTrust::mark_set("test step");
     rig.host_clock_changed(kStepped);
-    REQUIRE(eventually([&] { return log.contains("waits for the motion to end") || rig.passes.load() == 2; }));
+    REQUIRE(wait_until([&] { return log.contains("waits for the motion to end") || rig.passes.load() == 2; }));
     CHECK(moved.load());
     CHECK(rig.mount.count(":SUT") == 0);
     CHECK(rig.mount.count(":SG") == 0);
@@ -687,7 +679,7 @@ TEST_CASE("iOptron Telescope Driver - a MoveAxis that starts after the re-sync's
     REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
     rig.driver->move_axis(0, 0.0);
     rig.clock.advance(std::chrono::seconds(1));
-    REQUIRE(eventually([&] { return rig.passes.load() == 2; }));
+    REQUIRE(wait_until([&] { return rig.passes.load() == 2; }));
     rig.driver->set_connected(false);
     CHECK(rig.mount.count(":SUT") == 1);
     CHECK(rig.mount.count(":SLA") == sla + 1);
@@ -716,7 +708,7 @@ TEST_CASE("iOptron Telescope Driver - a host clock change during a held set_conn
     client.join();
     REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
     rig.clock.advance(std::chrono::milliseconds(250));
-    REQUIRE(eventually([&] { return rig.passes.load() == 2; }));
+    REQUIRE(wait_until([&] { return rig.passes.load() == 2; }));
     CHECK(log.contains("Host clock changed during a connect or disconnect; mount UTC 2017-01-01T12:00:42Z -> "));
     rig.driver->set_connected(false);
     CHECK(rig.mount.count(":SUT") == 1);
@@ -756,7 +748,7 @@ TEST_CASE("iOptron host clock re-sync - a change whose lock try fails as set_con
 
     REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));  // the re-sync, parked in its start delay
     rig.clock.advance(std::chrono::milliseconds(250));
-    REQUIRE(eventually([&] { return rig.passes.load() == 2; }));
+    REQUIRE(wait_until([&] { return rig.passes.load() == 2; }));
     rig.driver->set_connected(false);
     REQUIRE(rig.mount.count(":SUT") == 1);
     for (const auto& command : rig.mount.commands()) {
@@ -788,7 +780,7 @@ TEST_CASE("iOptron host clock re-sync - a change stored just before set_connecte
 
     REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));  // the re-sync, parked in its start delay
     rig.clock.advance(std::chrono::milliseconds(250));
-    REQUIRE(eventually([&] { return rig.passes.load() == 2; }));
+    REQUIRE(wait_until([&] { return rig.passes.load() == 2; }));
     rig.driver->set_connected(false);
     CHECK(rig.mount.count(":SUT") == 1);
 }
@@ -804,12 +796,12 @@ TEST_CASE("iOptron host clock re-sync - a client UTCDate write while the re-sync
     rig.connect();
     const auto sla = rig.mount.count(":SLA");
     rig.driver->slew_to_coordinates_async(13.0, 20.0);
-    REQUIRE(eventually([&] { return rig.mount.count(":MS1#") == 1; }));
+    REQUIRE(wait_until([&] { return rig.mount.count(":MS1#") == 1; }));
 
     rig.set_host(kRealHost);
     alpacacore::util::HostClockTrust::mark_set("test step");
     rig.host_clock_changed(kStepped);
-    REQUIRE(eventually([&] { return log.contains("waits for the motion to end"); }));
+    REQUIRE(wait_until([&] { return log.contains("waits for the motion to end"); }));
     REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));  // parked in its 1 s motion wait
 
     // An hour from the host clock, so the re-sync's agree check cannot be what keeps it.
@@ -819,7 +811,7 @@ TEST_CASE("iOptron host clock re-sync - a client UTCDate write while the re-sync
 
     rig.driver->abort_slew();  // the GOTO ends
     rig.clock.advance(std::chrono::seconds(1));
-    REQUIRE(eventually([&] { return rig.passes.load() == 2; }));
+    REQUIRE(wait_until([&] { return rig.passes.load() == 2; }));
     CHECK(rig.mount.count(":SLA") == sla + 1);  // the re-sync ran its writes
     CHECK(rig.mount.count(":SUT") == 1);        // the client's only
     for (const auto& command : rig.mount.commands()) {
@@ -853,8 +845,8 @@ TEST_CASE("iOptron host clock re-sync - a client UTCDate write while the re-sync
     rig.set_host(kRealHost);
     alpacacore::util::HostClockTrust::mark_set("test step");
     rig.host_clock_changed(kStepped);
-    REQUIRE(eventually([&] { return goto_started.load(); }));
-    REQUIRE(eventually([&] { return log.contains("waits for the motion to end"); }));
+    REQUIRE(wait_until([&] { return goto_started.load(); }));
+    REQUIRE(wait_until([&] { return log.contains("waits for the motion to end"); }));
     REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));  // the UTC write, parked in its 1 s motion wait
     CHECK(rig.mount.count(":SLA") == sla + 1);                        // the site went out before the GOTO
     CHECK(rig.mount.count(":SUT") == 0);
@@ -865,7 +857,7 @@ TEST_CASE("iOptron host clock re-sync - a client UTCDate write while the re-sync
 
     rig.driver->abort_slew();  // the GOTO ends
     rig.clock.advance(std::chrono::seconds(1));
-    REQUIRE(eventually([&] { return rig.passes.load() == 2; }));
+    REQUIRE(wait_until([&] { return rig.passes.load() == 2; }));
     CHECK(rig.mount.count(":SUT") == 1);  // the client's only
     for (const auto& command : rig.mount.commands()) {
         if (command.rfind(":SUT", 0) == 0) CHECK(sut_time(command) == client_utc);
@@ -892,7 +884,7 @@ TEST_CASE("iOptron host clock re-sync - a MoveAxis held past the motion bound en
     rig.set_host(kRealHost);
     alpacacore::util::HostClockTrust::mark_set("test step");
     rig.host_clock_changed(kStepped);
-    REQUIRE(eventually([&] { return log.contains("waits for the motion to end"); }));
+    REQUIRE(wait_until([&] { return log.contains("waits for the motion to end"); }));
     REQUIRE(rig.clock.wait_for_waiters(2, std::chrono::seconds(5)));
     // One poll short of the bound: it still waits.
     rig.clock.advance(alpacacore::util::kHostClockResyncMotionBound - alpacacore::util::kHostClockResyncMotionPoll);
@@ -942,7 +934,7 @@ TEST_CASE("iOptron Telescope Driver - a re-sync after a failed connect pass wait
     driver->set_connected(true);
     REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
     clock.advance(std::chrono::milliseconds(250));
-    REQUIRE(eventually([&] { return ioptron::clock_sync_failure_for_testing(*driver).has_value(); }));
+    REQUIRE(wait_until([&] { return ioptron::clock_sync_failure_for_testing(*driver).has_value(); }));
     CHECK(mount.count(":SLA") == 0);
     CHECK(mount.count(":SUT") == 0);
 
@@ -952,7 +944,7 @@ TEST_CASE("iOptron Telescope Driver - a re-sync after a failed connect pass wait
     driver->on_host_clock_changed(kStepped);
     REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
     clock.advance(std::chrono::milliseconds(250));
-    REQUIRE(eventually([&] { return log.contains("waits for the motion to end") || passes.load() == 1; }));
+    REQUIRE(wait_until([&] { return log.contains("waits for the motion to end") || passes.load() == 1; }));
     // Neither the site nor the clock went out while the axis moved.
     CHECK(passes.load() == 0);
     CHECK(mount.count(":SLA") == 0);
@@ -963,7 +955,7 @@ TEST_CASE("iOptron Telescope Driver - a re-sync after a failed connect pass wait
     REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
     driver->move_axis(0, 0.0);
     clock.advance(std::chrono::seconds(1));
-    REQUIRE(eventually([&] { return passes.load() == 1; }));
+    REQUIRE(wait_until([&] { return passes.load() == 1; }));
     driver->set_connected(false);
     CHECK(mount.count(":SLA") == 1);
     CHECK(mount.count(":SUT") == 1);
@@ -1001,7 +993,7 @@ TEST_CASE("iOptron Telescope Driver - a host clock change starts nothing while d
         driver->set_connected(true);
         REQUIRE(clock.wait_for_waiters(2, std::chrono::seconds(5)));
         clock.advance(std::chrono::milliseconds(250));
-        REQUIRE(eventually([&] { return passes.load() == 1; }));
+        REQUIRE(wait_until([&] { return passes.load() == 1; }));
         driver->on_host_clock_changed(kStepped);
         driver->on_host_clock_changed(kBecameTrusted);
         CHECK_FALSE(clock.wait_for_waiters(2, std::chrono::milliseconds(300)));

@@ -40,14 +40,7 @@ using namespace alpacacore::vendor::zwo;
 using alpacacore::test::error_code_of;
 using alpacacore::test::require_alpaca_error;
 
-bool eventually(const std::function<bool()>& predicate) {
-    const auto deadline = std::chrono::steady_clock::now() + 5s;
-    do {
-        if (predicate()) return true;
-        std::this_thread::yield();
-    } while (std::chrono::steady_clock::now() < deadline);
-    return predicate();
-}
+using alpacacore::test::wait_until;
 
 struct ProbeGate {
     std::mutex mutex;
@@ -258,7 +251,7 @@ TEST_CASE("ZWO refused identity leaves no writes and permits corrected endpoint 
     rig.set_serial("not-a-serial#");
     if (asynchronous) {
         driver->connect();
-        REQUIRE(eventually([&] { return !driver->get_connecting(); }));
+        REQUIRE(wait_until([&] { return !driver->get_connecting(); }));
         CHECK_FALSE(driver->get_last_connect_error().empty());
     } else {
         require_alpaca_error([&] { driver->set_connected(true); }, AlpacaError::DriverException);
@@ -273,7 +266,7 @@ TEST_CASE("ZWO refused identity leaves no writes and permits corrected endpoint 
     rig.set_serial("012345ABCDEF#");
     if (asynchronous) {
         driver->connect();
-        REQUIRE(eventually([&] { return !driver->get_connecting(); }));
+        REQUIRE(wait_until([&] { return !driver->get_connecting(); }));
         CHECK(driver->get_last_connect_error().empty());
     } else
         driver->set_connected(true);
@@ -317,7 +310,7 @@ TEST_CASE("ZWO blocked identity keeps operational calls offline and configuratio
     CHECK(rig.driver->get_device_state().empty());
     CHECK(rig.received() == std::vector<std::string>{":GVP#"});
     rig.probe.release();
-    REQUIRE(eventually([&] { return !rig.driver->get_connecting(); }));
+    REQUIRE(wait_until([&] { return !rig.driver->get_connecting(); }));
     CHECK_FALSE(rig.driver->get_connected());
     CHECK(rig.received() == std::vector<std::string>{":GVP#"});
 }
@@ -366,7 +359,7 @@ TEST_CASE("ZWO disconnect racing a delayed identity cannot leave a connected tel
         REQUIRE(disconnect.wait_for(5s) == std::future_status::ready);
         disconnect.get();
     }
-    REQUIRE(eventually([&] { return !rig.driver->get_connecting(); }));
+    REQUIRE(wait_until([&] { return !rig.driver->get_connecting(); }));
     CHECK_FALSE(rig.driver->get_connected());
     CHECK(rig.driver->get_device_state().empty());
 }
@@ -387,7 +380,7 @@ TEST_CASE("ZWO lost link reprobes identity but redundant Connected true does not
     REQUIRE(rig.clock.wait_for_waiters(1, 5s));
     REQUIRE(rig.server.drop_connections());
     rig.tick();
-    REQUIRE(eventually([&] { return !rig.driver->get_connected(); }));
+    REQUIRE(wait_until([&] { return !rig.driver->get_connected(); }));
     const auto before = rig.received().size();
     require_alpaca_error([&] { rig.driver->set_connected(true); }, AlpacaError::DriverException);
     CHECK_FALSE(rig.driver->get_connected());
@@ -430,7 +423,7 @@ TEST_CASE("ZWO reconnect refuses a different mount serial and retains the origin
     REQUIRE(rig.driver->get_connected());
     REQUIRE(rig.server.drop_connections());
     rig.tick();
-    REQUIRE(eventually([&] { return !rig.driver->get_connected(); }));
+    REQUIRE(wait_until([&] { return !rig.driver->get_connected(); }));
 
     rig.set_serial("FEDCBA543210#");
     for (int attempt = 0; attempt < 2; ++attempt) {
@@ -438,7 +431,7 @@ TEST_CASE("ZWO reconnect refuses a different mount serial and retains the origin
         std::string message;
         if (asynchronous) {
             rig.driver->connect();
-            REQUIRE(eventually([&] { return !rig.driver->get_connecting(); }));
+            REQUIRE(wait_until([&] { return !rig.driver->get_connecting(); }));
             message = rig.driver->get_last_connect_error();
         } else {
             try {
@@ -463,7 +456,7 @@ TEST_CASE("ZWO reconnect refuses a different mount serial and retains the origin
 
     rig.set_serial("012345abcdef#");
     rig.driver->connect();
-    REQUIRE(eventually([&] { return !rig.driver->get_connecting(); }));
+    REQUIRE(wait_until([&] { return !rig.driver->get_connecting(); }));
     CHECK(rig.driver->get_connected());
     CHECK(rig.driver->get_last_connect_error().empty());
 }
@@ -487,7 +480,7 @@ TEST_CASE("ZWO Disconnect preserves the admitted serial until driver recreation"
     REQUIRE(rig.clock.wait_for_waiters(1, 5s));
     if (asynchronous) {
         rig.driver->disconnect();
-        REQUIRE(eventually([&] { return !rig.driver->get_connecting(); }));
+        REQUIRE(wait_until([&] { return !rig.driver->get_connecting(); }));
     } else {
         rig.driver->set_connected(false);
     }
@@ -531,7 +524,7 @@ TEST_CASE("ZWO serial telemetry loss cannot rebind to a different mount at the s
     REQUIRE(rig.clock.wait_for_waiters(1, 5s));
     rig.clock.advance(31s);
     REQUIRE(rig.clock.wait_for_woken_settled(5s));
-    REQUIRE(eventually([&] { return !rig.driver->get_connected(); }));
+    REQUIRE(wait_until([&] { return !rig.driver->get_connected(); }));
     rig.bad_status.store(false);
     rig.set_serial("FEDCBA543210#");
     const auto before = rig.received().size();
@@ -707,7 +700,7 @@ TEST_CASE("ZWO unavailable serial identity refuses before writes and permits ret
     rig.set_serial("e1#");
     if (asynchronous) {
         rig.driver->connect();
-        REQUIRE(eventually([&] { return !rig.driver->get_connecting(); }));
+        REQUIRE(wait_until([&] { return !rig.driver->get_connecting(); }));
         CHECK_FALSE(rig.driver->get_last_connect_error().empty());
     } else {
         require_alpaca_error([&] { rig.driver->set_connected(true); }, AlpacaError::DriverException);
@@ -771,7 +764,7 @@ TEST_CASE("ZWO mount identity claims release on disconnect loss and destruction"
     SECTION("transport loss") {
         REQUIRE(rig.server.drop_connections());
         rig.tick();
-        REQUIRE(eventually([&] { return !rig.driver->get_connected(); }));
+        REQUIRE(wait_until([&] { return !rig.driver->get_connected(); }));
     }
     SECTION("destruction") { rig.driver.reset(); }
     CHECK_NOTHROW(automatic.claim("012345ABCDEF", true, 9));

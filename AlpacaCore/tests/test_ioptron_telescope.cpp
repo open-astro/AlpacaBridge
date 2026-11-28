@@ -838,15 +838,7 @@ std::function<bool(const std::string&)> on_command(std::string prefix) {
     return [prefix = std::move(prefix)](const std::string& cmd) { return cmd.rfind(prefix, 0) == 0; };
 }
 
-// Real-time bound for the fakes' I/O threads only; every driver wait runs on the fake clock.
-bool wait_until(const std::function<bool()>& done) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (!done()) {
-        if (std::chrono::steady_clock::now() >= deadline) return false;
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    return true;
-}
+using alpacacore::test::wait_until;
 
 // Decision 0009 rule 3, and rule 5 while the reason is kept.
 void require_lost(alpacacore::TelescopeDriver& driver, std::string_view reason) {
