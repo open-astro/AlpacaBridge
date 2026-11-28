@@ -11,55 +11,21 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/gpiod_line_backend.h>
 #include <alpacacore/util/power_port_switch_driver.h>
-#include <alpacacore/vendor/touptek/touptek_powerbox_wrapper.h>
+#include <alpacacore/util/soft_pwm_ports.h>
 #include <alpacacore/vendor/touptek/touptek_switch_driver.h>
 
-#include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
-#include <vector>
 
 namespace alpacacore::vendor::touptek {
 
 namespace {
 
 constexpr const char* kLogCategory = "TOUPTEK_STELLAVITA";
-
-// The port wrapper the shared driver drives: the libgpiod power box it owns, or
-// a power box a test injects (which must outlive the driver).
-class StellaVitaPowerbox {
-public:
-    StellaVitaPowerbox(std::string gpio_chip_path, std::vector<StellaVitaPortConfig> ports,
-                       std::uint32_t pwm_frequency_hz)
-        : owned_(
-              std::make_unique<TouptekPowerboxWrapper>(std::move(gpio_chip_path), std::move(ports), pwm_frequency_hz)),
-          box_(*owned_) {}
-
-    explicit StellaVitaPowerbox(TouptekPowerboxSDK& injected) : box_(injected) {}
-
-    StellaVitaPowerbox(const StellaVitaPowerbox&) = delete;
-    StellaVitaPowerbox& operator=(const StellaVitaPowerbox&) = delete;
-    StellaVitaPowerbox(StellaVitaPowerbox&&) = delete;
-    StellaVitaPowerbox& operator=(StellaVitaPowerbox&&) = delete;
-    ~StellaVitaPowerbox() = default;
-
-    void open() { box_.open(); }
-    void close() { box_.close(); }
-    bool is_open() const { return box_.is_open(); }
-    std::size_t port_count() const { return box_.port_count(); }
-    int get_value(std::size_t index) const { return box_.get_value(index); }
-    void set_value(std::size_t index, int value) { box_.set_value(index, value); }
-
-private:
-    // Set only by the production constructor; declared before box_, which refers to it.
-    std::unique_ptr<TouptekPowerboxWrapper> owned_;
-    TouptekPowerboxSDK& box_;
-};
-
-using StellaVitaSwitchDriver = util::PowerPortSwitchDriver<StellaVitaPowerbox>;
+constexpr const char* kGpioConsumer = "alpacabridge-stellavita-powerbox";
 
 util::PowerPortProfile stellavita_profile(const TouptekSwitchConfig& config) {
     util::PowerPortProfile profile;
@@ -84,6 +50,26 @@ util::PowerPortProfile stellavita_profile(const TouptekSwitchConfig& config) {
     return profile;
 }
 
+// The GPIO chip is a libgpiod character-device node; it must be an absolute /dev/ path. Reject anything else up
+// front (empty string, relative path, a bare "gpiochip0") with a clear InvalidValue rather than letting it reach
+// gpiod_chip_open() as an opaque failure.
+util::PortsConfig stellavita_ports(const TouptekSwitchConfig& config) {
+    if (config.gpio_chip_path.rfind("/dev/", 0) != 0) {
+        throw AlpacaException(
+            "StellaVita GPIO chip path must be an absolute /dev/ device node (got '" + config.gpio_chip_path + "')",
+            AlpacaError::InvalidValue);
+    }
+    util::PortsConfig ports;
+    ports.device_path = config.gpio_chip_path;
+    ports.pwm_frequency_hz = config.pwm_frequency_hz;
+    ports.model_name = "StellaVita";
+    ports.log_category = kLogCategory;
+    for (const auto& p : config.ports) {
+        ports.ports.push_back({p.name, p.gpio_line, p.writable, p.pwm_enabled});
+    }
+    return ports;
+}
+
 }  // namespace
 
 TouptekSwitchConfig default_stellavita_config() {
@@ -103,15 +89,16 @@ TouptekSwitchConfig default_stellavita_config() {
     return cfg;
 }
 
-std::unique_ptr<SwitchDriver> create_touptek_switch(int device_number, TouptekSwitchConfig config) {
-    auto profile = stellavita_profile(config);
-    return std::make_unique<StellaVitaSwitchDriver>(device_number, std::move(profile), std::move(config.gpio_chip_path),
-                                                    std::move(config.ports), config.pwm_frequency_hz);
+std::unique_ptr<SwitchDriver> create_touptek_switch(int device_number, const TouptekSwitchConfig& config) {
+    auto ports = stellavita_ports(config);
+    return std::make_unique<util::PowerPortSwitchDriver<util::OwnedSoftPwmPorts<util::GpiodLineBackend>>>(
+        device_number, stellavita_profile(config), std::move(ports), kGpioConsumer);
 }
 
 std::unique_ptr<SwitchDriver> create_touptek_switch(int device_number, const TouptekSwitchConfig& config,
-                                                    TouptekPowerboxSDK& powerbox) {
-    return std::make_unique<StellaVitaSwitchDriver>(device_number, stellavita_profile(config), powerbox);
+                                                    util::GpioLineBackend& backend, util::TaskClock& clock) {
+    return std::make_unique<util::PowerPortSwitchDriver<util::SoftPwmPorts>>(device_number, stellavita_profile(config),
+                                                                             stellavita_ports(config), backend, clock);
 }
 
 }  // namespace alpacacore::vendor::touptek

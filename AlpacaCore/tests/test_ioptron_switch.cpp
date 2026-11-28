@@ -15,19 +15,37 @@
 #include <alpacacore/vendor/ioptron/ioptron_switch_driver.h>
 #include <alpacacore/version.h>
 
+#include <chrono>
 #include <cmath>
 #include <functional>
 #include <map>
+#include <memory>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "driver_rig.h"
+#include "fake_gpio_line_backend.h"
 #include "fake_ioptron_gpio.h"
 #include "power_port_test_dir.h"
 
 namespace {
 
 using alpacacore::test::alpaca_error_message;
+using alpacacore::test::FakeGpioLineBackend;
 using alpacacore::test::require_alpaca_error;
+using Kind = FakeGpioLineBackend::Event::Kind;
+
+// The virtual clock and the fake backend a driver runs over, declared before the driver so they outlive it
+// (decision 0027). On the default layout the backend's line index 0 is DC1 (GPIO 118) and 1 is DC2 (GPIO 114).
+using Rig = alpacacore::test::FakeIoptronGpio;
+
+int count_events(const FakeGpioLineBackend& gpio, Kind kind) {
+    int n = 0;
+    for (const auto& e : gpio.events()) {
+        n += e.kind == kind ? 1 : 0;
+    }
+    return n;
+}
 
 }  // namespace
 
@@ -216,9 +234,8 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - Unsupported methods", "[ioptro
 // NotConnected comes first: the case above).
 TEST_CASE("iOptron iMate PowerBox Switch Driver - connected read-only and async writes are NotImplemented",
           "[ioptron][switch][unit]") {
-    alpacacore::test::FakeIoptronGpio gpio;
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_switch(
-        0, alpacacore::vendor::ioptron::default_imate_powerbox_config(), gpio);
+    Rig rig;
+    auto driver = rig.make(alpacacore::vendor::ioptron::default_imate_powerbox_config());
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     require_alpaca_error([&]() { driver->set_switch(0, false); }, alpacacore::AlpacaError::NotImplemented);
@@ -287,39 +304,42 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - Rejects invalid GPIO chip path
 // Issue #300: a connect reads DC1/DC2 instead of assuming the boot left them on.
 TEST_CASE("iOptron iMate PowerBox Switch Driver - connecting reports the line levels and writes nothing",
           "[ioptron][switch][unit][power-on]") {
-    alpacacore::test::FakeIoptronGpio gpio;
+    Rig rig;
     auto cfg = alpacacore::vendor::ioptron::default_imate_powerbox_config();
     cfg.ports[2].pwm_enabled = true;
-    gpio.set_level(cfg.ports[1].gpio_line, 0);  // DC1 left off
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_switch(0, cfg, gpio);
+    rig.gpio.set_level(0, 0);  // DC1 left off
+    auto driver = rig.make(cfg);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     CHECK(driver->get_switch(0));               // DC3 pass-through: always on
     CHECK_FALSE(driver->get_switch(1));         // DC1 reads its line, not "on"
     CHECK(driver->get_switch_value(2) == 100);  // DC2 high: a PWM port at full duty
-    // The DC2 PWM worker may re-drive its steady (high) level once; nothing may change a line.
-    CHECK(gpio.level_changes() == 0);
-    CHECK(gpio.level(cfg.ports[1].gpio_line) == 0);
-    CHECK(gpio.level(cfg.ports[2].gpio_line) == 1);
+    // The claim covers the two lines with a GPIO, on the configured chip, and writes none (decision 0021).
+    CHECK(rig.gpio.opened_path() == "/dev/gpiochip1");
+    CHECK(rig.gpio.opened_lines() == std::vector<unsigned int>{118u, 114u});
+    CHECK(rig.gpio.write_count() == 0);
+    driver->set_connected(false);
 }
 
 TEST_CASE("iOptron iMate PowerBox Switch Driver - off at server start turns DC1/DC2 off and holds them",
           "[ioptron][switch][unit][power-on]") {
     alpacacore::test::TempPowerPortDir dir;
-    alpacacore::test::FakeIoptronGpio gpio;
+    Rig rig;
     auto cfg = alpacacore::vendor::ioptron::default_imate_powerbox_config();
     cfg.power_on_state = alpacacore::util::PowerOnState::Off;
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_switch(0, cfg, gpio);
+    auto driver = rig.make(cfg);
     driver->apply_power_on_state(true);
     CHECK_FALSE(driver->get_connected());
-    CHECK(gpio.claimed());
-    CHECK(gpio.level(cfg.ports[1].gpio_line) == 0);
-    CHECK(gpio.level(cfg.ports[2].gpio_line) == 0);
+    CHECK(rig.gpio.is_open());
+    // One low write per line, and no other write.
+    REQUIRE(rig.gpio.write_count() == 2);
+    CHECK_FALSE(rig.gpio.writes_to(0).at(0).high);
+    CHECK_FALSE(rig.gpio.writes_to(1).at(0).high);
     // DC3 has no line and is never part of the plan.
     CHECK(alpacacore::util::PowerPortStateStore::load(driver->get_unique_id()) ==
           std::map<int, double>{{1, 0.0}, {2, 0.0}});
     driver->set_connected(true);
-    CHECK(gpio.requests() == 1);
+    CHECK(count_events(rig.gpio, Kind::Open) == 1);
     CHECK_FALSE(driver->get_switch(1));
     CHECK(driver->get_switch(0));
 }
@@ -327,10 +347,10 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - off at server start turns DC1/
 TEST_CASE("iOptron iMate PowerBox Switch Driver - a client's write is saved per UniqueID and port",
           "[ioptron][switch][unit][power-on]") {
     alpacacore::test::TempPowerPortDir dir;
-    alpacacore::test::FakeIoptronGpio gpio;
+    Rig rig;
     auto cfg = alpacacore::vendor::ioptron::default_imate_powerbox_config();
     cfg.ports[2].pwm_enabled = true;
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_switch(0, cfg, gpio);
+    auto driver = rig.make(cfg);
     driver->set_connected(true);
     driver->set_switch(1, false);
     driver->set_switch_value(2, 35.0);
@@ -342,19 +362,48 @@ TEST_CASE("iOptron iMate PowerBox Switch Driver - a client's write is saved per 
 TEST_CASE("iOptron iMate PowerBox Switch Driver - a Disconnect before any Connect keeps lines a start holds",
           "[ioptron][switch][unit][power-on]") {
     alpacacore::test::TempPowerPortDir dir;
-    alpacacore::test::FakeIoptronGpio gpio;
+    Rig rig;
     auto cfg = alpacacore::vendor::ioptron::default_imate_powerbox_config();
     cfg.power_on_state = alpacacore::util::PowerOnState::Off;
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_switch(0, cfg, gpio);
+    auto driver = rig.make(cfg);
     driver->apply_power_on_state(true);
-    REQUIRE(gpio.claimed());
+    REQUIRE(rig.gpio.is_open());
     // A client's Disconnect with nothing connected must not release them (decision 0021 rule 5).
     driver->set_connected(false);
-    CHECK(gpio.claimed());
-    CHECK(gpio.releases() == 0);
+    CHECK(rig.gpio.is_open());
+    CHECK(count_events(rig.gpio, Kind::Close) == 0);
     // A Connect then a Disconnect releases them as before.
     driver->set_connected(true);
     driver->set_connected(false);
-    CHECK_FALSE(gpio.claimed());
-    CHECK(gpio.requests() == 1);
+    CHECK_FALSE(rig.gpio.is_open());
+    CHECK(count_events(rig.gpio, Kind::Open) == 1);
+}
+
+// Decision 0027: the iMate's PWM duty is the engine's, on the task clock. Falsified by: ioptron_switch_driver.cpp
+// imate_ports() not passing pwm_frequency_hz to the engine (the period stays at the engine's 50 Hz, the low edge
+// lands at 10 ms), or not passing pwm_enabled (the port is boolean and writes no edges).
+TEST_CASE("iOptron iMate PowerBox Switch Driver - a PWM port bit-bangs its duty at the configured frequency",
+          "[ioptron][switch][unit][power-on]") {
+    using namespace std::chrono_literals;
+    Rig rig;
+    auto cfg = alpacacore::vendor::ioptron::default_imate_powerbox_config();
+    cfg.ports[1].pwm_enabled = true;  // DC1, backend line index 0
+    cfg.pwm_frequency_hz = 100;
+    auto driver = rig.make(cfg);
+    driver->set_connected(true);
+    const auto base = rig.clock.wait_count();
+    driver->set_switch_value(1, 50.0);
+    REQUIRE(rig.clock.wait_for_wait_count(base + 1, 2s));
+
+    auto writes = rig.gpio.writes_to(0);
+    REQUIRE(writes.size() == 1);
+    CHECK(writes[0].high);
+
+    rig.clock.advance(5ms);  // 50 % of a 10 ms period
+    REQUIRE(rig.clock.wait_for_wait_count(base + 2, 2s));
+    writes = rig.gpio.writes_to(0);
+    REQUIRE(writes.size() == 2);
+    CHECK_FALSE(writes[1].high);
+    CHECK(std::chrono::duration_cast<std::chrono::microseconds>(writes[1].at - writes[0].at).count() == 5000);
+    driver->set_connected(false);
 }

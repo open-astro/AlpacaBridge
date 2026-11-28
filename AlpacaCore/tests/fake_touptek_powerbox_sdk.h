@@ -12,177 +12,35 @@
 
 #pragma once
 
-#include <alpacacore/util/error_handling.h>
-#include <alpacacore/util/power_port_state_store.h>
-#include <alpacacore/vendor/touptek/touptek_powerbox_sdk.h>
+#include <alpacacore/switch_driver.h>
 #include <alpacacore/vendor/touptek/touptek_switch_driver.h>
 
-#include <atomic>
-#include <chrono>
-#include <mutex>
-#include <string>
-#include <thread>
-#include <vector>
+#include <memory>
 
-#include "connect_hold_gate.h"
+#include "fake_gpio_line_backend.h"
+#include "fake_task_clock.h"
 
 namespace alpacacore::test {
 
-// Scripted StellaVita power box: in-memory port values, no GPIO chip. Shared by the
-// switch seam cases, the connected stress case and the contract sweep.
-// Every method but open_delay's sleep runs under one internal mutex, and is_open() is a
-// lock-free atomic like the real wrapper's (issue #382), so the fake is race-free under
-// a concurrent storm. The public knobs and counters are plain fields for single-threaded
-// tests, set before the driver starts and read after it stops; the call counters are
-// guarded and read through the accessors.
+// The StellaVita power box's GPIO side for the tests and the fake ConformU run (decision 0027): a virtual clock and
+// the FakeGpioLineBackend stamped by it, bundled so one object outlives the driver built over them. The file keeps
+// its name from the TouptekPowerboxSDK seam it replaced, so the ConformU report and run-list record of the row keep
+// theirs. The driver is the production one, util::PowerPortSwitchDriver over util::SoftPwmPorts, so nothing here
+// models the board: a case reads the backend's recorded events. On the default layout the backend's line index is
+// the port index (Port 1 GPIO 18, Port 2 GPIO 10, Port 3 GPIO 17, Port 4 GPIO 4); a read-only port has no line and
+// shifts the later ones down. Every line reads high until set_level() says otherwise, as config.txt leaves them.
 //
-// KNOWN PARITY GAPS (the real wrapper is harsher here; prefer closing a gap):
-// - No PWM worker thread: a PWM duty is a stored number, never a waveform.
-// - No line-write failure: the real set_value() throws DriverException when
-//   gpiod_line_request_set_value() fails; set fail_open for the connect side only.
-// - open() is instant unless open_delay is set, where the real one requests the chip and lines.
-// - gpio_chip_path() and pwm_frequency_hz() answer the constructor values unchecked; the real
-//   wrapper rejects a non-/dev/ path and a frequency outside 1..100000 at construction.
-class FakeTouptekPowerboxSDK final : public vendor::touptek::TouptekPowerboxSDK {
-public:
-    using Port = vendor::touptek::StellaVitaPortConfig;
+// KNOWN PARITY GAPS (the real backend is harsher here): open() fails only after fail_open() or while its own
+// claim is held; the real one also fails on a missing chip, a line another process holds or a bad offset. The fake
+// ConformU server drives the driver on the wall clock (it passes no clock), so a PWM port there runs in real time; the
+// clock here only stamps the backend's events.
+struct FakeTouptekPowerbox {
+    FakeTaskClock clock;
+    FakeGpioLineBackend gpio{clock};
 
-    explicit FakeTouptekPowerboxSDK(std::vector<Port> port_table = vendor::touptek::default_stellavita_config().ports,
-                                    std::string chip_path = "/dev/gpiochip0", std::uint32_t frequency_hz = 100)
-        : ports_(std::move(port_table)), chip_path_(std::move(chip_path)), frequency_hz_(frequency_hz) {
-        // Ports start on, as the real wrapper's constructor sets them (100 for PWM, 1 otherwise),
-        // and every line starts high, as the StellaVita's config.txt boots it.
-        for (const auto& p : ports_) {
-            values_.push_back(p.pwm_enabled ? 100 : 1);
-            line_levels_.push_back(1);
-        }
+    std::unique_ptr<SwitchDriver> make(const vendor::touptek::TouptekSwitchConfig& config) {
+        return vendor::touptek::create_touptek_switch(0, config, gpio, clock);
     }
-
-    // While true every open() throws (a connect that must fail); the flag is never cleared.
-    bool fail_open{false};
-    // open() sleeps this long before returning (a connect held open).
-    std::chrono::milliseconds open_delay{0};
-    // While true every close() throws after counting the call; the real close() never throws, so this exists only
-    // to reach the driver's destruction warning.
-    bool fail_close{false};
-
-    void open() override {
-        alpacacore::test::connect_hold(open_delay);  // connect_hold_gate.h
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++open_calls_;
-        if (fail_open) throw AlpacaException("scripted open failure", AlpacaError::DriverException);
-        // As the real wrapper: each line keeps its level and the cache reconciles with it.
-        for (std::size_t i = 0; i < ports_.size(); ++i) {
-            values_[i] = util::reconcile_cached_value(values_[i], line_levels_[i], ports_[i].pwm_enabled ? 100 : 1);
-        }
-        open_.store(true, std::memory_order_release);
-    }
-    void close() override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++close_calls_;
-        open_.store(false, std::memory_order_release);
-        if (fail_close) throw AlpacaException("scripted close failure", AlpacaError::DriverException);
-    }
-
-    // Sets a line's level as the boot or a previous session left it (no open needed).
-    void set_line_level(std::size_t index, int level) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_index(index);
-        line_levels_[index] = level != 0 ? 1 : 0;
-    }
-    // The steady level of a line: a PWM port reads high for any duty above 0.
-    int line_level(std::size_t index) const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_index(index);
-        return line_levels_[index];
-    }
-    bool is_open() const override {
-        ++is_open_calls_;
-        return open_.load(std::memory_order_acquire);
-    }
-
-    std::size_t port_count() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++port_count_calls_;
-        return ports_.size();
-    }
-    Port port_config(std::size_t index) const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++port_config_calls_;
-        check_index(index);
-        return ports_[index];
-    }
-    int get_value(std::size_t index) const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++get_value_calls_;
-        check_index(index);
-        return values_[index];
-    }
-    void set_value(std::size_t index, int value) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++set_value_calls_;
-        check_index(index);
-        const Port& cfg = ports_[index];
-        if (!cfg.writable) {
-            throw AlpacaException("Port '" + cfg.name + "' is read-only", AlpacaError::NotImplemented);
-        }
-        if (cfg.pwm_enabled ? (value < 0 || value > 100) : (value != 0 && value != 1)) {
-            throw AlpacaException("value out of range", AlpacaError::InvalidValue);
-        }
-        if (!open_.load(std::memory_order_acquire)) {
-            throw AlpacaException("GPIO chip is not open", AlpacaError::NotConnected);
-        }
-        values_[index] = value;
-        line_levels_[index] = value > 0 ? 1 : 0;
-    }
-
-    std::string gpio_chip_path() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++gpio_chip_path_calls_;
-        return chip_path_;
-    }
-    std::uint32_t pwm_frequency_hz() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++pwm_frequency_hz_calls_;
-        return frequency_hz_;
-    }
-
-    int open_calls() const { return read(open_calls_); }
-    int close_calls() const { return read(close_calls_); }
-    int is_open_calls() const { return is_open_calls_.load(); }
-    int port_count_calls() const { return read(port_count_calls_); }
-    int port_config_calls() const { return read(port_config_calls_); }
-    int get_value_calls() const { return read(get_value_calls_); }
-    int set_value_calls() const { return read(set_value_calls_); }
-    int gpio_chip_path_calls() const { return read(gpio_chip_path_calls_); }
-    int pwm_frequency_hz_calls() const { return read(pwm_frequency_hz_calls_); }
-
-private:
-    int read(const int& counter) const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return counter;
-    }
-    // The real wrapper throws InvalidValue for an index past the table.
-    void check_index(std::size_t index) const {
-        if (index >= ports_.size()) throw AlpacaException("Port index out of range", AlpacaError::InvalidValue);
-    }
-
-    mutable std::mutex mutex_;
-    std::vector<Port> ports_;
-    std::vector<int> values_;
-    std::vector<int> line_levels_;
-    std::string chip_path_;
-    std::uint32_t frequency_hz_;
-    std::atomic<bool> open_{false};
-    mutable int open_calls_{0};
-    mutable int close_calls_{0};
-    mutable std::atomic<int> is_open_calls_{0};
-    mutable int port_count_calls_{0};
-    mutable int port_config_calls_{0};
-    mutable int get_value_calls_{0};
-    mutable int set_value_calls_{0};
-    mutable int gpio_chip_path_calls_{0};
-    mutable int pwm_frequency_hz_calls_{0};
 };
 
 }  // namespace alpacacore::test

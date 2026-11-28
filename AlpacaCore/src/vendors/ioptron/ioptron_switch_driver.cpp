@@ -10,9 +10,13 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
+#include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/gpiod_line_backend.h>
 #include <alpacacore/util/power_port_switch_driver.h>
+#include <alpacacore/util/soft_pwm_ports.h>
 #include <alpacacore/vendor/ioptron/ioptron_switch_driver.h>
 
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -21,8 +25,7 @@ namespace alpacacore::vendor::ioptron {
 namespace {
 
 constexpr const char* kLogCategory = "IOPTRON_POWERBOX";
-
-using PowerboxSwitchDriver = util::PowerPortSwitchDriver<IoptronPowerboxWrapper>;
+constexpr const char* kGpioConsumer = "alpacabridge-imate-powerbox";
 
 util::PowerPortProfile imate_profile(const IoptronSwitchConfig& config) {
     util::PowerPortProfile profile;
@@ -32,7 +35,7 @@ util::PowerPortProfile imate_profile(const IoptronSwitchConfig& config) {
     profile.unique_id_prefix = "iOptron_iMate_PowerBox_";
     profile.log_category = kLogCategory;
     profile.not_connected_message = "iMate PowerBox not connected";
-    // Logged only when close() throws. This wrapper's close() logs a failed settle instead of throwing, so only an
+    // Logged only when close() throws. The engine's close() logs a failed settle instead of throwing, so only an
     // unexpected exception (a failed thread join or allocation) reaches it.
     profile.destruction_warning = "Error during iMate PowerBox switch destruction: ";
     profile.power_on_state = config.power_on_state;
@@ -51,6 +54,30 @@ util::PowerPortProfile imate_profile(const IoptronSwitchConfig& config) {
     return profile;
 }
 
+// The GPIO chip is a libgpiod character-device node; it must be an absolute /dev/ path. Reject anything else up
+// front (empty string, relative path, a bare "gpiochip0") with a clear InvalidValue rather than letting it reach
+// gpiod_chip_open() as an opaque failure.
+util::PortsConfig imate_ports(const IoptronSwitchConfig& config) {
+    if (config.gpio_chip_path.rfind("/dev/", 0) != 0) {
+        throw AlpacaException(
+            "iMate PowerBox GPIO chip path must be an absolute /dev/ device node (got '" + config.gpio_chip_path + "')",
+            AlpacaError::InvalidValue);
+    }
+    util::PortsConfig ports;
+    ports.device_path = config.gpio_chip_path;
+    ports.pwm_frequency_hz = config.pwm_frequency_hz;
+    ports.model_name = "iMate PowerBox";
+    ports.log_category = kLogCategory;
+    for (const auto& p : config.ports) {
+        std::optional<unsigned int> line;
+        if (p.has_line) {
+            line = p.gpio_line;
+        }
+        ports.ports.push_back({p.name, line, p.writable, p.pwm_enabled});
+    }
+    return ports;
+}
+
 }  // namespace
 
 IoptronSwitchConfig default_imate_powerbox_config() {
@@ -67,17 +94,17 @@ IoptronSwitchConfig default_imate_powerbox_config() {
     return cfg;
 }
 
-std::unique_ptr<SwitchDriver> create_ioptron_switch(int device_number, IoptronSwitchConfig config) {
-    auto profile = imate_profile(config);
-    return std::make_unique<PowerboxSwitchDriver>(device_number, std::move(profile), config.gpio_chip_path,
-                                                  std::move(config.ports), config.pwm_frequency_hz);
+std::unique_ptr<SwitchDriver> create_ioptron_switch(int device_number, const IoptronSwitchConfig& config) {
+    auto ports = imate_ports(config);
+    return std::make_unique<util::PowerPortSwitchDriver<util::OwnedSoftPwmPorts<util::GpiodLineBackend>>>(
+        device_number, imate_profile(config), std::move(ports), kGpioConsumer);
 }
 
-std::unique_ptr<SwitchDriver> create_ioptron_switch(int device_number, IoptronSwitchConfig config,
-                                                    IoptronGpioBackend& backend) {
-    auto profile = imate_profile(config);
-    return std::make_unique<PowerboxSwitchDriver>(device_number, std::move(profile), config.gpio_chip_path,
-                                                  std::move(config.ports), config.pwm_frequency_hz, &backend);
+std::unique_ptr<SwitchDriver> create_ioptron_switch(int device_number, const IoptronSwitchConfig& config,
+                                                    util::GpioLineBackend& backend, util::TaskClock& clock) {
+    auto ports = imate_ports(config);
+    return std::make_unique<util::PowerPortSwitchDriver<util::SoftPwmPorts>>(device_number, imate_profile(config),
+                                                                             std::move(ports), backend, clock);
 }
 
 }  // namespace alpacacore::vendor::ioptron

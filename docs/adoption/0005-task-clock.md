@@ -62,3 +62,5 @@ Symbol: `TaskClock`
 | remotealpaca cover calibrator | `AlpacaCore/src/vendors/remotealpaca/remotealpaca_covercalibrator_driver.cpp` | adopted | #1753, #2704 | as the observing conditions row, through the vendor's shared `UpstreamProxy` (`upstream_proxy.h`) |
 | Player One thermal switch | `AlpacaCore/src/vendors/playerone/playerone_switch_driver.cpp` | adopted | #2088 | status cache age and its fault stamp |
 | Gemini PDH switch | `AlpacaCore/src/vendors/gemini/gemini_pdh_switch_driver.cpp` | adopted | #1987 | fault stamp (the decision 0009 staleness bound) |
+| iOptron iMate PowerBox switch | `AlpacaCore/src/vendors/ioptron/ioptron_switch_driver.cpp` | adopted | #2722 | the soft-PWM period waits, in `util::SoftPwmPorts` ([decision 0027](../decisions/0027-gpio-soft-pwm-composition.md)); the factory's test overload takes the clock |
+| ToupTek StellaVita switch | `AlpacaCore/src/vendors/touptek/touptek_switch_driver.cpp` | adopted | #2722 | as the iMate row |

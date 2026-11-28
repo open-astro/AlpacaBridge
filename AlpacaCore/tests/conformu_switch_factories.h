@@ -123,8 +123,9 @@ inline FakeIoptronGpio& ioptron_gpio() {
     return gpio;
 }
 inline std::unique_ptr<SwitchDriver> make_ioptron_switch(int device_number) {
+    // The wall clock, not the bundle's virtual one: ConformU waits in real time.
     return vendor::ioptron::create_ioptron_switch(device_number, vendor::ioptron::default_imate_powerbox_config(),
-                                                  ioptron_gpio());
+                                                  ioptron_gpio().gpio);
 }
 #endif
 
@@ -139,13 +140,14 @@ inline std::unique_ptr<SwitchDriver> make_gemini_pdh_switch(int device_number) {
 #endif
 
 #if defined(FAKE_CONFORMU_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
-inline FakeTouptekPowerboxSDK& touptek_powerbox() {
-    static FakeTouptekPowerboxSDK sdk;
-    return sdk;
+inline FakeTouptekPowerbox& touptek_powerbox() {
+    static FakeTouptekPowerbox box;
+    return box;
 }
 inline std::unique_ptr<SwitchDriver> make_touptek_switch(int device_number) {
+    // The wall clock, not the bundle's virtual one: ConformU waits in real time.
     return vendor::touptek::create_touptek_switch(device_number, vendor::touptek::default_stellavita_config(),
-                                                  touptek_powerbox());
+                                                  touptek_powerbox().gpio);
 }
 #endif
 

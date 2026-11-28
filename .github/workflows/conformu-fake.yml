@@ -107,6 +107,7 @@ on:
       - "AlpacaCore/tests/fake_wandererastro_rotator.h"
       - "AlpacaCore/tests/conformu_switch_factories.h"
       - "AlpacaCore/tests/fake_ioptron_gpio.h"
+      - "AlpacaCore/tests/fake_gpio_line_backend.h"
       - "AlpacaCore/tests/fake_zwo_sdk.h"
       - "AlpacaCore/tests/fake_zwo_asiair_gpiod.h"
       - "AlpacaCore/tests/fake_zwo_asiair_plus_ioctl.h"
@@ -258,6 +259,7 @@ jobs:
                           "AlpacaCore/tests/locked_qhy_sdk.h": "qhy",
                           "AlpacaCore/tests/locked_touptek_sdk.h": "touptek",
                           "AlpacaCore/tests/fake_timed_completion.h": ("qhy", "playerone", "svbony"),
+                          "AlpacaCore/tests/fake_gpio_line_backend.h": ("ioptron", "touptek"),
                           "scripts/build_bundled_gphoto.sh": "gphoto",
                           "AlpacaCore/tests/conformu_observingconditions_factories.h": ("remotealpaca", "weewx"),
                           "AlpacaCore/tests/alpaca_upstream_script.h": "remotealpaca",
