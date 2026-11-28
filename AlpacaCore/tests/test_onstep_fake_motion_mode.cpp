@@ -253,6 +253,30 @@ TEST_CASE("FakeOnStepMount - a move and a pulse are ignored while the mount slew
     CHECK(rig.slewing());
 }
 
+TEST_CASE("FakeOnStepMount - :hQ# is refused during a GOTO, a guide move or while parked",
+          "[onstep][fake][mount-model][unit]") {
+    ModelledOnStep rig;  // the firmware's Park.cpp set() refusals, which SetPark reads with :GE#
+    rig.sync_to(6.0, "+40*00:00:00");
+    rig.set_target(rig.mount.motion().lst_hours(), "-30*00:00:00");
+    REQUIRE(rig.ask(":MS#") == "0");
+    CHECK(rig.ask(":hQ#") == "0");
+    CHECK(rig.last_error() == 22);
+    rig.advance(seconds(60));
+    REQUIRE_FALSE(rig.slewing());
+    CHECK(rig.ask(":Mge5000#").empty());
+    CHECK(rig.ask(":hQ#") == "0");
+    CHECK(rig.last_error() == 22);
+    rig.advance(seconds(6));
+    CHECK(rig.ask(":hQ#") == "1");
+    CHECK(rig.last_error() == 0);
+
+    REQUIRE(rig.ask(":hP#") == "1");
+    rig.advance(seconds(120));
+    REQUIRE(rig.has('P'));
+    CHECK(rig.ask(":hQ#") == "0");
+    CHECK(rig.last_error() == 9);
+}
+
 TEST_CASE("FakeOnStepMount - Park is reached after its travel time, tracking goes off and Unpark clears it",
           "[onstep][fake][mount-model][unit]") {
     ModelledOnStep rig;
@@ -275,7 +299,16 @@ TEST_CASE("FakeOnStepMount - Park is reached after its travel time, tracking goe
     CHECK(rig.ask(":ST0#") == "1");  // disabling a stopped mount is a no-op, as ASCOM requires of Tracking = false
     CHECK(rig.last_error() == 0);
     CHECK(rig.ask(":MS#") == "4");
+    CHECK(rig.last_error() == 18);  // digit 4 is code 18, "mount parked"
     CHECK(rig.ask(":CM#") == "E4#");
+    CHECK(rig.last_error() == 18);
+    CHECK(rig.ask(":hC#").empty());  // a home of a parked mount: code 18, nothing starts
+    CHECK(rig.last_error() == 18);
+    CHECK_FALSE(rig.has('h'));
+    CHECK(rig.has('P'));
+    CHECK(rig.ask(":hP#") == "0");  // already parked: code 9, which the driver takes as ASCOM's no-op
+    CHECK(rig.last_error() == 9);
+    CHECK(rig.has('P'));
 
     REQUIRE(rig.ask(":hR#") == "1");
     CHECK(rig.has('p'));

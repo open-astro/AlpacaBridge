@@ -28,9 +28,11 @@
 // What the firmware does that this fake keeps (the fake stays the HARSHER of the two, decision 0015):
 //   - :MS# is refused with the firmware's digit: 1 below the horizon limit (0 degrees here), 4 parked, 5 a GOTO already
 //     running (which it also stops), 8 an axis already in motion;
-//   - :Te# and :ST<rate># (tracking on) on a parked mount, :hP# and :hC# while moving (code 22), and :hR# on an
-//   unparked
-//     mount (code 11) are refused; :ST0# (tracking off) on a parked mount is accepted, as ASCOM requires;
+//   - on a parked mount :Te# and :ST<rate># (tracking on), :hP# and :hQ# are refused with code 9 (already parked),
+//     and :CM# ("E4#") and :hC# with code 18 (mount parked, no home starts); :ST0# (tracking off) is accepted, as
+//     ASCOM requires;
+//   - :hP# and :hC# while moving, :hQ# during a GOTO or a guide move (code 22), and :hR# on an unparked mount (code
+//     11) are refused;
 //   - a MoveAxis (:Mn#, :Ms#, :Me#, :Mw#) ends on its own kGuideTimeLimit after its last command, so a driver that
 //     does not re-send it loses it (GUIDE_TIME_LIMIT, OnStepX Guide.cpp), and a move or a pulse is ignored while the
 //     mount is parked or slewing.
@@ -39,7 +41,7 @@
 //   - A stopped axis does not brake: the firmware keeps `g` set for about 0.4 s after a stop.
 //   - Pier flips are off: :GX96# and :GX94# give the unknown-command "0#", so CanSetPierSide is false and the pier
 //     side reported in :GU# is the hour-angle rule (T east, W west, o at home or parked).
-//   - Only a refused GOTO, park and home set the error code; the limit-driven general error digit in :GU# stays 0.
+//   - Only a refused command sets a :GE# code; the limit-driven general error digit in :GU# stays 0.
 //   - A GOTO leaves the tracking state as it was (the firmware's behaviour at its end is not on rig evidence here).
 //
 // Every command is logged. The model owns time: a ConformU row runs it on the real clock, a unit case injects a clock
@@ -160,7 +162,15 @@ private:
     }
 
     // OnStepX Errors.h command errors the replies below set (the :MS# digit is the code less 14).
-    enum Error { kNone = 0, kParked = 9, kNotParked = 11, kBelowHorizon = 15, kGotoInProgress = 19, kInMotion = 22 };
+    enum Error {
+        kNone = 0,
+        kParked = 9,  // "already parked"
+        kNotParked = 11,
+        kBelowHorizon = 15,
+        kSlewInPark = 18,  // "mount parked"
+        kGotoInProgress = 19,
+        kInMotion = 22
+    };
 
     // ---- time: the model's clock, plus what a :SL#/:SC# write moved it by ----
 
@@ -329,7 +339,7 @@ private:
         // Park and home
         if (command == ":hP#") return park_locked();
         if (command == ":hR#") return unpark_locked();
-        if (command == ":hQ#") return numeric(true, kNone);
+        if (command == ":hQ#") return set_park_locked();
         if (command == ":hC#") {
             home_locked();
             return {};
@@ -352,7 +362,7 @@ private:
 
     std::string sync_locked() {
         if (model_.parked()) {
-            last_error_ = kParked;
+            last_error_ = kSlewInPark;
             return "E4#";
         }
         model_.set_position(target_ra_, target_dec_);
@@ -362,7 +372,7 @@ private:
 
     std::string goto_target_locked() {
         const auto s = model_.state();
-        if (s.parked) return refuse_goto(kParked, '4');
+        if (s.parked) return refuse_goto(kSlewInPark, '4');
         if (s.slewing) {
             model_.stop();
             return refuse_goto(kGotoInProgress, '5');
@@ -448,11 +458,18 @@ private:
     }
 
     std::string park_locked() {
+        if (model_.parked()) return numeric(false, kParked);
         if (model_.slewing() || moving_locked()) return numeric(false, kInMotion);
         model_.park();
         park_pending_ = true;
         home_pending_ = false;
         return numeric(true, kNone);
+    }
+
+    // Park.cpp set(): no new park position while parked, during a GOTO or during a guide move (a pulse included).
+    std::string set_park_locked() {
+        if (model_.parked()) return numeric(false, kParked);
+        return numeric(!model_.slewing() && !moving_locked() && !pulsing_locked(), kInMotion);
     }
 
     std::string unpark_locked() {
@@ -462,6 +479,10 @@ private:
     }
 
     void home_locked() {
+        if (model_.parked()) {
+            last_error_ = kSlewInPark;
+            return;
+        }
         if (model_.slewing() || moving_locked()) {
             last_error_ = kInMotion;
             return;

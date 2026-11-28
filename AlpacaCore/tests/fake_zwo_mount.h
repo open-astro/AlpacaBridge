@@ -860,7 +860,7 @@ private:
     const std::string identity_;
     const std::unique_ptr<FakeMountMotionModel> motion_;  // ConformU mode only
 
-    std::mutex mutex_;  // mount state (leaf: nothing is called while it is held but the clock's now())
+    std::mutex mutex_;  // mount state; under it only the clock's now() and, in ConformU mode, motion_ (its own leaf)
     virtual_duration slew_duration_ = std::chrono::seconds(5);
     double land_short_by_arcsec_ = 0.0;
     std::string goto_reply_;
