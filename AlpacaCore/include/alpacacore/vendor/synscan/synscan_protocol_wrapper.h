@@ -12,9 +12,10 @@
 
 #pragma once
 
-#include <string>
-#include <memory>
 #include <chrono>
+#include <functional>
+#include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -135,6 +136,12 @@ public:
     void set_location(const LocationInfo& info);
     TimeInfo get_time();
     void set_time(const TimeInfo& info);
+
+    /// Test seam (#2753): over TCP, @p hook sees each command before it is sent and returns 0 to send it or an errno
+    /// to fail that send with, nothing written and the socket left up, as a send timeout or EHOSTUNREACH fails on a
+    /// live link. A hangup errno (EPIPE, ECONNRESET, ...) loses the link as in production. An empty function clears
+    /// it. The hook runs under the wrapper's exchange lock and must not call the wrapper. No effect over serial.
+    void set_send_fault_for_testing(std::function<int(const std::string& command)> hook);
 
 private:
     SynScanProtocolWrapper();

@@ -957,6 +957,11 @@ public:
 
     bool link_alive() const noexcept { return !link_lost_.load(); }
 
+    void set_send_fault(std::function<int(const std::string&)> hook) {
+        std::lock_guard<std::mutex> lock(send_fault_mutex_);
+        send_fault_ = std::move(hook);
+    }
+
     std::string link_fault() const {
         std::lock_guard<std::mutex> lock(fault_mutex_);
         return fault_;
@@ -1311,10 +1316,23 @@ private:
     }
 
     bool write_network(const std::string& data) {
+        if (const int err = send_fault_for(data)) {
+            errno = err;  // as a failed send() leaves it, for fail_link_if_gone_locked()
+            return false;
+        }
         // MSG_NOSIGNAL: a peer disconnect mid-send must not deliver SIGPIPE and
         // kill the server. send_all loops over short sends so partial bytes
         // can't corrupt the next command's framing on this connection.
         return util::send_all(socket_fd_, data.c_str(), data.length(), MSG_NOSIGNAL);
+    }
+
+    int send_fault_for(const std::string& data) const {
+        std::function<int(const std::string&)> hook;
+        {
+            std::lock_guard<std::mutex> lock(send_fault_mutex_);
+            hook = send_fault_;
+        }
+        return hook ? hook(data) : 0;
     }
 
     // One reply read for both transports: util::read_until on the tty or
@@ -1489,6 +1507,9 @@ private:
     // getter never waits on the wire.
     mutable std::mutex fault_mutex_;
     std::string fault_;
+    // set_send_fault_for_testing() (#2753); empty in production. Its own leaf mutex, never held across the hook.
+    mutable std::mutex send_fault_mutex_;
+    std::function<int(const std::string&)> send_fault_;
     ConnectionType connection_type_;
     ConnectionInfo connection_info_;
 
@@ -1528,6 +1549,10 @@ bool iOptronProtocolWrapper::is_connected() const {
 bool iOptronProtocolWrapper::link_alive() const noexcept { return pimpl_->link_alive(); }
 
 std::string iOptronProtocolWrapper::link_fault() const { return pimpl_->link_fault(); }
+
+void iOptronProtocolWrapper::set_send_fault_for_testing(std::function<int(const std::string& command)> hook) {
+    pimpl_->set_send_fault(std::move(hook));
+}
 
 void iOptronProtocolWrapper::lose_link(const std::string& reason) { pimpl_->lose_link(reason); }
 

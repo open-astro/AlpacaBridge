@@ -49,6 +49,7 @@
 #include "fake_pty_write.h"
 #include "fake_task_clock.h"
 #include "gps_status_check.h"
+#include "send_fault_guard.h"
 #include "sidereal_time_check.h"
 
 using alpacacore::DeviceType;
@@ -5235,5 +5236,135 @@ TEST_CASE(
     driver->pulse_guide(3, 3000);
     CHECK(mount.count(":Z") == pulses + 2);
     CHECK(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}
+
+// A send that fails on a link that stays up (#2753). The cases that call mount.reset_link() meet a hangup, which loses
+// the link at once (decision 0009 rule 2a, #2718); a send timeout, EHOSTUNREACH or ENETUNREACH does not, and these
+// cases run the failed-send paths for it through the wrapper's send-fault seam: the command is not written, the socket
+// stays up, and the mount answers every other command.
+namespace {
+
+using IoptronSendFault = alpacacore::test::SendFaultGuard<alpacacore::vendor::ioptron::iOptronProtocolWrapper>;
+
+std::function<bool(const std::string&)> starts_with(std::string prefix) {
+    return [prefix = std::move(prefix)](const std::string& command) { return command.rfind(prefix, 0) == 0; };
+}
+
+}  // namespace
+
+TEST_CASE("iOptron Telescope Driver - AbortSlew whose stop fails on a latched fault keeps the latch (#728)",
+          "[ioptron][telescope][unit][fake][fault][send-fault]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    latch_by_polls(*driver, clock, mount);
+
+    // The blind :Q# cannot be written on the live link: the stop was not sent, AbortSlew must say so, and the latch
+    // must stay set.
+    IoptronSendFault fault(EHOSTUNREACH, starts_with(":Q#"));
+    fault.arm();
+    try {
+        driver->abort_slew();
+        FAIL("AbortSlew succeeded although its stop could not be sent");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(contains(ex.what(), "AbortSlew failed"));
+    }
+    CHECK(fault.failed() == 1);
+    CHECK(driver->get_connected());  // the link stayed up
+    CHECK(contains(sync_failure(*driver), kLatched));
+    require_alpaca_error([&]() { (void)driver->get_right_ascension(); }, alpacacore::AlpacaError::DriverException);
+
+    fault.disarm();
+    driver->set_connected(false);
+}
+
+// Rule 2: a failed dispatch clears the window. The synchronous slew's :SRA# write fails; Slewing reads the status
+// cached at connect instead of the 5 s window.
+TEST_CASE("iOptron hold window - a synchronous SlewToCoordinates whose dispatch fails leaves Slewing false",
+          "[ioptron][telescope][unit][fake][hold-window][send-fault]") {
+    alpacacore::test::FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+
+    IoptronSendFault fault(EHOSTUNREACH, starts_with(":SRA"));
+    fault.arm();
+    CHECK_THROWS(driver->slew_to_coordinates(12.0, 20.0));
+    CHECK(fault.failed() >= 1);
+    CHECK(driver->get_connected());
+    CHECK_FALSE(driver->get_slewing());
+    fault.disarm();
+    driver->set_connected(false);
+}
+
+// A synchronous slew whose dispatch throws also ends slew_in_progress_. Left true, it would stop the #843 mask: the
+// mount's system status 2 during a guide pulse would read as Slewing. The status 2 is the one cached at connect, and
+// the :SRA# write fails after the pulse, so no read goes to it.
+TEST_CASE("iOptron hold window - a failed synchronous slew does not unmask a guide pulse",
+          "[ioptron][telescope][unit][fake][hold-window][pulseguide][send-fault]") {
+    alpacacore::test::FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(2);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+
+    driver->pulse_guide(0, 2000);
+    REQUIRE(driver->get_is_pulse_guiding());
+    IoptronSendFault fault(EHOSTUNREACH, starts_with(":SRA"));
+    fault.arm();
+    CHECK_THROWS(driver->slew_to_coordinates(12.0, 20.0));
+    CHECK(fault.failed() >= 1);
+    CHECK(driver->get_connected());
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK_FALSE(driver->get_slewing());
+    fault.disarm();
+    driver->set_connected(false);
+}
+
+// Rule 2: a Park whose :MP1# cannot be written takes its window back.
+TEST_CASE("iOptron hold window - a Park whose command fails leaves Slewing false",
+          "[ioptron][telescope][unit][fake][hold-window][send-fault]") {
+    alpacacore::test::FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+
+    IoptronSendFault fault(EHOSTUNREACH, starts_with(":MP1"));
+    fault.arm();
+    require_alpaca_error([&] { driver->park(); }, alpacacore::AlpacaError::DriverException);
+    CHECK(fault.failed() >= 1);
+    CHECK(driver->get_connected());
+    CHECK_FALSE(driver->get_slewing());
+    fault.disarm();
+    driver->set_connected(false);
+}
+
+// Rule 2: a PulseGuide whose command cannot be written leaves no pulse window: IsPulseGuiding is false and the next Dec
+// read is the cached position, not a prediction. Inside the 30 s connect cache, so no read goes to the mount.
+TEST_CASE("iOptron hold window - a PulseGuide whose command fails leaves no pulse window",
+          "[ioptron][telescope][unit][fake][hold-window][pulseguide][send-fault]") {
+    alpacacore::test::FakeIoptronMount mount("0025", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_position(10.0, 20.0);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    REQUIRE(driver->get_declination() == Catch::Approx(20.0));
+
+    driver->pulse_guide(2, 3000);
+    REQUIRE(driver->get_is_pulse_guiding());
+    IoptronSendFault fault(EHOSTUNREACH, starts_with(":Z"));
+    fault.arm();
+    CHECK_THROWS(driver->pulse_guide(0, 2000));
+    CHECK(fault.failed() >= 1);
+    CHECK(driver->get_connected());
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK(driver->get_declination() == Catch::Approx(20.0));
+    fault.disarm();
     driver->set_connected(false);
 }

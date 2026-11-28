@@ -19,10 +19,12 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -47,6 +49,7 @@
 #include "fake_mount_server.h"
 #include "fake_synscan_handset.h"
 #include "fake_task_clock.h"
+#include "send_fault_guard.h"
 
 namespace {
 
@@ -3214,4 +3217,244 @@ TEST_CASE("SynScan V3 - a 16-bit GOTO that never comes to rest after the handset
     CHECK(message.find("did not come to rest after the handset reported it done") != std::string::npos);
     st->drift_counts.store(0);
     driver->set_connected(false);
+}
+
+// A send that fails on a link that stays up (#2753). The cases above this banner meet a hangup, which loses the link at
+// once (decision 0009 rule 2a, #2718); a send timeout, EHOSTUNREACH or ENETUNREACH does not, and these cases run the
+// failed-send paths for it through the wrapper's send-fault seam: the command is not written, the socket stays up, and
+// the handset answers every other command.
+namespace {
+
+using SynScanSendFault = alpacacore::test::SendFaultGuard<alpacacore::vendor::synscan::SynScanProtocolWrapper>;
+
+bool is_rate_command(const std::string& command) { return !command.empty() && command[0] == 'P'; }
+
+// The stops the driver sends to end a motion: the cancel-GOTO and the axis rate commands.
+bool is_stop_command(const std::string& command) {
+    return !command.empty() && (command[0] == 'M' || command[0] == 'P');
+}
+
+}  // namespace
+
+// #2263: a MoveAxis whose rate command fails on a live link still keeps the slew error a refused GOTO stored.
+TEST_CASE("SynScan MoveAxis - a dispatch whose send fails on a live link preserves a stored slew error",
+          "[synscan][telescope][async][slewfailure][send-fault]") {
+    auto st = make_handset();
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
+
+    st->reject_goto.store(true);
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    bool refused = false;
+    for (int i = 0; i < 200 && !(refused = read_slewing(*driver) == SlewingRead::Threw); ++i) {
+        std::this_thread::sleep_for(50ms);
+    }
+    REQUIRE(refused);
+
+    st->reject_goto.store(false);
+    SynScanSendFault fault(EHOSTUNREACH, is_rate_command);
+    fault.arm();
+    try {
+        driver->move_axis(0, 1.0);
+        FAIL("MoveAxis returned although its rate command could not be sent");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+    }
+    CHECK(fault.failed() >= 1);
+    CHECK(driver->get_connected());  // the link stayed up
+    CHECK(read_slewing(*driver) == SlewingRead::Threw);
+    fault.disarm();
+    driver->set_connected(false);
+}
+
+// Rule 2 (#1836): a rate command that fails clears the window it armed, so IsPulseGuiding reads false at once, not for
+// the pulse plus the 1 s completion delay. An earlier RA stop whose tracking restore timed out leaves the cached mode
+// owed to the handset, so the pulse reads no `t` and the rate command is its first exchange after the slewing gate's
+// `L`.
+TEST_CASE("SynScan hold window - a failed pulse rate command leaves IsPulseGuiding false",
+          "[synscan][telescope][hold-window][pulseguiding][send-fault]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock, 300);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->set_tracking(true);
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
+
+    st->reject_tracking.store(true);
+    REQUIRE_THROWS(driver->move_axis(0, 0.0));  // the stop lands, its tracking restore times out
+    st->reject_tracking.store(false);
+
+    SynScanSendFault fault(EHOSTUNREACH, is_rate_command);
+    fault.arm();
+    REQUIRE_THROWS(driver->pulse_guide(2, 500));  // East: RA; the rate command's write fails
+    CHECK(fault.failed() >= 1);
+    CHECK(driver->get_connected());
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    fault.disarm();
+    driver->set_connected(false);
+}
+
+// #2263: a replacement no longer cuts the older pulse short; it supersedes it only once its own rate command has
+// landed. The replacement's rate command fails: the older RA pulse was not superseded and gets no stop, its window is
+// put back (IsPulseGuiding true) and its own end still stops the axis.
+TEST_CASE("SynScan hold window - a replacement whose rate command fails leaves the older pulse running",
+          "[synscan][telescope][hold-window][pulseguiding][motion-owner][send-fault]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock, 300);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->set_tracking(true);
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
+
+    driver->pulse_guide(3, 3000);  // West: RA
+    REQUIRE(driver->get_is_pulse_guiding());
+    const int rate_commands = st->command_count('P');
+    SynScanSendFault fault(EHOSTUNREACH, is_rate_command);
+    fault.arm();
+    // The rate command's own failure, not a slewing refusal: the older pulse was never stopped, so no failed stop of
+    // it marked the axis as moving.
+    require_alpaca_error([&] { driver->pulse_guide(2, 500); }, alpacacore::AlpacaError::DriverException);
+    CHECK(fault.failed() >= 1);
+    CHECK(st->command_count('P') == rate_commands);  // no stop of the older pulse reached the handset
+    CHECK(driver->get_connected());
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK_FALSE(driver->get_slewing());
+    fault.disarm();
+    driver->set_connected(false);
+}
+
+// #2263: a moving MoveAxis supersedes the pulse on its axis only once its own rate has landed. Its send fails here, so
+// the Dec pulse got no stop and still owns its window; the MoveAxis left the axis reported as possibly moving, as a
+// failed MoveAxis send always has.
+TEST_CASE("SynScan hold window - a MoveAxis whose send fails leaves the pulse on its axis running",
+          "[synscan][telescope][hold-window][pulseguiding][moveaxis][motion-owner][send-fault]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock, 300);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
+
+    driver->pulse_guide(0, 3000);  // North: Dec
+    REQUIRE(driver->get_is_pulse_guiding());
+    const int rate_commands = st->command_count('P');
+    SynScanSendFault fault(EHOSTUNREACH, is_rate_command);
+    fault.arm();
+    REQUIRE_THROWS(driver->move_axis(1, 0.5));
+    CHECK(fault.failed() >= 1);
+    CHECK(st->command_count('P') == rate_commands);  // no stop of the pulse reached the handset
+    CHECK(driver->get_connected());
+    CHECK(driver->get_is_pulse_guiding());
+    fault.disarm();
+    driver->set_connected(false);
+}
+
+// AbortSlew whose stops fail leaves the slew state as it was (the mount may still be moving), but the pulse it cut
+// short is over: its window is cleared, and the restore its RA stop owes stays (Tracking false). The cut-short pulse's
+// blind stop lands, then the cancel-GOTO's send fails, and so does every axis stop after it.
+TEST_CASE("SynScan hold window - an AbortSlew whose stop fails clears the window of a pulse it cut short",
+          "[synscan][telescope][hold-window][pulseguiding][abort][send-fault]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock, 300);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->set_tracking(true);
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
+
+    driver->pulse_guide(3, 3000);  // West: RA
+    REQUIRE(driver->get_is_pulse_guiding());
+    SynScanSendFault fault(EHOSTUNREACH, [](const std::string& c) { return !c.empty() && c[0] == 'M'; });
+    fault.arm();
+    require_alpaca_error([&] { driver->abort_slew(); }, alpacacore::AlpacaError::DriverException);
+    CHECK(fault.failed() >= 1);
+    CHECK(driver->get_connected());
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK_FALSE(driver->get_tracking());
+    fault.disarm();
+    driver->set_connected(false);
+}
+
+// #2412: a deadline stop that fails says the mount may still be moving. The status reads answer (the GOTO is still in
+// progress) and only the stops fail, so the deadline body's failure is the kept text Slewing raises.
+TEST_CASE("SynScan async - a deadline stop that fails says the mount may still be moving (#2412)",
+          "[synscan][telescope][async][slewfailure][goto-safety][send-fault]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = make_handset(clock);
+    alpacacore::test::FakeMountServer server(st->responder());
+    REQUIRE(server.ok());
+    auto driver = connect_with_hanging_goto(*st, server, clock);
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5s));
+    const auto started = clock.now();
+    REQUIRE(
+        advance_virtual_until(clock, [&] { return clock.now() - started >= kSlewDeadline - std::chrono::seconds(3); }));
+    REQUIRE(read_slewing(*driver) == SlewingRead::True);
+    SynScanSendFault fault(EHOSTUNREACH, is_stop_command);
+    fault.arm();
+    std::string message;
+    REQUIRE(advance_virtual_until(
+        clock,
+        [&] {
+            message.clear();
+            return read_slewing(*driver, &message) != SlewingRead::True;
+        },
+        std::chrono::seconds(30)));
+    REQUIRE(read_slewing(*driver, &message) == SlewingRead::Threw);
+    CHECK(fault.failed() >= 1);
+    // The kept text, not re-recorded by the async body's dispatch-failure path, which would clear Slewing on a mount
+    // that may still be moving.
+    CHECK(message.rfind("Slew timed out after 120 s; stopping after failure failed: ", 0) == 0);
+    CHECK(message.find("the mount may still be moving") != std::string::npos);
+    CHECK(message.find("the mount was stopped") == std::string::npos);
+    CHECK(driver->get_connected());
+    fault.disarm();
+    driver->set_connected(false);
+}
+
+// #2412: a rate command that threw may still have reached the handset, which then moves the axis. The driver cannot
+// know, so it fails closed: the axis keeps reading as moving and the 60 s bound watches it. Every send fails on a live
+// link (the host is unreachable, not hung up), so the bound's stops fail and its status reads cannot verify them.
+TEST_CASE("SynScan MoveAxis - a start that threw is still bounded", "[synscan][telescope][goto-safety][send-fault]") {
+    MoveAxisBoundRig rig;
+    SynScanSendFault fault(EHOSTUNREACH, [](const std::string&) { return true; });
+    fault.arm();
+    // Dec: an RA start reads the tracking mode first, and that read does not go through a rate command.
+    CHECK_THROWS_AS(rig.driver->move_axis(1, 1.0), alpacacore::AlpacaException);
+    CHECK(rig.driver->get_connected());
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (rig.bound_thread.load() == std::thread::id{} && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    REQUIRE(rig.bound_thread.load() != std::thread::id{});  // the bound watches the axis
+    REQUIRE(rig.clock.wait_for_waiter_thread(rig.bound_thread.load(), std::chrono::seconds(5)));
+    rig.advance(std::chrono::seconds(65));
+    CHECK(rig.warns.load() == 4);  // at 60 s it tried the axis's stop 3 times (each send failed), then kept the failure
+    fault.disarm();
+}
+
+// The same for a stop: MoveAxis(axis, 0) that threw may not have stopped the axis, so it stays watched.
+TEST_CASE("SynScan MoveAxis - a stop that threw leaves the axis bounded",
+          "[synscan][telescope][goto-safety][send-fault]") {
+    MoveAxisBoundRig rig;
+    rig.start_move(1);
+    rig.advance(std::chrono::seconds(30));
+    SynScanSendFault fault(EHOSTUNREACH, [](const std::string&) { return true; });
+    fault.arm();
+    CHECK_THROWS_AS(rig.driver->move_axis(1, 0.0), alpacacore::AlpacaException);
+    CHECK(rig.driver->get_connected());
+    rig.advance(std::chrono::seconds(65));
+    CHECK(rig.warns.load() == 4);  // the cap still tried the axis's stop 3 times, then kept the failure
+    fault.disarm();
 }
