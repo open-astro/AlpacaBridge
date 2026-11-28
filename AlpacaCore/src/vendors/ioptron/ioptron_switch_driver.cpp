@@ -94,13 +94,13 @@ IoptronSwitchConfig default_imate_powerbox_config() {
     return cfg;
 }
 
-std::unique_ptr<SwitchDriver> create_ioptron_switch(int device_number, IoptronSwitchConfig config) {
+std::unique_ptr<SwitchDriver> create_ioptron_switch(int device_number, const IoptronSwitchConfig& config) {
     auto ports = imate_ports(config);
     return std::make_unique<util::PowerPortSwitchDriver<util::OwnedSoftPwmPorts<util::GpiodLineBackend>>>(
         device_number, imate_profile(config), std::move(ports), kGpioConsumer);
 }
 
-std::unique_ptr<SwitchDriver> create_ioptron_switch(int device_number, IoptronSwitchConfig config,
+std::unique_ptr<SwitchDriver> create_ioptron_switch(int device_number, const IoptronSwitchConfig& config,
                                                     util::GpioLineBackend& backend, util::TaskClock& clock) {
     auto ports = imate_ports(config);
     return std::make_unique<util::PowerPortSwitchDriver<util::SoftPwmPorts>>(device_number, imate_profile(config),

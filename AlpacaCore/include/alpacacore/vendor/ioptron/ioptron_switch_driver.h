@@ -64,11 +64,11 @@ struct IoptronSwitchConfig {
 // All ports default to boolean on/off; DC1/DC2 can be switched to soft-PWM.
 IoptronSwitchConfig default_imate_powerbox_config();
 
-std::unique_ptr<SwitchDriver> create_ioptron_switch(int device_number, IoptronSwitchConfig config);
+std::unique_ptr<SwitchDriver> create_ioptron_switch(int device_number, const IoptronSwitchConfig& config);
 
 // Test seam (decision 0027): the same driver over a caller-owned GPIO backend and task clock instead of
 // libgpiod and the wall clock. @p backend and @p clock must outlive the driver.
-std::unique_ptr<SwitchDriver> create_ioptron_switch(int device_number, IoptronSwitchConfig config,
+std::unique_ptr<SwitchDriver> create_ioptron_switch(int device_number, const IoptronSwitchConfig& config,
                                                     util::GpioLineBackend& backend,
                                                     util::TaskClock& clock = util::default_task_clock());
 

@@ -89,7 +89,7 @@ TouptekSwitchConfig default_stellavita_config() {
     return cfg;
 }
 
-std::unique_ptr<SwitchDriver> create_touptek_switch(int device_number, TouptekSwitchConfig config) {
+std::unique_ptr<SwitchDriver> create_touptek_switch(int device_number, const TouptekSwitchConfig& config) {
     auto ports = stellavita_ports(config);
     return std::make_unique<util::PowerPortSwitchDriver<util::OwnedSoftPwmPorts<util::GpiodLineBackend>>>(
         device_number, stellavita_profile(config), std::move(ports), kGpioConsumer);

@@ -73,7 +73,7 @@ struct TouptekSwitchConfig {
 // BCM GPIO 9 and 11 (Cypress USB hub power) are intentionally excluded.
 TouptekSwitchConfig default_stellavita_config();
 
-std::unique_ptr<SwitchDriver> create_touptek_switch(int device_number, TouptekSwitchConfig config);
+std::unique_ptr<SwitchDriver> create_touptek_switch(int device_number, const TouptekSwitchConfig& config);
 
 /**
  * @brief Test seam (decision 0027): as create_touptek_switch(), over a caller-owned GPIO backend and task clock.
