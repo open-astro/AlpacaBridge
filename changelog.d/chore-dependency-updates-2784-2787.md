@@ -1,0 +1,3 @@
+### Changed
+- **PMD updated to 7.30.0** (CI), issue #2787: the duplication gate's PMD CPD pin in `ci.yml` and `scripts/ci_preflight.sh` moves from 7.29.0. 7.30.0 fixes GHSA-p8c4-pmh9-36vf, a `StackOverflowError` in the regular expressions of three PMD rules; CPD is not one of them.
+- **INDI review baselines advanced** (tooling), issues #2784, #2785 and #2786: the Celestron driver file did not change, the AM5 change is a version bump, and the OnStep change fixes latitude sign and seconds rounding in INDI's `:St`/`:Sg` text, which the AlpacaBridge OnStep driver already formats correctly through `util::format_dm`.

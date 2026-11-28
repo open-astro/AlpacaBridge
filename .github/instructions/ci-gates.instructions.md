@@ -104,7 +104,7 @@ author must do. Read the docstring before changing a gate.
   tracks as binary under `AlpacaCore/external/` has its sha256 in `AlpacaCore/external/SHA256SUMS`.
   An SDK bump checks the new files against the vendor's download, then runs the script with
   `--write` and commits the manifest in the same commit.
-- **Duplication** (`scripts/check_duplication.py`, the `duplication` job): PMD CPD 7.29.0 over the
+- **Duplication** (`scripts/check_duplication.py`, the `duplication` job): PMD CPD 7.30.0 over the
   authored C++ trees fails when the duplicated-line share is above `MAX_DUPLICATED_LINE_SHARE`. A line
   covered by several duplications counts once. A PR that removes duplication lowers the constant;
   never raise it. The pre-flight gate skips with `[SKIP] duplication (no java)` and never installs a JRE.
