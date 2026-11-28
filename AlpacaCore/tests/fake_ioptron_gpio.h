@@ -29,9 +29,10 @@ namespace alpacacore::test {
 // and 1 is DC2 (GPIO 114); DC3 has no line. Every line reads high until set_level() says otherwise, as the stock
 // boot leaves DC1 and DC2.
 //
-// KNOWN PARITY GAPS (the real backend is harsher here): open() fails only after fail_open(); the real one fails
-// on a missing chip, a busy line or a bad offset. The fake ConformU server drives the driver on the wall clock
-// (it passes no clock), so a PWM port there runs in real time; the clock here only stamps the backend's events.
+// KNOWN PARITY GAPS (the real backend is harsher here): open() fails only after fail_open() or while its own
+// claim is held; the real one also fails on a missing chip, a line another process holds or a bad offset. The fake
+// ConformU server drives the driver on the wall clock (it passes no clock), so a PWM port there runs in real time; the
+// clock here only stamps the backend's events.
 struct FakeIoptronGpio {
     FakeTaskClock clock;
     FakeGpioLineBackend gpio{clock};

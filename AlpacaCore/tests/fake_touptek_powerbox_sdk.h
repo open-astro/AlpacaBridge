@@ -30,9 +30,10 @@ namespace alpacacore::test {
 // the port index (Port 1 GPIO 18, Port 2 GPIO 10, Port 3 GPIO 17, Port 4 GPIO 4); a read-only port has no line and
 // shifts the later ones down. Every line reads high until set_level() says otherwise, as config.txt leaves them.
 //
-// KNOWN PARITY GAPS (the real backend is harsher here): open() fails only after fail_open(); the real one fails
-// on a missing chip, a busy line or a bad offset. The fake ConformU server drives the driver on the wall clock
-// (it passes no clock), so a PWM port there runs in real time; the clock here only stamps the backend's events.
+// KNOWN PARITY GAPS (the real backend is harsher here): open() fails only after fail_open() or while its own
+// claim is held; the real one also fails on a missing chip, a line another process holds or a bad offset. The fake
+// ConformU server drives the driver on the wall clock (it passes no clock), so a PWM port there runs in real time; the
+// clock here only stamps the backend's events.
 struct FakeTouptekPowerbox {
     FakeTaskClock clock;
     FakeGpioLineBackend gpio{clock};

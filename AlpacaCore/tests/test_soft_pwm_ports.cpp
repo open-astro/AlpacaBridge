@@ -545,3 +545,24 @@ TEST_CASE("SoftPwmPorts - close waits for a boolean write in flight", "[util][so
     CHECK(events[2].kind == Event::Kind::Close);
     CHECK_FALSE(rig.ports.is_open());
 }
+
+// Falsified by: fake_gpio_line_backend.h open() claiming again while is_open_, or write() reporting success
+// while closed or past the claimed lines (decision 0015 rule 4: libgpiod answers EBUSY and refuses those writes).
+TEST_CASE("FakeGpioLineBackend refuses a second open and a write while closed or out of range",
+          "[util][soft-pwm][unit]") {
+    FakeTaskClock clock;
+    FakeGpioLineBackend backend{clock};
+    CHECK_FALSE(backend.write(0, true));
+    backend.open("/dev/gpiochip-fake", {12u, 26u});
+    require_alpaca_error([&] { backend.open("/dev/gpiochip-fake", {12u, 26u}); }, AlpacaError::DriverException);
+    CHECK(backend.write(1, true));
+    CHECK_FALSE(backend.write(2, true));
+    backend.close();
+    CHECK_FALSE(backend.write(0, true));
+    const auto events = backend.events();
+    REQUIRE(events.size() == 6);
+    CHECK_FALSE(events[0].ok);
+    CHECK(events[2].ok);
+    CHECK_FALSE(events[3].ok);
+    CHECK_FALSE(events[5].ok);
+}
