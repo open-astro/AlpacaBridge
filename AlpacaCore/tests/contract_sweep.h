@@ -1234,7 +1234,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"qhy", "focuser", "fake_qhy_qfocuser.h"},
     {"playerone", "camera", "fake_playerone_sdk.h"},
     {"playerone", "filterwheel", "fake_playerone_pw_sdk.h"},
-    {"ioptron", "camera", "fake_playerone_sdk.h"},  // the iCAM: the Player One driver behind the iOptron factory
+    {"ioptron", "camera", "fake_playerone_sdk.h"},    // the iCAM: the Player One driver behind the iOptron factory
     {"playerone", "switch", "fake_playerone_sdk.h"},  // the thermal switch over the camera SDK fake
     {"touptek", "camera", "fake_touptek_sdk.h"},
     {"touptek", "switch", "fake_touptek_sdk.h"},  // the thermal switch backend: touptek_switch_thermal
