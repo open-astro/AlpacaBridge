@@ -104,6 +104,11 @@ public:
         extra_headers_ = std::move(headers);
     }
     void set_declare_length(bool declare) { declare_length_ = declare; }
+    // The Answer reply's Content-Type, application/json by default.
+    void set_content_type(std::string content_type) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        content_type_ = std::move(content_type);
+    }
 
     // Builds the Answer reply from the request read in full: {status line, body}. Called on the server
     // thread with no lock held. Replaces the fixed status line and body while set.
@@ -188,7 +193,7 @@ private:
                 if (mode == Mode::Answer) {
                     const std::string& status_line = built ? built->first : status_line_;
                     const std::string& body = built ? built->second : body_;
-                    reply = "HTTP/1.1 " + status_line + "\r\nContent-Type: application/json\r\n" + extra_headers_;
+                    reply = "HTTP/1.1 " + status_line + "\r\nContent-Type: " + content_type_ + "\r\n" + extra_headers_;
                     if (declare_length_) {
                         reply += "Content-Length: " + std::to_string(body.size()) + "\r\n";
                     }
@@ -221,6 +226,7 @@ private:
     mutable std::mutex mutex_;
     std::string status_line_ = "200 OK";
     std::string extra_headers_;
+    std::string content_type_ = "application/json";
     std::string body_;
     std::string last_request_;
     Responder responder_;

@@ -211,7 +211,8 @@ A camera driver builds its `ImageArray` through `util::build_frame_image`
 rule (`ZeroFill`, or `ReplicateOne` for the #977 one-pixel deficit), and passes its
 vendor name for the refusal text. Never copy pixels, swap BGR or read 16-bit samples
 in a driver; the module refuses a short buffer and validates the result. iGuider
-`crop_luma` and gPhoto build their own.
+`crop_luma` and gPhoto build their own, and the remotealpaca camera decodes the upstream's ImageBytes reply in its
+client (`RemoteAlpacaClient::get_image_array()`).
 
 ### Camera argument order (all camera vendors)
 

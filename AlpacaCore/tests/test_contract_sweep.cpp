@@ -144,6 +144,7 @@
 #include "locked_astroasis_hid_transport.h"
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
+#include <alpacacore/vendor/remotealpaca/remotealpaca_camera_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_covercalibrator_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_dome_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_filterwheel_driver.h>
@@ -3299,6 +3300,37 @@ Tier2Host tier2_host_remotealpaca_focuser() {
     return h;
 }
 
+// The proxied Camera over the scripted upstream, as the rotator host: its Connect makes some sixty calls, so a 20 ms
+// per-call hold keeps the handshake open past kHoldWindow.
+Tier2Host tier2_host_remotealpaca_camera() {
+    Tier2Host h{"remotealpaca_camera",
+                "remotealpaca",
+                "camera",
+                "fake_http_client.h",
+                DeviceType::Camera,
+                "remotealpaca_camera",
+                {},
+                true,
+                {},
+                ""};
+    auto make = [](bool hold, bool refuse) {
+        auto upstream = std::make_shared<RemoteUpstreamFake>(alpacacore::test::AlpacaUpstreamScript::Kind::Camera);
+        if (hold) upstream->http.set_delay(std::chrono::milliseconds(20));
+        if (refuse) upstream->http.refuse_next(1000000);
+        alpacacore::vendor::remotealpaca::RemoteDeviceConfig config;
+        config.host = "127.0.0.1";
+        config.port = 11111;
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::remotealpaca::create_remotealpaca_camera(
+            0, config, upstream->http.client(), {}, alpacacore::util::default_task_clock());
+        hosted.fake = upstream;
+        return hosted;
+    };
+    h.connectable = [make](bool hold) { return make(hold, false); };
+    h.failing = [make]() { return make(false, true); };
+    return h;
+}
+
 // The proxied Dome over the scripted upstream, as the rotator host: its Connect makes some twenty calls, so a 50 ms
 // per-call hold keeps the handshake open past kHoldWindow.
 Tier2Host tier2_host_remotealpaca_dome() {
@@ -4226,7 +4258,7 @@ Tier2Host tier2_host_wandererastro_rotator() {
 #define CS2_ASTROASIS(X)
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
-#define CS2_REMOTEALPACA(X) X(remotealpaca_observingconditions, PRB) X(remotealpaca_safetymonitor, NPR) X(remotealpaca_rotator, PRB) X(remotealpaca_filterwheel, PRB) X(remotealpaca_switch, PRB) X(remotealpaca_telescope, TEL) X(remotealpaca_focuser, NPR) X(remotealpaca_covercalibrator, PRB) X(remotealpaca_dome, PRB)
+#define CS2_REMOTEALPACA(X) X(remotealpaca_observingconditions, PRB) X(remotealpaca_safetymonitor, NPR) X(remotealpaca_rotator, PRB) X(remotealpaca_filterwheel, PRB) X(remotealpaca_switch, PRB) X(remotealpaca_telescope, TEL) X(remotealpaca_focuser, NPR) X(remotealpaca_covercalibrator, PRB) X(remotealpaca_dome, PRB) X(remotealpaca_camera, CAM)
 #else
 #define CS2_REMOTEALPACA(X)
 #endif
@@ -5056,6 +5088,31 @@ Tier3Recipe tier3_recipe_remotealpaca_rotator() {
         DeviceType::Rotator, clock);
 }
 
+// The upstream keeps exposing (the scripted exposure runs until finish_exposure()), then stops answering: every call
+// times out, so three failed polls latch the fault. Falsified by: get_image_ready() answering the frame's value while
+// the poll's fault is latched (remotealpaca_camera_driver.cpp, served()).
+Tier3Recipe tier3_recipe_remotealpaca_camera() {
+    auto clock = std::make_shared<alpacacore::test::FakeTaskClock>();
+    return t3_on_clock(
+        {[](Hosted& hosted) { t3_start_exposure(hosted, 30.0); },
+         [](Hosted& hosted) { t3_fake<RemoteUpstreamFake>(hosted).http.fail_next(1000000); },
+         [](Hosted& hosted) { t3_fake<RemoteUpstreamFake>(hosted).http.fail_next(0); },
+         "FakeHttpClient::fail_next() mid-exposure: every upstream call times out",
+         [clock](bool) {
+             auto upstream = std::make_shared<RemoteUpstreamFake>(alpacacore::test::AlpacaUpstreamScript::Kind::Camera);
+             alpacacore::vendor::remotealpaca::RemoteDeviceConfig config;
+             config.host = "127.0.0.1";
+             config.port = 11111;
+             config.poll_period = std::chrono::seconds(1);
+             Hosted hosted;
+             hosted.driver = alpacacore::vendor::remotealpaca::create_remotealpaca_camera(
+                 0, config, upstream->http.client(), {}, *clock);
+             hosted.fake = upstream;
+             return hosted;
+         }},
+        DeviceType::Camera, clock);
+}
+
 // The upstream keeps reporting its slew running (the scripted slew runs until finish_move()), then stops answering:
 // every call times out, so three failed polls latch the fault. Falsified by: get_slewing() answering the frame's
 // value while the poll's fault is latched (remotealpaca_dome_driver.cpp, the module's served()).
@@ -5602,7 +5659,7 @@ Tier3Recipe tier3_recipe_gphoto_camera() {
 #define CT3_ASTROASIS(X)
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
-#define CT3_REMOTEALPACA(X) X(remotealpaca_rotator, OK) X(remotealpaca_filterwheel, OK) X(remotealpaca_telescope, OK) X(remotealpaca_focuser, OK) X(remotealpaca_dome, OK)
+#define CT3_REMOTEALPACA(X) X(remotealpaca_rotator, OK) X(remotealpaca_filterwheel, OK) X(remotealpaca_telescope, OK) X(remotealpaca_focuser, OK) X(remotealpaca_dome, OK) X(remotealpaca_camera, OK)
 #else
 #define CT3_REMOTEALPACA(X)
 #endif
@@ -5872,6 +5929,7 @@ TEST_CASE("Contract sweep - filter wheels - names and offsets while disconnected
 #define CS2_LASTEXP_gphoto_camera(id) CS2_LASTEXP_RUN(id)
 #define CS2_LASTEXP_touptek_camera(id) CS2_LASTEXP_RUN(id)
 #define CS2_LASTEXP_altair_camera(id) CS2_LASTEXP_RUN(id)
+#define CS2_LASTEXP_remotealpaca_camera(id) CS2_LASTEXP_RUN(id)
 
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_CONNECTING)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_TARGETS)
@@ -7160,6 +7218,43 @@ std::unique_ptr<SnapshotRig> snapshot_rig_remotealpaca_switch() {
     return rig_owner;
 }
 
+// As the rotator rig, over a Camera upstream that is not exposing.
+std::unique_ptr<SnapshotRig> snapshot_rig_remotealpaca_camera() {
+    namespace remote = alpacacore::vendor::remotealpaca;
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto upstream = std::make_shared<RemoteUpstreamFake>(alpacacore::test::AlpacaUpstreamScript::Kind::Camera);
+    rig.fake = upstream;
+    remote::RemoteDeviceConfig config;
+    config.host = "127.0.0.1";
+    config.port = 11111;
+    config.poll_period = snap_chrono::seconds(1);
+    rig.driver = remote::create_remotealpaca_camera(0, config, upstream->http.client(), {}, *rig.clock);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    auto* driver = static_cast<alpacacore::CameraDriver*>(rig.driver.get());
+    rig.hold_frame = [driver] { remote::set_poll_paused_for_testing(*driver, true); };
+    rig.lose_link = [driver, upstream] {
+        upstream->http.fail_next(1000);
+        remote::set_poll_paused_for_testing(*driver, false);
+    };
+    return rig_owner;
+}
+
+// The camera members a poll measures: CameraState, ImageReady and the cooler's CCDTemperature and CoolerPower.
+[[maybe_unused]] std::vector<SnapshotGetter> snapshot_camera_getters() {
+    using alpacacore::CameraDriver;
+    std::vector<SnapshotGetter> g;
+#define SNAP_CAM(label, call) \
+    g.push_back({label, [](AlpacaDriver& d) { return snap_text(static_cast<CameraDriver&>(d).call); }});
+    SNAP_CAM("CameraState", get_camera_state())
+    SNAP_CAM("ImageReady", get_image_ready())
+    SNAP_CAM("CCDTemperature", get_ccd_temperature())
+    SNAP_CAM("CoolerPower", get_cooler_power())
+#undef SNAP_CAM
+    return g;
+}
+
 // As the rotator rig, over a Dome upstream that is not slewing.
 std::unique_ptr<SnapshotRig> snapshot_rig_remotealpaca_dome() {
     namespace remote = alpacacore::vendor::remotealpaca;
@@ -7312,7 +7407,7 @@ std::unique_ptr<SnapshotRig> snapshot_rig_zwo_telescope() {
 #define CS3_ASTROASIS(X)
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
-#define CS3_REMOTEALPACA(X) X(remotealpaca_observingconditions, snapshot_observingconditions_getters()) X(remotealpaca_safetymonitor, snapshot_safetymonitor_getters()) X(remotealpaca_rotator, snapshot_rotator_getters()) X(remotealpaca_filterwheel, snapshot_filterwheel_getters()) X(remotealpaca_switch, snapshot_switch_getters()) X(remotealpaca_telescope, snapshot_telescope_getters(true)) X(remotealpaca_focuser, snapshot_focuser_getters()) X(remotealpaca_covercalibrator, snapshot_covercalibrator_getters()) X(remotealpaca_dome, snapshot_dome_getters())
+#define CS3_REMOTEALPACA(X) X(remotealpaca_observingconditions, snapshot_observingconditions_getters()) X(remotealpaca_safetymonitor, snapshot_safetymonitor_getters()) X(remotealpaca_rotator, snapshot_rotator_getters()) X(remotealpaca_filterwheel, snapshot_filterwheel_getters()) X(remotealpaca_switch, snapshot_switch_getters()) X(remotealpaca_telescope, snapshot_telescope_getters(true)) X(remotealpaca_focuser, snapshot_focuser_getters()) X(remotealpaca_covercalibrator, snapshot_covercalibrator_getters()) X(remotealpaca_dome, snapshot_dome_getters()) X(remotealpaca_camera, snapshot_camera_getters())
 #else
 #define CS3_REMOTEALPACA(X)
 #endif

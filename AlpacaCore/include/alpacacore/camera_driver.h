@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -78,6 +79,9 @@ public:
         if (!get_connected()) {
             return {};
         }
+        // Read once, before the getters: the age of the served state, so the TimeStamp names when it was measured
+        // (decision 0010; a camera served from a snapshot, the remotealpaca camera, #2703).
+        const auto age = device_state_age();
         std::vector<DeviceState> state;
         // One allocation for every field: GCC 14 -O2 reports -Werror=stringop-overflow in std::variant when the
         // vector grows by push_back (the rotator build, #1668; the filter wheel and focuser bases reserve too).
@@ -105,7 +109,11 @@ public:
         add("PercentCompleted", [this] { return static_cast<std::int32_t>(get_percent_completed_checked()); });
 
         if (!state.empty()) {
-            state.push_back({"TimeStamp", device_state_timestamp()});
+            state.push_back(
+                {"TimeStamp",
+                 age ? device_state_timestamp(std::chrono::system_clock::now() -
+                                              std::chrono::duration_cast<std::chrono::system_clock::duration>(*age))
+                     : device_state_timestamp()});
         }
         return state;
     }
@@ -250,6 +258,11 @@ public:
      * @brief Stop the current exposure.
      */
     virtual void stop_exposure() = 0;
+
+protected:
+    /// How old the state get_device_state() serves is, when the driver serves it from a snapshot (decision 0010):
+    /// the TimeStamp is then the time the state was measured. nullopt (the default) stamps the request time.
+    virtual std::optional<std::chrono::nanoseconds> device_state_age() const { return std::nullopt; }
 };
 
 } // namespace alpacacore

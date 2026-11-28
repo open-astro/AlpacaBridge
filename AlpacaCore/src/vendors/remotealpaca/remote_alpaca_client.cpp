@@ -16,11 +16,14 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -364,6 +367,116 @@ std::string authority(const UpstreamDevice& upstream) {
     return host + ":" + std::to_string(upstream.port);
 }
 
+// --- ImageBytes (the Alpaca API's binary ImageArray form) ---
+
+// The 44-byte metadata block: eleven little-endian 32-bit fields.
+constexpr std::size_t kImageBytesMetadataSize = 44;
+constexpr std::uint32_t kImageBytesMetadataVersion = 1;
+
+std::uint32_t le32(std::string_view bytes, std::size_t at) {
+    const auto b = [&](std::size_t i) { return static_cast<std::uint32_t>(static_cast<unsigned char>(bytes[at + i])); };
+    return b(0) | (b(1) << 8) | (b(2) << 16) | (b(3) << 24);
+}
+
+// The element types this server reads (each fits ImageArray's int32 elements); 0 for any other.
+std::size_t element_bytes(std::uint32_t type) {
+    switch (type) {
+        case 6:  // Byte
+            return 1;
+        case 1:  // Int16
+        case 8:  // UInt16
+            return 2;
+        case 2:  // Int32
+        case 9:  // UInt32 (a value above INT32_MAX is refused when read)
+            return 4;
+        default:  // Double, Single, UInt64, Int64 and Unknown: no exact int32 for every value
+            return 0;
+    }
+}
+
+// One element at `at` as an int32, or nullopt for a UInt32 value above INT32_MAX.
+std::optional<std::int32_t> element_at(std::string_view data, std::size_t at, std::uint32_t type) {
+    const auto byte = [&](std::size_t i) {
+        return static_cast<std::uint32_t>(static_cast<unsigned char>(data[at + i]));
+    };
+    switch (type) {
+        case 6:
+            return static_cast<std::int32_t>(byte(0));
+        case 1:
+            return static_cast<std::int32_t>(
+                static_cast<std::int16_t>(static_cast<std::uint16_t>(byte(0) | (byte(1) << 8))));
+        case 8:
+            return static_cast<std::int32_t>(byte(0) | (byte(1) << 8));
+        case 2:
+            return static_cast<std::int32_t>(le32(data, at));
+        default: {
+            const std::uint32_t value = le32(data, at);
+            if (value > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) return std::nullopt;
+            return static_cast<std::int32_t>(value);
+        }
+    }
+}
+
+bool is_image_bytes(std::string_view content_type) {
+    constexpr std::string_view kType = "application/imagebytes";
+    if (content_type.size() < kType.size()) return false;
+    for (std::size_t i = 0; i < kType.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(content_type[i])) != kType[i]) return false;
+    }
+    return content_type.size() == kType.size() || content_type[kType.size()] == ';' ||
+           content_type[kType.size()] == ' ' || content_type[kType.size()] == '\t';
+}
+
+// Two decimal digits of `text` at `at`, or -1.
+int two_digits(std::string_view text, std::size_t at) {
+    if (at + 2 > text.size() || std::isdigit(static_cast<unsigned char>(text[at])) == 0 ||
+        std::isdigit(static_cast<unsigned char>(text[at + 1])) == 0) {
+        return -1;
+    }
+    return (text[at] - '0') * 10 + (text[at + 1] - '0');
+}
+
+// "CCYY-MM-DDThh:mm:ss", then optional ".fff..." and an optional "Z"; nullopt for anything else.
+std::optional<std::chrono::system_clock::time_point> parse_utc(std::string_view text) {
+    if (text.size() < 19 || text[4] != '-' || text[7] != '-' || text[10] != 'T' || text[13] != ':' || text[16] != ':') {
+        return std::nullopt;
+    }
+    const int century = two_digits(text, 0);
+    const int year_low = two_digits(text, 2);
+    const int month = two_digits(text, 5);
+    const int day = two_digits(text, 8);
+    const int hour = two_digits(text, 11);
+    const int minute = two_digits(text, 14);
+    const int second = two_digits(text, 17);
+    if (century < 0 || year_low < 0 || month < 1 || month > 12 || day < 1 || hour < 0 || hour > 23 || minute < 0 ||
+        minute > 59 || second < 0 || second > 60) {
+        return std::nullopt;
+    }
+    const std::chrono::year_month_day date{std::chrono::year{century * 100 + year_low},
+                                           std::chrono::month{static_cast<unsigned>(month)},
+                                           std::chrono::day{static_cast<unsigned>(day)}};
+    if (!date.ok()) return std::nullopt;
+    std::size_t at = 19;
+    std::chrono::nanoseconds fraction{0};
+    if (at < text.size() && text[at] == '.') {
+        ++at;
+        std::int64_t scale = 100000000;  // the first fractional digit is tenths of a second
+        const std::size_t first = at;
+        while (at < text.size() && std::isdigit(static_cast<unsigned char>(text[at])) != 0) {
+            fraction += std::chrono::nanoseconds((text[at] - '0') * scale);
+            scale /= 10;
+            ++at;
+        }
+        if (at == first) return std::nullopt;
+    }
+    if (at < text.size() && text[at] == 'Z') ++at;
+    if (at != text.size()) return std::nullopt;
+    const auto since_epoch = std::chrono::sys_days{date}.time_since_epoch() + std::chrono::hours{hour} +
+                             std::chrono::minutes{minute} + std::chrono::seconds{second} + fraction;
+    return std::chrono::system_clock::time_point{
+        std::chrono::duration_cast<std::chrono::system_clock::duration>(since_epoch)};
+}
+
 }  // namespace
 
 struct RemoteAlpacaClient::Reply {
@@ -404,6 +517,19 @@ std::string RemoteAlpacaClient::member_url(std::string_view member) const {
            std::to_string(upstream_.device_number) + "/" + std::string(member);
 }
 
+std::string RemoteAlpacaClient::encoded_locked(const RemoteParams& params) {
+    const std::uint32_t transaction_id = next_transaction_id_;
+    // 0 means "no id" to a server, so the count skips it when it wraps.
+    next_transaction_id_ =
+        next_transaction_id_ == std::numeric_limits<std::uint32_t>::max() ? 1 : next_transaction_id_ + 1;
+    std::string encoded;
+    for (const auto& [key, value] : params) {
+        encoded += url_encode(key) + "=" + url_encode(value) + "&";
+    }
+    encoded += "ClientID=" + std::to_string(client_id_) + "&ClientTransactionID=" + std::to_string(transaction_id);
+    return encoded;
+}
+
 RemoteAlpacaClient::Reply RemoteAlpacaClient::call(Verb verb, std::string_view member, const RemoteParams& params) {
     if (!lower_letters(member)) {
         throw AlpacaException("Alpaca member name must be lower-case letters", AlpacaError::InvalidValue);
@@ -413,15 +539,7 @@ RemoteAlpacaClient::Reply RemoteAlpacaClient::call(Verb verb, std::string_view m
     util::HttpResponse response;
     {
         std::lock_guard<std::mutex> lock(call_mutex_);
-        const std::uint32_t transaction_id = next_transaction_id_;
-        // 0 means "no id" to a server, so the count skips it when it wraps.
-        next_transaction_id_ =
-            next_transaction_id_ == std::numeric_limits<std::uint32_t>::max() ? 1 : next_transaction_id_ + 1;
-        std::string encoded;
-        for (const auto& [key, value] : params) {
-            encoded += url_encode(key) + "=" + url_encode(value) + "&";
-        }
-        encoded += "ClientID=" + std::to_string(client_id_) + "&ClientTransactionID=" + std::to_string(transaction_id);
+        const std::string encoded = encoded_locked(params);
         try {
             response = verb == Verb::Get ? http_->get(member_url(member) + "?" + encoded, timeout_)
                                          : http_->put_form(member_url(member), encoded, timeout_);
@@ -431,7 +549,11 @@ RemoteAlpacaClient::Reply RemoteAlpacaClient::call(Verb verb, std::string_view m
             throw RemoteTransportError(prefix_ + "no reply to " + name + ": " + e.what());
         }
     }
+    return reply_of(response, name);
+}
 
+RemoteAlpacaClient::Reply RemoteAlpacaClient::reply_of(const util::HttpResponse& response,
+                                                       const std::string& name) const {
     if (response.status != 200) {
         throw RemoteTransportError(prefix_ + "HTTP status " + std::to_string(response.status) + " for " + name);
     }
@@ -549,5 +671,112 @@ std::vector<std::pair<double, double>> RemoteAlpacaClient::get_rate_list(std::st
 }
 
 void RemoteAlpacaClient::put(std::string_view member, const RemoteParams& params) { call(Verb::Put, member, params); }
+
+std::chrono::system_clock::time_point RemoteAlpacaClient::get_utc_time(std::string_view member,
+                                                                       const RemoteParams& params) {
+    const std::string text = get_string(member, params);
+    if (const auto parsed = parse_utc(text)) return *parsed;
+    throw RemoteTransportError(prefix_ + "the reply to " + std::string(member) +
+                               " is not a UTC time in the CCYY-MM-DDThh:mm:ss form");
+}
+
+ImageArray RemoteAlpacaClient::get_image_array(std::size_t max_body_bytes, std::chrono::milliseconds timeout) {
+    const std::string name = "imagearray";
+    std::string url;
+    {
+        // Rule 6: only the transaction ID under the call mutex; the download runs beside the other calls.
+        std::lock_guard<std::mutex> lock(call_mutex_);
+        url = member_url(name) + "?" + encoded_locked({});
+    }
+    util::HttpResponse response;
+    try {
+        response = http_->get_with(url, timeout, util::HttpGetOptions{"application/imagebytes", max_body_bytes});
+    } catch (const util::HttpConnectRefused& e) {
+        throw RemoteConnectRefused(prefix_ + "no reply to " + name + ": " + e.what());
+    } catch (const std::exception& e) {
+        throw RemoteTransportError(prefix_ + "no reply to " + name + ": " + e.what());
+    }
+    if (response.status != 200) {
+        throw RemoteTransportError(prefix_ + "HTTP status " + std::to_string(response.status) + " for " + name);
+    }
+    if (!is_image_bytes(response.content_type)) {
+        // JSON: an error, or an image this server does not parse (rule 3: not a usable reply). Too large to be an
+        // Alpaca error: a JSON image, or some other body (a proxy's error page), named by its Content-Type.
+        if (response.body.size() > util::kHttpMaxResponseBytes) {
+            const std::string type = response.content_type.empty() ? "no Content-Type" : response.content_type;
+            throw RemoteTransportError(prefix_ + "the reply to " + name + " is " +
+                                       std::to_string(response.body.size()) + " bytes of " + type +
+                                       ", not ImageBytes; this server reads only ImageBytes images");
+        }
+        (void)reply_of(response, name);  // throws the upstream's error (rule 2) or a transport error
+        throw RemoteTransportError(prefix_ + "the reply to " + name +
+                                   " is a JSON image, not ImageBytes; this server reads only ImageBytes images");
+    }
+
+    const std::string_view body = response.body;
+    const auto refuse = [&](const std::string& why) {
+        return RemoteTransportError(prefix_ + "the ImageBytes reply to " + name + " " + why);
+    };
+    if (body.size() < kImageBytesMetadataSize) throw refuse("is shorter than its 44-byte metadata");
+    const std::uint32_t version = le32(body, 0);
+    const std::uint32_t error_number = le32(body, 4);
+    const std::uint32_t data_start = le32(body, 16);
+    const std::uint32_t transmission = le32(body, 24);
+    const std::uint32_t rank = le32(body, 28);
+    const std::uint32_t dim1 = le32(body, 32);
+    const std::uint32_t dim2 = le32(body, 36);
+    const std::uint32_t dim3 = le32(body, 40);
+    if (version != kImageBytesMetadataVersion) {
+        throw refuse("has metadata version " + std::to_string(version) + ", not 1");
+    }
+    if (data_start < kImageBytesMetadataSize || data_start > body.size()) {
+        throw refuse("has a DataStart outside the reply");
+    }
+    if (error_number != 0) {
+        // The message is the UTF-8 text from DataStart on (rule 2: the number unchanged, the host in front).
+        if (error_number > static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+            throw refuse("has an ErrorNumber outside int");
+        }
+        throw AlpacaException(prefix_ + std::string(body.substr(data_start)), static_cast<int>(error_number));
+    }
+    const std::size_t bytes = element_bytes(transmission);
+    if (bytes == 0) {
+        throw refuse("has TransmissionElementType " + std::to_string(transmission) +
+                     ", not an integer type this server reads");
+    }
+    if ((rank != 2 && rank != 3) || dim1 == 0 || dim2 == 0 || (rank == 3 && dim3 != 3) ||
+        dim1 > static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
+        dim2 > static_cast<std::uint32_t>(std::numeric_limits<int>::max())) {
+        throw refuse("has a shape this server does not read (rank 2, or rank 3 with three planes)");
+    }
+    const std::size_t width = dim1;
+    const std::size_t height = dim2;
+    const std::size_t channels = rank == 3 ? 3 : 1;
+    // The body is at most max_body_bytes, so a shape whose data would not fit it is refused before the product
+    // could overflow.
+    const std::size_t available = body.size() - data_start;
+    if (width > available / height || width * height > available / channels ||
+        width * height * channels > available / bytes) {
+        throw refuse("is shorter than its shape");
+    }
+    const std::string_view data = body.substr(data_start);
+    ImageArray image;
+    image.width = static_cast<int>(width);
+    image.height = static_cast<int>(height);
+    image.rank = static_cast<int>(rank);
+    image.data.resize(width * height * channels);
+    // The wire is x-major (the rightmost index fastest: x, then y, then the plane); ImageArray is row-major.
+    std::size_t at = 0;
+    for (std::size_t x = 0; x < width; ++x) {
+        for (std::size_t y = 0; y < height; ++y) {
+            for (std::size_t c = 0; c < channels; ++c, at += bytes) {
+                const auto value = element_at(data, at, transmission);
+                if (!value) throw refuse("has a UInt32 element above the Int32 range");
+                image.data[(y * width + x) * channels + c] = *value;
+            }
+        }
+    }
+    return image;
+}
 
 }  // namespace alpacacore::vendor::remotealpaca

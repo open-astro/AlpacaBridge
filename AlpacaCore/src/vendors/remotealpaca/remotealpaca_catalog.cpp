@@ -11,17 +11,18 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // The remotealpaca factories, ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope, Focuser,
-// CoverCalibrator and Dome (decision 0023, issue #1753 slices 3 to 5). Each refusal is an InvalidValue AlpacaException
-// rather than a schema rule, so both config sources refuse it: an API configuredevice call gets the text, and a
-// persisted entry that breaks one is not registered (the WeeWX factory's shape). Every integer is range checked before
-// it narrows to int (decision 0007 rule 4). This file (unlike remotealpaca_schema.cpp) is compiled only under
-// ALPACACORE_ENABLE_REMOTEALPACA, so the vendor header here is fine.
+// CoverCalibrator, Dome and Camera (decision 0023, issue #1753 slices 3 to 5). Each refusal is an InvalidValue
+// AlpacaException rather than a schema rule, so both config sources refuse it: an API configuredevice call gets the
+// text, and a persisted entry that breaks one is not registered (the WeeWX factory's shape). Every integer is range
+// checked before it narrows to int (decision 0007 rule 4). This file (unlike remotealpaca_schema.cpp) is compiled only
+// under ALPACACORE_ENABLE_REMOTEALPACA, so the vendor header here is fine.
 //
 // The factory is a bind hook so it sees the server's listening addresses (BindContext::listen_addresses): an upstream
 // that resolves to one of them is refused here, at configure, and the driver keeps the source to refuse it again at
 // every Connect (decision 0023 rule 4).
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/remotealpaca/remotealpaca_camera_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_covercalibrator_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_dome_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_filterwheel_driver.h>
@@ -134,6 +135,10 @@ void register_remotealpaca_factory(DeviceCatalog& catalog) {
     add_factory(catalog, DeviceType::Focuser, "focuser",
                 [](int number, const remote::RemoteDeviceConfig& config, remote::ServerAddressSource self) {
                     return remote::create_remotealpaca_focuser(number, config, std::move(self));
+                });
+    add_factory(catalog, DeviceType::Camera, "camera",
+                [](int number, const remote::RemoteDeviceConfig& config, remote::ServerAddressSource self) {
+                    return remote::create_remotealpaca_camera(number, config, std::move(self));
                 });
     add_factory(catalog, DeviceType::Dome, "dome",
                 [](int number, const remote::RemoteDeviceConfig& config, remote::ServerAddressSource self) {

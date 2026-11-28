@@ -49,6 +49,7 @@ remotealpaca	filterwheel	fake_http_client.h	pending	6	-	not yet tried: slice 6 d
 remotealpaca	switch	fake_http_client.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
 remotealpaca	telescope	fake_http_client.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
 remotealpaca	focuser	fake_http_client.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
+remotealpaca	camera	fake_http_client.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
 remotealpaca	dome	fake_http_client.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
 remotealpaca	covercalibrator	fake_http_client.h	pending	6	-	not yet tried: slice 6 decides whether the fake can pass ConformU on merit
 zwo	switch	fake_zwo_sdk.h	run	6	AlpacaCore/conformu/ZWO/Fake/Fake-switch-fake_zwo_sdk-Linux-arm64.txt	-

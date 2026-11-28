@@ -4,7 +4,7 @@ applyTo: "AlpacaCore/src/vendors/remotealpaca/**,AlpacaCore/include/alpacacore/v
 
 ### remotealpaca
 
-Devices: ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope, Focuser, CoverCalibrator, Dome. The vendor serves a device of an upstream Alpaca server as a proxied device on this server
+Devices: ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope, Focuser, CoverCalibrator, Dome, Camera. The vendor serves a device of an upstream Alpaca server as a proxied device on this server
 (`CONTEXT.md`: native device vs proxied device). Its contract is fixed by
 [decision 0023](../../docs/decisions/0023-outbound-clients-in-vendor-wrappers.md) and issue #1753; read both before
 adding a device type.
@@ -19,7 +19,7 @@ the pass-through of upstream errors. A driver keeps its frame and how to measure
 commands, its `transition_mutex_` and its `get_connected()`; behaviour that does not fit the shared shape stays in the
 driver. A new device type adds a driver over it, not a second copy of these rules. The first InterfaceVersion of the
 proxied type that has `Connect` is the driver's (`UpstreamProxy::Setup::platform7_version`): 2 for ObservingConditions,
-3 for SafetyMonitor, FilterWheel, Switch and Dome, 4 for Rotator, Telescope and Focuser, 2 for CoverCalibrator.
+3 for SafetyMonitor, FilterWheel, Switch and Dome, 4 for Rotator, Telescope, Focuser and Camera, 2 for CoverCalibrator.
 
 #### The upstream client (`RemoteAlpacaClient`, issue #1753 slice 2)
 
@@ -34,6 +34,13 @@ proxied type that has `Connect` is the driver's (`UpstreamProxy::Setup::platform
   dropped connection are not.
 - The reply's JSON is read by the wrapper's own reader in `remote_alpaca_client.cpp`; no JSON type leaves the wrapper
   (decision 0013 section 4). The per-call timeout is `kRemoteCallTimeout` (5 s), not a config field.
+- `get_image_array()` (the Camera, #2703) is the one call that does not hold the client's mutex across its request (rule
+  6): it takes its ClientTransactionID under it and then runs beside the other calls, since a full frame can take a
+  minute and the poll would wait that long, its frame aging past the loss bound. It GETs `imagearray` with
+  `Accept: application/imagebytes` through `util::HttpClient::get_with()` (its own body cap and timeout) and decodes
+  ImageBytes (Byte, Int16, UInt16, Int32, and UInt32 up to the Int32 range; rank 2, or rank 3 with three planes) from
+  the wire's x-major order into the row-major `ImageArray`. A JSON reply is read for its `ErrorNumber` only: a JSON
+  image is a transport error (a full frame as JSON text is far too large to parse here).
 
 #### The ObservingConditions proxied device (issue #1753 slice 3)
 
@@ -274,6 +281,57 @@ bound.
 - A refused connection on any of the three is a lost link at once; another call with no reply is `DriverException`.
   Actions and `Command*` are not forwarded.
 
+#### The Camera proxied device (issue #1753 slice 5, #2703)
+
+The same config, self-loop check, Connect (Platform 7 is `ICameraV4`; a version 3 or older upstream gets
+`Connected=true`), branded Name, snapshot, poll and link rules as the ObservingConditions device, with the same loss
+bound. The upstream runs the exposure: no exposure body runs here, so there is no capture session (decision 0020).
+
+- **Connect** reads the sensor (sizes, bins, pixel sizes, the `Can*` flags, the exposure, gain and offset limits and
+  lists, `ReadoutModes`, `SensorName`, `SensorType`, `MaxADU`, `ElectronsPerADU`, `FullWellCapacity`, `HasShutter`,
+  the Bayer offsets) and the client's settings (`BinX`/`BinY`, `NumX`/`NumY`, `StartX`/`StartY`, `Gain`, `Offset`,
+  `ReadoutMode`, `FastReadout`, `CoolerOn`, `SetCCDTemperature`, `SubExposureDuration`) once, each a value or the
+  upstream's error. Both keep answering while the link is faulted. The settings are written through by this server's
+  writes and are not polled: a change another client of the upstream makes shows at the next Connect. The `Can*`
+  flags also answer while disconnected: the last Connect's value, false before any. Connect also asks
+  `CCDTemperature`, `CoolerPower`, `HeatSinkTemperature` and `IsPulseGuiding` once: an upstream `NotImplemented`
+  leaves that member out of the poll, its getter answering that error unchanged.
+- **Members by version.** ICameraV2 added the Bayer offsets, `CanFastReadout`, `ExposureMax`/`Min`/`Resolution`,
+  `FastReadout`, `Gain*`, `Gains`, `PercentCompleted`, `ReadoutMode(s)`, `SensorName` and `SensorType`; ICameraV3
+  `Offset*`, `Offsets` and `SubExposureDuration`. An older upstream is never asked them: each answers `NotImplemented`
+  naming the upstream's version (`CanFastReadout` reads false).
+- **Snapshot.** The frame is `CameraState`, `ImageReady`, `PercentCompleted` (asked only while the sampled
+  `CameraState` is Exposing), `CCDTemperature`, `CoolerPower`, `HeatSinkTemperature`, `IsPulseGuiding` and
+  `LastExposureDuration`/`LastExposureStartTime` (asked when `ImageReady` turns true, and in the Connect's first frame;
+  otherwise carried over). Two to seven calls a poll; five on a cooled camera with no heat-sink sensor, idle. A stale
+  frame is served; a latched fault refuses it with `DriverException`. `DeviceState`'s `TimeStamp` is the frame's age
+  (the camera base's `device_state_age()`). The upstream's `InvalidOperation` on `ImageArray` and `LastExposure*` is
+  flagged asked too early (#1167, #2182).
+- **StartExposure** follows the camera argument order: the duration (`util::check_exposure_duration`), the connection,
+  `ExposureMin`/`ExposureMax` as the Connect read them (`util::exposure_microseconds`: below the minimum runs at it).
+  The frame against the sensor and an exposure already running are the upstream's to judge (its `InvalidValue` or
+  `InvalidOperation` passes through): the settings held here may be stale. Refused while faulted. The body writes
+  `CameraState` Exposing, `ImageReady` false and `PercentCompleted` 0 through; only the poll writes `ImageReady` true.
+- **Setters**: each static check (`util::check_bin`, `check_frame_size`, `check_frame_start`, `check_ccd_setpoint`, a
+  negative `ReadoutMode` or `SubExposureDuration`) before the connection check, then the bounds the Connect read
+  (`MaxBinX`/`MaxBinY`, the `ReadoutModes` count), refused while faulted, forwarded and written through. A bin write
+  reads the other bin and the frame back (an upstream without asymmetric binning sets both); a `Gain` or
+  `ReadoutMode` write reads `ElectronsPerADU` and `FullWellCapacity` back. A read-back with no reply keeps the value
+  held and does not fail the write. **PulseGuide** (direction 0 to 3, a duration of 0 to
+  `kDefaultMaxPulseGuideMs`, #2292) writes `IsPulseGuiding` true through, as the Telescope's does; the next poll
+  serves the upstream's answer.
+- **AbortExposure and StopExposure** are forwarded even while the link is faulted (refused only for a lost link) and
+  read `CameraState` back. They reach the upstream after an earlier command (the caller order).
+- **ImageArray** is fetched in the command path, never polled: refused while faulted, then the client's
+  `get_image_array()` with the bounds the Connect computed (`image_fetch_bounds()`): a body cap of the full sensor at
+  four bytes an element plus 64 KiB (three planes for a Color sensor or one that did not say), at most 512 MiB and at
+  least 1 MiB, and a timeout of 5 s plus the cap at 1 MiB/s, at most 300 s. The image is held until the next
+  StartExposure, a Disconnect or a frame that reads `ImageReady` false; until then a read answers it again without a
+  call. `ImageArrayVariant` is `NotImplemented` (COM only). The download is a command, so a command sent during it
+  waits for it, and a Disconnect joins it (its timeout bounds both).
+- A refused connection on any command or on the image download is a lost link at once; another call with no reply is
+  `DriverException`. Actions and `Command*` are not forwarded.
+
 #### The Dome proxied device (issue #1753 slice 5, #2705)
 
 The same config, self-loop check, Connect (Platform 7 is `IDomeV3`; a version 2 or older upstream gets
@@ -358,7 +416,7 @@ drop, HTTP 500, bad JSON and no-ErrorNumber modes) over the real libcurl client,
 counts calls. The device tests (`test_remotealpaca_observingconditions.cpp`, `test_remotealpaca_safetymonitor.cpp`,
 `test_remotealpaca_rotator.cpp`, `test_remotealpaca_filterwheel.cpp`, `test_remotealpaca_switch.cpp`,
 `test_remotealpaca_telescope.cpp` (its `[goto-safety]` cases cover the cap and the relink stop),
-`test_remotealpaca_focuser.cpp`, `test_remotealpaca_covercalibrator.cpp`, `test_remotealpaca_dome.cpp`, the contract sweep and the `[stress]` cases
+`test_remotealpaca_focuser.cpp`, `test_remotealpaca_covercalibrator.cpp`, `test_remotealpaca_dome.cpp`, `test_remotealpaca_camera.cpp`, the contract sweep and the `[stress]` cases
 in `test_remotealpaca_concurrency_stress.cpp`) answer from `AlpacaUpstreamScript`
 (`AlpacaCore/tests/alpaca_upstream_script.h`, a responder for `FakeHttpClient`; `Kind::SafetyMonitor` scripts a
 SafetyMonitor upstream, `Kind::Rotator` a Rotator whose moves run until `finish_move()` or a Halt, `Kind::FilterWheel`
@@ -368,7 +426,8 @@ clock), `Kind::Telescope` a German mount whose slews land at once or, with
 `hold_motion(true)`, run until `finish_motion()` or AbortSlew, `Kind::Focuser` a Focuser whose Move runs until
 `finish_move()` or a Halt, `Kind::CoverCalibrator` a CoverCalibrator whose cover commands run until `finish_cover()` or
 a HaltCover and whose calibrator commands run until `finish_calibrator()`, `Kind::Dome` a Dome whose slews run until
-`finish_move()` or an AbortSlew and whose shutter moves until `finish_shutter()`) with the poll on
+`finish_move()` or an AbortSlew and whose shutter moves until `finish_shutter()`, `Kind::Camera` an 8 x 6 camera whose
+exposures run until `finish_exposure()` or StopExposure and whose image it serves as ImageBytes) with the poll on
 `FakeTaskClock`. The contract sweep's snapshot
 rig for the SafetyMonitor states `IsSafe`'s lost answer in `SnapshotRig::lost_answer`.
 

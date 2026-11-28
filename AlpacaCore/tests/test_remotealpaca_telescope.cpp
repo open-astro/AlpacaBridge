@@ -702,7 +702,7 @@ TEST_CASE("Remote Alpaca Telescope Driver - the upstream client reads TrackingRa
     alpacacore::test::FakeHttpClient http;
     std::string body;
     http.set_responder([&body](const alpacacore::test::FakeHttpClient::Request&) {
-        return alpacacore::util::HttpResponse{200, body};
+        return alpacacore::util::HttpResponse{200, body, {}};
     });
     remote::RemoteAlpacaClient client(http.client(), {"127.0.0.1", kUpstreamPort, "telescope", 0}, 7);
     body = R"({"Value":[0,2],"ErrorNumber":0,"ErrorMessage":""})";
@@ -799,7 +799,7 @@ TEST_CASE("Remote Alpaca Telescope MoveAxis - a stop or AbortSlew with no reply 
             const bool stop = request.method == "PUT" && (request.url.find("/abortslew") != std::string::npos ||
                                                           (request.url.find("/moveaxis") != std::string::npos &&
                                                            request.form_body.find("Rate=0&") != std::string::npos));
-            if (stops_silent.load() && stop) return alpacacore::util::HttpResponse{500, ""};
+            if (stops_silent.load() && stop) return alpacacore::util::HttpResponse{500, "", {}};
             return rig.upstream.answer(request);
         });
         rig.connect();
@@ -832,7 +832,7 @@ TEST_CASE("Remote Alpaca Telescope Disconnect - a jog still running is stopped, 
         std::atomic<bool> stops_silent{false};
         rig.http.set_responder([&](const alpacacore::test::FakeHttpClient::Request& request) {
             if (stops_silent.load() && request.method == "PUT" && request.url.find("/moveaxis") != std::string::npos) {
-                return alpacacore::util::HttpResponse{500, ""};
+                return alpacacore::util::HttpResponse{500, "", {}};
             }
             return rig.upstream.answer(request);
         });
@@ -862,7 +862,7 @@ TEST_CASE("Remote Alpaca Telescope motion - a motion PUT with no reply is stoppe
                                 request.url.find(std::string("/") + member) != std::string::npos &&
                                 request.form_body.find("Rate=0&") == std::string::npos;
             auto reply = rig.upstream.answer(request);  // the upstream acts on it
-            if (lose_reply.load() && target) return alpacacore::util::HttpResponse{500, ""};
+            if (lose_reply.load() && target) return alpacacore::util::HttpResponse{500, "", {}};
             return reply;
         });
         rig.connect();
@@ -897,7 +897,7 @@ TEST_CASE("Remote Alpaca Telescope motion - a MoveAxis whose PUT and stop get no
         if (lose_replies.load() && move) {
             // The move reaches the upstream and its reply is lost; the stop is lost before it arrives.
             if (request.form_body.find("Rate=0&") == std::string::npos) (void)rig.upstream.answer(request);
-            return alpacacore::util::HttpResponse{500, ""};
+            return alpacacore::util::HttpResponse{500, "", {}};
         }
         return rig.upstream.answer(request);
     });
@@ -1118,7 +1118,7 @@ TEST_CASE("Remote Alpaca Telescope link loss - a connect whose stop gets no repl
     std::atomic<bool> abort_silent{true};
     rig.http.set_responder([&](const alpacacore::test::FakeHttpClient::Request& request) {
         if (abort_silent.load() && request.method == "PUT" && request.url.find("/abortslew") != std::string::npos) {
-            return alpacacore::util::HttpResponse{500, ""};
+            return alpacacore::util::HttpResponse{500, "", {}};
         }
         return rig.upstream.answer(request);
     });

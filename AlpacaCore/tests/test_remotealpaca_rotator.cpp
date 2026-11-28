@@ -261,7 +261,7 @@ TEST_CASE("Remote Alpaca Rotator Driver - TargetPosition is the upstream's, read
     std::atomic<bool> target_unwrapped{false};  // the upstream answers an unwrapped target, 370
     rig.http.set_responder([&](const alpacacore::test::FakeHttpClient::Request& request) {
         if (request.method == "GET" && request.url.find("/targetposition") != std::string::npos) {
-            if (target_silent.load()) return alpacacore::util::HttpResponse{500, ""};
+            if (target_silent.load()) return alpacacore::util::HttpResponse{500, "", {}};
             if (target_unwrapped.load()) rig.upstream.set("targetposition", "370");
         }
         return rig.upstream.answer(request);

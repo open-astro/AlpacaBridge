@@ -11,8 +11,8 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // The remotealpaca schemas, ObservingConditions, SafetyMonitor, Rotator, FilterWheel, Switch, Telescope, Focuser,
-// CoverCalibrator and Dome (decision 0023, issue #1753 slices 3 to 5). No vendor header: compiles in every build
-// (including vendors-OFF), so `available` in GET /management/v1/devicecatalog reflects only whether a factory is
+// CoverCalibrator, Dome and Camera (decision 0023, issue #1753 slices 3 to 5). No vendor header: compiles in every
+// build (including vendors-OFF), so `available` in GET /management/v1/devicecatalog reflects only whether a factory is
 // registered. No per-field rule: the refusals live in the factory (see remotealpaca_fields.h).
 
 #include <string_view>
@@ -40,6 +40,7 @@ void register_remotealpaca_schema(DeviceCatalog& catalog) {
     add(DeviceType::Switch, "Remote Alpaca Switch");
     add(DeviceType::Telescope, "Remote Alpaca Telescope");
     add(DeviceType::Focuser, "Remote Alpaca Focuser");
+    add(DeviceType::Camera, "Remote Alpaca Camera");
     add(DeviceType::Dome, "Remote Alpaca Dome");
     add(DeviceType::CoverCalibrator, "Remote Alpaca Cover Calibrator");
 }

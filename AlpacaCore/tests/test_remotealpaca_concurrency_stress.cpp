@@ -11,12 +11,13 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // Connect/disconnect/operate concurrency stress for the remotealpaca ObservingConditions, SafetyMonitor, Rotator,
-// FilterWheel, Switch, Telescope, Focuser, CoverCalibrator and Dome proxied devices (issues #101, #1753, #2704 to
-// #2710). The upstream is the scripted AlpacaUpstreamScript behind FakeHttpClient and the test-only LockedHttpClient
+// FilterWheel, Switch, Telescope, Focuser, CoverCalibrator, Dome and Camera proxied devices (issues #101, #1753, #2703
+// to #2710). The upstream is the scripted AlpacaUpstreamScript behind FakeHttpClient and the test-only LockedHttpClient
 // (decision 0015 rule 2), so every Connect lands and the poll and the command bodies run during the storm. The last
 // case of each device races refused-connection losses against the lifecycle and the reads.
 
 #include <alpacacore/alpaca_errors.h>
+#include <alpacacore/camera_driver.h>
 #include <alpacacore/covercalibrator_driver.h>
 #include <alpacacore/dome_driver.h>
 #include <alpacacore/filterwheel_driver.h>
@@ -27,6 +28,7 @@
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/http_client.h>
+#include <alpacacore/vendor/remotealpaca/remotealpaca_camera_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_covercalibrator_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_dome_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_filterwheel_driver.h>
@@ -47,6 +49,7 @@
 #include "alpaca_upstream_script.h"
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "driver_rig.h"
 #include "fake_http_client.h"
 #include "fake_task_clock.h"
 #include "locked_http_client.h"
@@ -235,6 +238,39 @@ void operate_focuser(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) 
     guard([&] { f.move(30000); });
     guard([&] { f.set_temp_comp(false); });
     guard([&] { f.halt(); });
+}
+
+std::unique_ptr<alpacacore::CameraDriver> make_camera(alpacacore::test::FakeHttpClient& http) {
+    return remote::create_remotealpaca_camera(0, stress_config(),
+                                              std::make_shared<alpacacore::test::LockedHttpClient>(http.client()), {},
+                                              alpacacore::util::default_task_clock());
+}
+
+// The Camera's frame, sensor and settings getters, the image download and its commands, each in its own guard. The
+// exposure never finishes on its own (the scripted upstream ends it at StopExposure), so ImageArray is mostly the
+// upstream's InvalidOperation and sometimes an image.
+void operate_camera(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
+    auto& c = static_cast<alpacacore::CameraDriver&>(d);
+    guard([&] { static_cast<void>(c.get_camera_state()); });
+    guard([&] { static_cast<void>(c.get_image_ready()); });
+    guard([&] { static_cast<void>(c.get_ccd_temperature()); });
+    guard([&] { static_cast<void>(c.get_cooler_power()); });
+    guard([&] { static_cast<void>(c.get_percent_completed()); });
+    guard([&] { static_cast<void>(c.get_last_exposure_duration()); });
+    guard([&] { static_cast<void>(c.get_camera_x_size()); });
+    guard([&] { static_cast<void>(c.get_can_abort_exposure()); });
+    guard([&] { static_cast<void>(c.get_bin_x()); });
+    guard([&] { static_cast<void>(c.get_gain()); });
+    guard([&] { static_cast<void>(c.get_device_state()); });
+    guard([&] { static_cast<void>(c.get_name()); });
+    guard([&] { static_cast<void>(c.get_link_fault()); });
+    guard([&] { c.start_exposure(1.0, true); });
+    guard([&] { c.stop_exposure(); });
+    guard([&] { static_cast<void>(c.get_image_array()); });
+    guard([&] { c.set_gain(20); });
+    guard([&] { c.set_bin_x(1); });
+    guard([&] { c.pulse_guide(0, 10); });
+    guard([&] { c.abort_exposure(); });
 }
 
 std::unique_ptr<alpacacore::DomeDriver> make_dome(alpacacore::test::FakeHttpClient& http) {
@@ -923,6 +959,93 @@ TEST_CASE("Remote Alpaca focuser - refused-connection losses race connects, disc
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_link_fault().empty());  // the Disconnect ended any kept reason
     CHECK(upstream.calls("halt") > 0);        // commands ran on a connected driver, not only NotConnected
+    CHECK(http.in_flight() == 0);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}
+
+TEST_CASE("Remote Alpaca camera - concurrent connect/disconnect/operate stress", "[remotealpaca][camera][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::Camera};
+    upstream.install(http);
+    auto driver = make_camera(http);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // NotConnected while a racing disconnect has the driver down. InvalidOperation: a command started while a
+    // Disconnect joins the command slot is refused ("try again", issue #1713), the upstream's answer to a setter or a
+    // StartExposure while it exposes, and ImageArray before an image.
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::InvalidOperation};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { operate_camera(guard, d); });
+
+    driver->set_connected(false);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(upstream.calls("startexposure") > 0);  // the commands ran on a connected driver, not only NotConnected
+    CHECK(upstream.calls("imagearray") > 0);
+    CHECK(http.in_flight() == 0);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}
+
+TEST_CASE("Remote Alpaca camera - destruction races an in-flight connect", "[remotealpaca][camera][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::Camera};
+    upstream.install(http);
+    http.set_delay(std::chrono::milliseconds(1));
+    alpacacore::test::run_destruction_during_connect_stress([&http]() { return make_camera(http); });
+    CHECK(http.in_flight() == 0);
+}
+
+TEST_CASE("Remote Alpaca camera - racing disconnect is never dropped", "[remotealpaca][camera][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::Camera};
+    upstream.install(http);
+    http.set_delay(std::chrono::milliseconds(1));  // keeps each Connect in flight while the disconnect lands
+    auto driver = make_camera(http);
+    CHECK_FALSE(alpacacore::test::connect_then_disconnect_settles_disconnected(*driver));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, false));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, true));
+    CHECK(http.in_flight() == 0);
+}
+
+// Decision 0009 point 2(a): one call in 80 is refused (a Connect makes some sixty), so the poll, the commands and the
+// image download lose the link at once while lifecycle threads connect and disconnect it and readers race the
+// getters. TSan checks the loss path's writes against the getters, the command bodies and their write-throughs, the
+// held image and its exposure count, the Connect's store and set_connected().
+TEST_CASE("Remote Alpaca camera - refused-connection losses race connects, disconnects, commands and reads",
+          "[remotealpaca][camera][stress]") {
+    alpacacore::test::FakeHttpClient http;
+    alpacacore::test::AlpacaUpstreamScript upstream{alpacacore::test::AlpacaUpstreamScript::Kind::Camera};
+    std::atomic<int> calls{0};
+    std::atomic<bool> refusing{true};
+    http.set_responder([&upstream, &calls, &refusing](const alpacacore::test::FakeHttpClient::Request& request) {
+        if (refusing.load() && calls.fetch_add(1) % 80 == 79) {
+            throw alpacacore::util::HttpConnectRefused("scripted refusal (connection refused)");
+        }
+        return upstream.answer(request);
+    });
+    auto driver = make_camera(http);
+
+    // A refused command is NotConnected (the loss is its answer); InvalidOperation as above.
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::InvalidOperation};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { operate_camera(guard, d); });
+
+    // After the storm the driver is still whole: with the refusals stopped it relinks, and a command on the known-up
+    // link reaches the upstream. (Under load the storm's losses and Disconnects can refuse every command it sends,
+    // so a count of the storm's own commands is no liveness check.) The last connect() may still own its connection
+    // task (open-astro#326): settle instead of a bare Connect or Disconnect.
+    refusing.store(false);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+    const int aborts = upstream.calls("abortexposure");
+    CHECK(alpacacore::test::error_code_of([&] { driver->abort_exposure(); }) == 0);
+    CHECK(upstream.calls("abortexposure") == aborts + 1);
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());  // the Disconnect ended any kept reason
     CHECK(http.in_flight() == 0);
     INFO(guard.report());
     CHECK(guard.unexpected_count() == 0);

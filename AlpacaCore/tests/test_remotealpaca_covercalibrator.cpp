@@ -366,7 +366,7 @@ TEST_CASE("Remote Alpaca CoverCalibrator Driver - HaltCover reads the upstream's
     std::atomic<bool> state_silent{false};  // the CoverState read gets HTTP 500, no usable reply
     rig.http.set_responder([&](const alpacacore::test::FakeHttpClient::Request& request) {
         if (state_silent.load() && request.method == "GET" && request.url.find("/coverstate") != std::string::npos) {
-            return alpacacore::util::HttpResponse{500, ""};
+            return alpacacore::util::HttpResponse{500, "", {}};
         }
         return rig.upstream.answer(request);
     });
