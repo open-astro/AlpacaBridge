@@ -4507,6 +4507,7 @@ TEST_CASE("iOptron async landing gate - a 300 s bound stop the mount ignored onc
         throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
     });
 
+    const int restores_before = mount.count(":ST1#");
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
     REQUIRE(wait_for_goto_dispatch(mount));
     clock.advance(std::chrono::seconds(6));
@@ -4517,6 +4518,8 @@ TEST_CASE("iOptron async landing gate - a 300 s bound stop the mount ignored onc
     CHECK(contains(slewing_failure(*driver), "did not settle within 300 s"));
     REQUIRE(mount.count(":Q#") == 1);
     CHECK(advance_verify_until(clock, [&] { return mount.count(":Q#") >= 2; }));
+    // Issue #2762: the equatorial GOTO's verified stop ends with Tracking on.
+    CHECK(advance_verify_until(clock, [&] { return mount.count(":ST1#") == restores_before + 1; }));
     driver->set_connected(false);
 }
 
@@ -4734,6 +4737,35 @@ TEST_CASE("iOptron motion bound - a dead-man stop of a jog started with Tracking
 TEST_CASE("iOptron motion bound - a dead-man stop of a jog started with Tracking off leaves Tracking off",
           "[ioptron][telescope][unit][fake][goto-safety]") {
     dead_man_stop_restores_tracking(false);
+}
+
+// Review of #2821: a client's Tracking write while the stop check runs wins over the pending restore.
+// Falsified by: ioptron_telescope_driver.cpp set_tracking() not clearing stop_verify_restore_tracking_.
+TEST_CASE("iOptron motion bound - a Tracking write before the dead-man stop verifies cancels the restore",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_goto_tracks_off(true);
+    mount.ignore_stops(1);  // the first round does not verify, so the write lands inside the check
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+    MotionBoundThread watchdog;
+    watchdog.attach(*driver);
+    driver->set_tracking(true);
+
+    driver->move_axis(0, driver->get_axis_rate_range(0).second);
+    REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
+    clock.advance(std::chrono::seconds(61));
+    REQUIRE(wait_until([&] { return mount.count(":Q#") == 1; }));
+    driver->set_tracking(false);  // another client turns Tracking off before the stop is verified
+    const int restores_before = mount.count(":ST1#");
+    CHECK(advance_verify_until(clock, [&] { return !mount.moving(); }));
+    CHECK(advance_verify_until(clock, [&] { return false; }, std::chrono::seconds(4)) == false);
+    CHECK(mount.count(":Q#") == 2);
+    CHECK(mount.count(":ST1#") == restores_before);
+    CHECK_FALSE(driver->get_tracking());
+    driver->set_connected(false);
 }
 
 // Falsified by: ioptron_telescope_driver.cpp stop_bounded_motion_locked() not handing restore_tracking to

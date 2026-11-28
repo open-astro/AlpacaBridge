@@ -1003,6 +1003,7 @@ public:
         status_cache_valid_ = true;
         last_status_update_ = clock_.now();
         tracking_override_until_ = last_status_update_ + std::chrono::seconds(2);
+        stop_verify_restore_tracking_.reset();  // #2762: the client's write wins over a bound stop's pending restore
         if (axis_move_active_primary_ || axis_move_active_secondary_) {
             tracking_state_before_move_ = tracking;
         } else {
@@ -3462,17 +3463,13 @@ private:
     void start_pending_stop_verify() const noexcept {
         if (!stop_verify_pending_.load()) return;
         std::uint64_t generation = 0;
-        std::optional<bool> restore_tracking;
         {
             StateLock lock(lock_gate_, StateLock::Mode::State);
             if (!stop_verify_pending_.exchange(false) || !connected_) return;
             generation = stop_verify_for_generation_;
-            restore_tracking = stop_verify_restore_tracking_;
         }
         try {
-            stop_verify_.start([this, generation, restore_tracking](util::OperationContext& ctx) {
-                run_stop_verify(ctx, generation, restore_tracking);
-            });
+            stop_verify_.start([this, generation](util::OperationContext& ctx) { run_stop_verify(ctx, generation); });
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN("iOptron", std::string("The stop check did not start: ") + e.what());
         } catch (...) {
@@ -3493,8 +3490,7 @@ private:
     // util::kStopNotVerifiedText for Slewing, until the next command or a reconnect clears it. Every hook takes the
     // operation lock for its own exchange only. The body ends, sending nothing more, as soon as it is cancelled (a
     // disconnect, a newer initiator that reaps it) or a newer slew operation moved the generation.
-    void run_stop_verify(util::OperationContext& ctx, std::uint64_t generation,
-                         std::optional<bool> restore_tracking) const {
+    void run_stop_verify(util::OperationContext& ctx, std::uint64_t generation) const {
         const auto owns_locked = [&] {
             if (connected_ && !link_lost() && ctx.stop_reason() == util::StopReason::None &&
                 generation == slew_operation_generation_) {
@@ -3529,7 +3525,7 @@ private:
         try {
             if (util::run_verified_stop(ctx, clock_, hooks)) {
                 ALPACA_LOG_DEBUG("iOptron", "The stop is verified");
-                if (restore_tracking.has_value()) restore_tracking_after_stop(ctx, generation, *restore_tracking);
+                restore_tracking_after_stop(ctx, generation);
             }
         } catch (const AlpacaException& e) {
             StateLock lock(lock_gate_, StateLock::Mode::State);
@@ -3540,14 +3536,16 @@ private:
         }
     }
 
-    // Issue #2762: after a verified dead-man or 300 s cap stop, Tracking is set back as AbortSlew sets it (#2000). A
-    // failure joins the stored bound error that Slewing raises; a lost link is the relink's to report.
-    void restore_tracking_after_stop(util::OperationContext& ctx, std::uint64_t generation, bool tracking) const {
+    // Issue #2762: after a verified dead-man or 300 s cap stop, Tracking is set back as AbortSlew sets it (#2000),
+    // unless a client wrote Tracking meanwhile (set_tracking() clears the pending restore). A failure joins the stored
+    // bound error that Slewing raises; a lost link is the relink's to report.
+    void restore_tracking_after_stop(util::OperationContext& ctx, std::uint64_t generation) const {
         StateLock lock(lock_gate_);
-        if (!connected_ || link_lost() || ctx.stop_reason() != util::StopReason::None ||
-            generation != slew_operation_generation_) {
+        if (!stop_verify_restore_tracking_.has_value() || !connected_ || link_lost() ||
+            ctx.stop_reason() != util::StopReason::None || generation != slew_operation_generation_) {
             return;
         }
+        const bool tracking = *std::exchange(stop_verify_restore_tracking_, std::nullopt);
         try {
             const Wire protocol = wire();
             if (tracking) {
@@ -3557,7 +3555,8 @@ private:
             }
         } catch (const std::exception& e) {
             if (link_lost()) return;
-            last_slew_error_ += std::string("; Tracking could not be restored: ") + e.what();
+            last_slew_error_ +=
+                std::string(last_slew_error_.empty() ? "" : "; ") + "Tracking could not be restored: " + e.what();
             ALPACA_LOG_WARN("iOptron", last_slew_error_);
             return;
         }
