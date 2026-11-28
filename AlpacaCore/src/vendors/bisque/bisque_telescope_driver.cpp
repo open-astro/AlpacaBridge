@@ -2090,6 +2090,8 @@ private:
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            // A superseded body touches no driver state (decision 0006 rule 6): a newer Park or a FindHome owns it.
+            if (ctx.stop_reason() != util::StopReason::None || park_epoch_ != epoch) return;
             parked_ = true;
         }
         publish_measurement();

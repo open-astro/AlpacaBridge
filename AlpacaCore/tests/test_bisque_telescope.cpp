@@ -1409,6 +1409,40 @@ TEST_CASE("Bisque Park - a failed Park keeps its error in AtPark, AtHome and Sle
     CHECK_NOTHROW(rig.driver->get_slewing());
 }
 
+TEST_CASE("Bisque Park - a superseded Park whose poll then reads parked does not set AtPark (#2809)",
+          "[bisque][telescope][park]") {
+    alpacacore::test::FakeBisqueMount mount;
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeMountServer server{mount.responder()};
+    REQUIRE(server.ok());
+    auto info = loopback(server.port());
+    info.response_timeout_ms = 5000;  // the held reply below must not time out
+    struct Rig {
+        alpacacore::test::FakeBisqueMount& mount;
+        std::unique_ptr<alpacacore::TelescopeDriver> driver;
+        ~Rig() { driver->set_connected(false); }
+    } rig{mount, alpacacore::vendor::bisque::create_bisque_telescope(0, info, clock)};
+    REQUIRE_NOTHROW(rig.driver->set_connected(true));
+    pause_poll(*rig.driver);
+    rig.mount.is_parked_ms = 1500;  // holds Park 1's first IsParked reply, which then reads parked
+    const auto is_parked_count = [&] {
+        const auto ledger = rig.mount.ledger();
+        return std::count(ledger.begin(), ledger.end(), "IsParked");
+    };
+    const auto before = is_parked_count();  // the connect asks IsParked too
+    REQUIRE_NOTHROW(rig.driver->park());
+    const auto polled = [&] { return is_parked_count() > before; };
+    REQUIRE(wait_real(polled));  // the reply is held from here
+    // AbortSlew clears parking_ at once, then waits for the link behind the held reply.
+    auto aborted = std::async(std::launch::async, [&] { rig.driver->abort_slew(); });
+    REQUIRE(wait_real([&] { return !rig.driver->get_slewing(); }));
+    // FindHome supersedes Park 1's body while its IsParked reply is still held.
+    REQUIRE_NOTHROW(rig.driver->find_home());
+    REQUIRE_NOTHROW(aborted.get());
+    CHECK(wait_real([&] { return rig.driver->get_at_home(); }));
+    CHECK_FALSE(rig.driver->get_at_park());
+}
+
 TEST_CASE("Bisque sync slew - the poll sleep and completion run on the task clock", "[bisque][telescope][taskclock]") {
     ClockedBisque rig;
     rig.mount.slew_polls_needed = 3;
@@ -1792,7 +1826,9 @@ TEST_CASE("Bisque park - Unpark during the park poll allows a slew again (#1838)
 }
 
 // A Park that ends late (its 120 s timeout) must not clear the flag of a newer Park still polling.
-TEST_CASE("Bisque park - a stale Park's timeout leaves a newer Park refusing slews (#1838)",
+// #2809: Park and FindHome share one operation slot, so Park 2's start supersedes Park 1's body, which stops at its
+// next wait and never reaches its own timeout.
+TEST_CASE("Bisque park - a newer Park supersedes a stale Park's poll and keeps refusing slews (#1838)",
           "[bisque][telescope][taskclock][park-race]") {
     ClockedBisque rig;
     rig.mount.park_polls_needed = 100000;
@@ -1813,20 +1849,21 @@ TEST_CASE("Bisque park - a stale Park's timeout leaves a newer Park refusing sle
     REQUIRE(wait_real([&] { return rig.mount.park_polls.load() >= 1; }));
 
     REQUIRE_NOTHROW(rig.driver->abort_slew());
-    // Park 2 starts 60 s into Park 1, so Park 1 times out with 60 s of Park 2's budget left.
+    // Park 2 starts 60 s into Park 1, after the AbortSlew left Park 1's poll running.
     advance_until(rig.clock, [&] { return rig.virtual_elapsed() >= std::chrono::seconds(60); }, 60);
     REQUIRE(rig.virtual_elapsed() >= std::chrono::seconds(60));
     park2 = std::async(std::launch::async, [&] { rig.driver->park(); });
     REQUIRE(wait_real([&] { return rig.mount.park_commands.load() == 2; }));
-    // Park 1 times out (121 s after its start) while Park 2, started later, still polls. Both calls returned at once
-    // (#2809); Park 1's body leaves no trace when it times out, so the clock runs a few steps past its deadline, each
-    // of which waits for Park 2's poll to wait on the clock again.
-    REQUIRE(advance_until(rig.clock, [&] { return rig.virtual_elapsed() >= std::chrono::seconds(125); }, 200));
+    // Park 2's Park command reset the fake's poll count. Only Park 2 polls now: one IsParked a second, where Park 1
+    // still polling would add a second one. Each step waits for Park 2's poll to wait on the clock again.
+    const auto park2_start = rig.virtual_elapsed();
+    REQUIRE(
+        advance_until(rig.clock, [&] { return rig.virtual_elapsed() >= park2_start + std::chrono::seconds(70); }, 200));
+    CHECK(rig.mount.park_polls.load() <= 72);
     REQUIRE_NOTHROW(park1.get());
-    CHECK_FALSE(motion_failed(*rig.driver));  // the stale Park kept no error: Park 2 owns the outcome
-    CHECK(rig.driver->get_slewing());         // Park 2 still parking
-    // #2410: the stale Park's timeout sends no Abort() of its own: Park 2 owns the mount (park_epoch_).
-    CHECK(rig.mount.abort_commands.load() == 1);  // the AbortSlew above
+    CHECK_FALSE(motion_failed(*rig.driver));      // Park 1 kept no error: Park 2 owns the outcome
+    CHECK(rig.driver->get_slewing());             // Park 2 still parking, past Park 1's 120 s deadline
+    CHECK(rig.mount.abort_commands.load() == 1);  // the AbortSlew above; Park 1 sent no stop of its own
 
     require_alpaca_error([&] { rig.driver->slew_to_coordinates_async(5.5, 20.0); },
                          alpacacore::AlpacaError::InvalidWhileParked);
@@ -2489,20 +2526,35 @@ TEST_CASE("Bisque park - a park stop whose session ended meanwhile writes nothin
     rig.mount.ignore_aborts = 1000;  // the stop fails, so the old session would store a failure and a retry
     // The hook runs on the Park body (#2809), which a disconnect joins: the reconnect runs on its own thread, and
     // the hook returns once the disconnect has ended the session (Connected reads false).
+    std::promise<void> go;  // the hook releases the reconnect
     std::promise<void> reconnected;
     auto reconnect = reconnected.get_future();
+    std::thread reconnector([&, released = go.get_future()] {
+        released.wait();
+        try {
+            rig.driver->set_connected(false);
+            rig.driver->set_connected(true);
+            pause_poll(*rig.driver);
+            reconnected.set_value();
+        } catch (...) {
+            reconnected.set_exception(std::current_exception());
+        }
+    });
+    // Joined before `rig` goes, a failed REQUIRE included; a reconnect the hook never released runs at teardown.
+    const struct JoinReconnector {
+        std::promise<void>& go;
+        std::thread& thread;
+        ~JoinReconnector() {
+            try {
+                go.set_value();
+            } catch (const std::future_error&) {  // NOLINT(bugprone-empty-catch): the hook released it already
+            }
+            thread.join();
+        }
+    } join_reconnector{go, reconnector};
     std::atomic<bool> session_ended{false};  // checked on the test thread: Catch2 assertions are not thread-safe
     alpacacore::vendor::bisque::set_stop_sent_hook_for_testing(*rig.driver, [&] {
-        std::thread([&] {
-            try {
-                rig.driver->set_connected(false);
-                rig.driver->set_connected(true);
-                pause_poll(*rig.driver);
-                reconnected.set_value();
-            } catch (...) {
-                reconnected.set_exception(std::current_exception());
-            }
-        }).detach();
+        go.set_value();
         session_ended = wait_real([&] { return !rig.driver->get_connected(); });
     });
     auto parked = std::async(std::launch::async, [&] { rig.driver->park(); });
