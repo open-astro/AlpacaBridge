@@ -2224,7 +2224,7 @@ private:
                 // The mount may have been disconnected meanwhile.
                 check_connected_now();
             }
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): a timeout kept its error
+        } catch (...) {  // NOLINT(bugprone-empty-catch): a timeout kept its error; a disconnect owns the state
             return;
         }
         {
