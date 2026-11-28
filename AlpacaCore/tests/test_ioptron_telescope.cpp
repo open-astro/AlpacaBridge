@@ -4682,6 +4682,88 @@ TEST_CASE("iOptron motion bound - a dead-man stop that never verifies leaves the
     driver->set_connected(false);
 }
 
+// Issue #2762: the dead-man and the 300 s cap restore Tracking the way AbortSlew does (#2000), once the stop check
+// has verified the stop. FakeIoptronMount::set_goto_tracks_off models the HAE29C: :Q# leaves tracking off.
+namespace {
+
+int last_command_index(const FakeIoptronMount& mount, const std::string& prefix) {
+    const auto commands = mount.commands();
+    for (int i = static_cast<int>(commands.size()) - 1; i >= 0; --i) {
+        if (commands[static_cast<std::size_t>(i)].rfind(prefix, 0) == 0) return i;
+    }
+    return -1;
+}
+
+void dead_man_stop_restores_tracking(bool tracking_before) {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_goto_tracks_off(true);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+    MotionBoundThread watchdog;
+    watchdog.attach(*driver);
+    driver->set_tracking(tracking_before);
+    const std::string restore = tracking_before ? ":ST1#" : ":ST0#";
+    const int restores_before = mount.count(restore);
+
+    driver->move_axis(0, driver->get_axis_rate_range(0).second);
+    mount.set_system_status(0);  // the firmware stops tracking during the move
+    REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
+    clock.advance(std::chrono::seconds(61));
+    REQUIRE(wait_until([&] { return mount.count(":Q#") == 1; }));
+    CHECK(advance_verify_until(clock, [&] { return mount.count(restore) == restores_before + 1; }));
+    CHECK(last_command_index(mount, restore) > last_command_index(mount, ":Q#"));
+    CHECK(mount.count(":Q#") == 1);
+    CHECK(contains(slewing_failure(*driver), "MoveAxis ran for 60 s"));
+    driver->abort_slew();  // clears the stored failure; nothing moves, so Tracking is left as it is
+    CHECK(driver->get_tracking() == tracking_before);
+    driver->set_connected(false);
+}
+
+}  // namespace
+
+// Falsified by: ioptron_telescope_driver.cpp stop_bounded_motion_locked() not handing restore_tracking to
+// request_stop_verify_locked().
+TEST_CASE("iOptron motion bound - a dead-man stop of a jog started with Tracking on leaves Tracking on",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    dead_man_stop_restores_tracking(true);
+}
+
+// Falsified by: ioptron_telescope_driver.cpp restore_tracking_after_stop() sending :ST1# for Tracking off too.
+TEST_CASE("iOptron motion bound - a dead-man stop of a jog started with Tracking off leaves Tracking off",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    dead_man_stop_restores_tracking(false);
+}
+
+// Falsified by: ioptron_telescope_driver.cpp stop_bounded_motion_locked() not handing restore_tracking to
+// request_stop_verify_locked().
+TEST_CASE("iOptron motion bound - a slew-bound stop of an equatorial GOTO leaves Tracking on",
+          "[ioptron][telescope][unit][fake][goto-safety]") {
+    FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_goto_tracks_off(true);
+    FakeTaskClock clock;
+    auto driver = hold_driver(mount, clock);
+    pass_connect_cache(clock);
+    MotionBoundThread watchdog;
+    watchdog.attach(*driver);
+    driver->set_tracking(true);
+    const int restores_before = mount.count(":ST1#");
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
+    REQUIRE(wait_for_goto_dispatch(mount));  // the fake reports status 2 (slewing, not tracking) until :Q#
+    REQUIRE(clock.wait_for_waiter_thread(watchdog.current(), std::chrono::seconds(5)));
+    clock.advance(std::chrono::seconds(301));
+    REQUIRE(wait_until([&] { return mount.count(":Q#") == 1; }));
+    CHECK(advance_verify_until(clock, [&] { return mount.count(":ST1#") == restores_before + 1; }));
+    CHECK(last_command_index(mount, ":ST1#") > last_command_index(mount, ":Q#"));
+    CHECK(contains(slewing_failure(*driver), "did not end within 300 s"));
+    driver->abort_slew();
+    CHECK(driver->get_tracking());
+    driver->set_connected(false);
+}
+
 // Ara trusts AtHome after a FindHome it sent only when FindHome is a real sensor search. On the HAE29C EQ (0036) it
 // is the :MSH# zero sensor search (#2420); every other iOptron model's :MH# slews to the stored home.
 TEST_CASE("iOptron Telescope Driver - findhomeissensorsearch is true only on the HAE29C",
