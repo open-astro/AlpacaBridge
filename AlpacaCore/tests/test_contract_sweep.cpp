@@ -1343,6 +1343,10 @@ struct Tier2Host {
     // Telescope rows whose fake cannot reach a parked state (CanPark false, or a park the fake cannot answer)
     // say why and where here, and case_t2_async_initiators then skips the Park leg. Null on every row that parks.
     const char* park_unavailable = nullptr;
+    // A telescope row whose driver's Park still waits for the mount to arrive (not yet asynchronous) names the issue
+    // here. case_t2_async_initiators then skips the Park leg rather than pass it on a fake whose park lands at once;
+    // the parked cases still park the mount. Null once the driver's Park returns at once.
+    const char* park_waits_for_mount = nullptr;
     // Likewise for MoveAxis(axis, 0) on a row whose fake does not answer the rate command. A row whose driver
     // reports CanMoveAxis false on every axis needs no reason: there is no call to time.
     const char* move_axis_unavailable = nullptr;
@@ -1719,6 +1723,11 @@ constexpr std::chrono::milliseconds kInitiatorBound{1000};
         INFO(h.id << " cannot park: " << (h.park_unavailable != nullptr ? h.park_unavailable : "(no reason stated)"));
         REQUIRE(h.park_unavailable != nullptr);
         REQUIRE(std::string(h.park_unavailable).size() > 0);
+        return;
+    }
+    if (h.park_waits_for_mount != nullptr) {
+        INFO(h.id << " Park still waits for the mount: " << h.park_waits_for_mount);
+        CHECK(std::string(h.park_waits_for_mount).size() > 0);
         return;
     }
     const auto t0 = Clock::now();
@@ -2779,7 +2788,9 @@ Hosted bisque_telescope_hosted(bool hold, alpacacore::util::TaskClock& clock) {
 }
 
 // Recipe of test_bisque_telescope.cpp: FakeBisqueMount's scripted default behind FakeMountServer. The first command
-// is the handshake, so its held reply holds the connect; the park lands on the first IsParked poll.
+// is the handshake, so its held reply holds the connect; the park lands on the first IsParked poll, which would let
+// the Park leg of case_t2_async_initiators pass although park() polls until the mount arrives (12 s in the fake
+// ConformU run), so that leg is skipped until #2809.
 Tier2Host tier2_host_bisque_telescope() {
     Tier2Host h{"bisque_telescope",
                 "bisque",
@@ -2801,6 +2812,9 @@ Tier2Host tier2_host_bisque_telescope() {
         });
     };
     h.connectable_on_clock = [](alpacacore::util::TaskClock& clock) { return bisque_telescope_hosted(false, clock); };
+    h.park_waits_for_mount =
+        "#2809: park() polls IsParked until the mount arrives (bisque_telescope_driver.cpp park()), so it does not "
+        "return at once";
     return h;
 }
 #endif
@@ -6014,6 +6028,7 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
             ((h.park_unavailable == nullptr && h.move_axis_unavailable == nullptr) || h.type == DeviceType::Telescope));
         CHECK((h.move_axis_unavailable == nullptr || std::string(h.move_axis_unavailable).size() > 0));
         CHECK((h.park_unavailable == nullptr || std::string(h.park_unavailable).size() > 0));
+        CHECK((h.park_waits_for_mount == nullptr || h.type == DeviceType::Telescope));
         CHECK((h.at_park_unreachable == nullptr || h.type == DeviceType::Telescope));
         CHECK((static_cast<bool>(h.failing) || std::string(h.failing_unavailable).size() > 0));
     }
