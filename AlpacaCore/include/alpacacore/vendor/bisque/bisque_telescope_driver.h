@@ -73,5 +73,8 @@ bool slew_hold_active_for_testing(TelescopeDriver& driver);
 /// stood past util::kLinkStalenessBound (30 s), so the window has always expired by then and active() cannot show
 /// the lost-link Disconnect's clear; this reads the deadline itself.
 bool slew_hold_cleared_for_testing(TelescopeDriver& driver);
+/// Runs `hook` on the Park or FindHome caller after the command's state write, before its body starts on the
+/// operation slot; no driver lock is held. An empty hook removes it.
+void set_motion_start_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 } // namespace alpacacore::vendor::bisque
