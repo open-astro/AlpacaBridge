@@ -271,6 +271,33 @@ TEST_CASE("Remote Alpaca Telescope Driver - UTCDate and SiderealTime advance wit
     CHECK(t.get_utc_date() == alpacacore::test::parse_timestamp("2028-02-29T12:00:00.000Z"));
 }
 
+// Decision 0014: a UTCDate write is anchored on the task clock when it is written (util::UtcOffset), so it reads back
+// advanced by exactly the task-clock time since, whatever the frame's age was at the write; a poll then serves the
+// upstream's own clock again, anchored where it was read.
+TEST_CASE("Remote Alpaca Telescope Driver - a UTCDate write reads back advanced by task-clock time",
+          "[remotealpaca][telescope][unit]") {
+    Rig rig;
+    rig.connect();
+    auto& t = *rig.driver;
+    remote::set_poll_paused_for_testing(t, true);
+    rig.poll(std::chrono::seconds(15));  // the frame is 15 s old when the write lands (the loss bound is 30 s)
+    const auto written = alpacacore::test::parse_timestamp("2027-01-15T08:00:00.000Z");
+    t.set_utc_date(written);
+    CHECK(t.get_utc_date() == written);
+    rig.poll(std::chrono::seconds(7));
+    CHECK(t.get_utc_date() == written + std::chrono::seconds(7));
+    rig.clock.advance(std::chrono::milliseconds(250));
+    CHECK(t.get_utc_date() == written + std::chrono::milliseconds(7250));
+    // The next poll serves the upstream's clock, which took the write: its value, anchored where it was read.
+    remote::set_poll_paused_for_testing(t, false);
+    rig.poll();
+    CHECK(t.get_utc_date() == written);  // the scripted upstream's clock does not run
+    remote::set_poll_paused_for_testing(t, true);
+    rig.poll(std::chrono::seconds(2));
+    CHECK(t.get_utc_date() == written + std::chrono::seconds(2));
+    remote::set_poll_paused_for_testing(t, false);
+}
+
 TEST_CASE(
     "Remote Alpaca Telescope Driver - SlewToCoordinatesAsync is forwarded and Slewing and the targets read at once",
     "[remotealpaca][telescope][unit]") {
@@ -959,6 +986,58 @@ TEST_CASE("Remote Alpaca Telescope MoveAxis - one axis's cap stops that axis onl
     CHECK(rig.upstream.axis_moving(1));
     CHECK(alpaca_error_message([&] { (void)t.get_slewing(); }, AlpacaError::DriverException).find("axis was stopped") !=
           std::string::npos);
+}
+
+// The same with a third movable axis: this server's MoveAxis on axis 2 is another axis too, so the axis-0 cap reads
+// the mount's Slewing as stopped for its own axis and verifies, rather than resending and raising kStopNotVerifiedText.
+TEST_CASE("Remote Alpaca Telescope MoveAxis - an axis-0 cap verifies while this server's axis-2 MoveAxis runs",
+          "[remotealpaca][telescope][goto-safety]") {
+    Rig rig;
+    rig.upstream.set_for("canmoveaxis", "2", "true");
+    rig.upstream.set_for("axisrates", "2", "[{\"Maximum\":4.0,\"Minimum\":0.0}]");
+    rig.connect();
+    auto& t = *rig.driver;
+    REQUIRE(t.get_can_move_axis(2));
+    t.move_axis(0, 1.0);
+    for (int s = 0; s < 30; ++s) rig.poll();
+    t.move_axis(2, 1.0);
+    for (int s = 0; s < 30; ++s) rig.poll();
+    CHECK(stop_steps_until_raised(rig, 40) >= 0);
+    CHECK_FALSE(rig.upstream.axis_moving(0));
+    CHECK(rig.upstream.axis_moving(2));
+    const auto puts = rig.upstream.puts();
+    CHECK(std::count(puts.begin(), puts.end(), "moveaxis 0 0") == 1);  // verified on the first stop, never resent
+    CHECK(alpaca_error_message([&] { (void)t.get_slewing(); }, AlpacaError::DriverException).find("axis was stopped") !=
+          std::string::npos);
+}
+
+// An axis-2 cap while this server's MoveAxis runs on axis 0 or 1: the mount's Slewing stays true and that axis's
+// coordinate keeps moving, so the cap verifies only when it reads Slewing as stopped and pins that coordinate (axis 0
+// RA, axis 1 Dec). It then verifies on its one stop.
+TEST_CASE(
+    "Remote Alpaca Telescope MoveAxis - an axis-2 cap verifies while this server's axis-0 or axis-1 MoveAxis runs",
+    "[remotealpaca][telescope][goto-safety]") {
+    for (const int other : {0, 1}) {
+        INFO("axis " << other << " runs");
+        Rig rig;
+        rig.upstream.set_for("canmoveaxis", "2", "true");
+        rig.upstream.set_for("axisrates", "2", "[{\"Maximum\":4.0,\"Minimum\":0.0}]");
+        rig.upstream.move_positions(true);
+        rig.connect();
+        auto& t = *rig.driver;
+        REQUIRE(t.get_can_move_axis(2));
+        t.move_axis(2, 1.0);
+        for (int s = 0; s < 30; ++s) rig.poll();
+        t.move_axis(other, 1.0);
+        for (int s = 0; s < 30; ++s) rig.poll();
+        CHECK(stop_steps_until_raised(rig, 40) >= 0);
+        CHECK_FALSE(rig.upstream.axis_moving(2));
+        CHECK(rig.upstream.axis_moving(other));
+        const auto puts = rig.upstream.puts();
+        CHECK(std::count(puts.begin(), puts.end(), "moveaxis 2 0") == 1);  // verified on the first stop
+        CHECK(alpaca_error_message([&] { (void)t.get_slewing(); }, AlpacaError::DriverException)
+                  .find("axis was stopped") != std::string::npos);
+    }
 }
 
 TEST_CASE(

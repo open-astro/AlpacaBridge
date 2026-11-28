@@ -20,6 +20,7 @@
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_switch_driver.h>
 #include <alpacacore/vendor/remotealpaca/self_loop.h>
 #include <alpacacore/version.h>
@@ -28,7 +29,9 @@
 #include <chrono>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <variant>
 #include <vector>
@@ -98,6 +101,42 @@ struct Rig {
         REQUIRE(driver->get_connected());
         REQUIRE_FALSE(driver->get_link_fault().empty());
     }
+};
+
+// Counts the WARN lines the remotealpaca component logs about a slow poll, and keeps the last one; the previous sink is
+// restored on destruction. The sink runs on the poll thread.
+class SlowPollWarns {
+public:
+    SlowPollWarns() {
+        alpacacore::logging::set_log_sink(
+            [this](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+                if (level != alpacacore::logging::LogLevel::Warn || component != "remotealpaca" ||
+                    message.find("poll period") == std::string_view::npos) {
+                    return;
+                }
+                std::lock_guard<std::mutex> lock(mutex_);
+                ++count_;
+                last_ = std::string(message);
+            });
+    }
+    SlowPollWarns(const SlowPollWarns&) = delete;
+    SlowPollWarns& operator=(const SlowPollWarns&) = delete;
+    ~SlowPollWarns() { alpacacore::logging::set_log_sink(previous_); }
+
+    int count() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return count_;
+    }
+    std::string last() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return last_;
+    }
+
+private:
+    alpacacore::logging::LogSink previous_ = alpacacore::logging::get_log_sink();
+    mutable std::mutex mutex_;
+    int count_ = 0;
+    std::string last_;
 };
 
 }  // namespace
@@ -570,4 +609,137 @@ TEST_CASE("Remote Alpaca Switch Driver - Connect refuses an upstream that is thi
     CHECK(text.find("is this server") != std::string::npos);
     CHECK_FALSE(rig.driver->get_connected());
     CHECK(rig.http.calls() == 0);
+}
+
+// Issue #2796: a two-state switch's GetSwitch is derived from its GetSwitchValue (ASCOM: on is MaxSwitchValue, off is
+// MinSwitchValue), so the poll asks GetSwitch only of the other switches. At 64 switches, a quarter each two-state,
+// multi-state, asynchronous multi-state and asynchronous two-state, one poll was 160 calls and is 128.
+TEST_CASE("Remote Alpaca Switch Driver - one poll of 64 switches asks GetSwitch only where it cannot derive it",
+          "[remotealpaca][switch][unit]") {
+    Rig rig;
+    rig.upstream.set("maxswitch", std::to_string(remote::kMaxProxiedSwitches));
+    for (int id = 0; id < remote::kMaxProxiedSwitches; ++id) {
+        const bool async = id % 4 >= 2;
+        if (id % 2 == 0) {
+            rig.upstream.set_switch(id, "Port", 0.0, 1.0, 1.0, true, async, id % 8 < 4 ? 1.0 : 0.0);
+        } else {
+            rig.upstream.set_switch(id, "Heater", 0.0, 100.0, 1.0, true, async, 40.0);
+        }
+    }
+    rig.connect();
+    const int calls = rig.http.calls();
+    const int values = rig.upstream.calls("getswitchvalue");
+    const int states = rig.upstream.calls("getswitch");
+    const int completes = rig.upstream.calls("statechangecomplete");
+    rig.poll();
+    CHECK(rig.upstream.calls("getswitchvalue") - values == 64);
+    CHECK(rig.upstream.calls("getswitch") - states == 32);  // the multi-state switches only
+    CHECK(rig.upstream.calls("statechangecomplete") - completes == 32);
+    CHECK(rig.http.calls() - calls == 128);
+    // The derived answers are the upstream's.
+    for (int id = 0; id < remote::kMaxProxiedSwitches; ++id) {
+        CHECK(rig.driver->get_switch(id) == (id % 2 == 1 || id % 8 < 4));
+    }
+}
+
+TEST_CASE(
+    "Remote Alpaca Switch Driver - a two-state switch's GetSwitch follows its value through the poll, the writes "
+    "and a fault",
+    "[remotealpaca][switch][unit]") {
+    Rig rig;
+    rig.connect();
+    auto& s = *rig.driver;
+    const int asked = rig.upstream.calls("getswitch");
+    // Switch 0 is two-state (0 to 1 in steps of 1). The poll reads its value only.
+    rig.upstream.set_for("getswitchvalue", "0", AlpacaUpstreamScript::number(0.0));
+    rig.upstream.set_for("getswitch", "0", "false");
+    rig.poll();
+    CHECK_FALSE(s.get_switch(0));
+    CHECK(s.get_switch_value(0) == 0.0);
+    // Written through, then polled: the two agree.
+    s.set_switch(0, true);
+    CHECK(s.get_switch(0));
+    CHECK(s.get_switch_value(0) == 1.0);
+    rig.poll();
+    CHECK(s.get_switch(0));
+    s.set_switch_value(0, 0.0);
+    CHECK_FALSE(s.get_switch(0));
+    rig.poll();
+    CHECK_FALSE(s.get_switch(0));
+    // A latched fault refuses both; the next good poll derives GetSwitch again.
+    rig.fault();
+    require_alpaca_error([&] { (void)s.get_switch(0); }, AlpacaError::DriverException);
+    rig.poll();
+    CHECK_FALSE(s.get_switch(0));
+    CHECK(rig.upstream.calls("getswitch") == asked + 2 * 4);  // four good polls, each asking switches 1 and 2 only
+    // A value the derivation cannot place (between the range's ends, or an upstream error): GetSwitch is asked.
+    rig.upstream.set_for("getswitchvalue", "0", AlpacaUpstreamScript::number(0.5));
+    rig.upstream.set_for("getswitch", "0", "true");
+    rig.poll();
+    CHECK(s.get_switch(0));
+    rig.upstream.set_error_for("getswitchvalue", "0", 0x40B, "value unknown");
+    rig.upstream.set_for("getswitch", "0", "false");
+    rig.poll();
+    require_alpaca_error([&] { (void)s.get_switch_value(0); }, AlpacaError::InvalidOperation);
+    CHECK_FALSE(s.get_switch(0));
+    CHECK(rig.upstream.calls("getswitch") == asked + 2 * 4 + 3 + 3);
+}
+
+// ASCOM leaves a multi-state switch's GetSwitch to the driver: the poll asks it, whatever the value.
+TEST_CASE("Remote Alpaca Switch Driver - a multi-state switch's GetSwitch is the upstream's",
+          "[remotealpaca][switch][unit]") {
+    Rig rig;
+    rig.connect();
+    const int asked = rig.upstream.calls("getswitch");
+    // Switch 1 (0 to 100) at its maximum, and an upstream that answers GetSwitch false there.
+    rig.upstream.set_for("getswitchvalue", "1", AlpacaUpstreamScript::number(100.0));
+    rig.upstream.set_for("getswitch", "1", "false");
+    rig.poll();
+    CHECK(rig.driver->get_switch_value(1) == 100.0);
+    CHECK_FALSE(rig.driver->get_switch(1));
+    CHECK(rig.upstream.calls("getswitch") == asked + 2);  // switches 1 and 2
+}
+
+// The derivation needs the range and the step the Connect read: an upstream error on any of them keeps both reads.
+TEST_CASE("Remote Alpaca Switch Driver - an upstream error on a switch's range or step keeps both reads",
+          "[remotealpaca][switch][unit]") {
+    for (const char* member : {"minswitchvalue", "maxswitchvalue", "switchstep"}) {
+        DYNAMIC_SECTION(member) {
+            Rig rig;
+            rig.upstream.set_error_for(member, "0", 0x400, "not implemented");
+            rig.connect();
+            const int asked = rig.upstream.calls("getswitch");
+            rig.upstream.set_for("getswitch", "0", "false");  // the upstream's own answer, at the value 1
+            rig.poll();
+            CHECK(rig.upstream.calls("getswitch") == asked + 3);
+            CHECK_FALSE(rig.driver->get_switch(0));
+            CHECK(rig.driver->get_switch_value(0) == 1.0);
+        }
+    }
+}
+
+// A poll that takes longer than the poll period logs one WARN per Connect, with the time and the switch count. Each
+// upstream call takes its time on the fake task clock (the script's call hook); the rig's poll is 6 calls.
+TEST_CASE("Remote Alpaca Switch Driver - a poll slower than its period logs one WARN per Connect",
+          "[remotealpaca][switch][unit]") {
+    SlowPollWarns warns;
+    Rig rig;
+    rig.connect();
+    rig.upstream.set_call_hook([&] { rig.clock.advance(std::chrono::milliseconds(150)); });  // 900 ms
+    rig.poll();
+    CHECK(warns.count() == 0);
+    rig.upstream.set_call_hook([&] { rig.clock.advance(std::chrono::milliseconds(250)); });  // 1500 ms
+    rig.poll();
+    CHECK(warns.count() == 1);
+    CHECK(warns.last().find("1500 ms") != std::string::npos);
+    CHECK(warns.last().find("3 switches") != std::string::npos);
+    rig.poll();
+    CHECK(warns.count() == 1);  // once per Connect
+    rig.upstream.set_call_hook({});
+    rig.driver->set_connected(false);
+    rig.connect();
+    rig.upstream.set_call_hook([&] { rig.clock.advance(std::chrono::milliseconds(250)); });
+    rig.poll();
+    CHECK(warns.count() == 2);
+    rig.upstream.set_call_hook({});
 }

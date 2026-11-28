@@ -98,8 +98,8 @@ test('catalogLoader surfaces a failed load and fetches again on the next call', 
 // with the Gemini switch kept (see the next case).
 const OFFERED = {
     camera: ['altair', 'gphoto', 'iguider', 'ioptron', 'playerone', 'qhy', 'remotealpaca', 'svbony', 'touptek', 'zwo'],
-    covercalibrator: ['gemini', 'wandererastro'],
-    dome: [],
+    covercalibrator: ['gemini', 'remotealpaca', 'wandererastro'],
+    dome: ['remotealpaca'],
     filterwheel: ['ioptron', 'playerone', 'qhy', 'remotealpaca', 'touptek', 'wandererastro', 'zwo'],
     focuser: ['astroasis', 'celestron', 'gemini', 'ifr', 'ioptron', 'onstep', 'qhy', 'remotealpaca', 'touptek', 'zwo'],
     observingconditions: ['remotealpaca', 'weewx'],
@@ -486,9 +486,17 @@ test('readFormFields in app.js reports what the formFields helper reports for ev
 const FORM_TYPES = ['camera', 'covercalibrator', 'dome', 'filterwheel', 'focuser', 'observingconditions', 'rotator',
     'switch', 'telescope'];
 
-test('offeredDeviceTypes hides dome, which the fixture catalog has no entry for, and offers the other 8 types', () => {
+// The catalog without its dome entries (the remotealpaca Dome is the only one).
+const noDome = () => catalog.filter((d) => d.deviceType !== 'dome');
+
+test('offeredDeviceTypes offers every form type the fixture catalog has an entry for, dome included', () => {
     const { offeredDeviceTypes } = schema();
-    assert.deepEqual(offeredDeviceTypes(catalog, FORM_TYPES), FORM_TYPES.filter((t) => t !== 'dome'));
+    assert.deepEqual(offeredDeviceTypes(catalog, FORM_TYPES), FORM_TYPES);
+});
+
+test('offeredDeviceTypes hides a type the catalog has no entry for, and offers the other 8 types', () => {
+    const { offeredDeviceTypes } = schema();
+    assert.deepEqual(offeredDeviceTypes(noDome(), FORM_TYPES), FORM_TYPES.filter((t) => t !== 'dome'));
 });
 
 test('offeredDeviceTypes hides a type whose only entries are not available, unless it is the edited type', () => {
@@ -502,8 +510,8 @@ test('offeredDeviceTypes hides a type whose only entries are not available, unle
 
 test('offeredDeviceTypes keeps a hidden edited type', () => {
     const { offeredDeviceTypes } = schema();
-    assert.ok(offeredDeviceTypes(catalog, FORM_TYPES, 'Dome').includes('dome'));
-    assert.equal(offeredDeviceTypes(catalog, FORM_TYPES, 'dome').length, 9);
+    assert.ok(offeredDeviceTypes(noDome(), FORM_TYPES, 'Dome').includes('dome'));
+    assert.equal(offeredDeviceTypes(noDome(), FORM_TYPES, 'dome').length, 9);
 });
 
 test('offeredDeviceTypes offers nothing for an empty or failed catalog, even for the edited type', () => {

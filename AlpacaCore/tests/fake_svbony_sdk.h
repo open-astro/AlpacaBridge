@@ -366,11 +366,12 @@ public:
         video_data_cv_.notify_all();
         return vendor::svbony::SVBVideoDataResult::Frame;
     }
-    void pulse_guide(int camera_id, vendor::svbony::SVBGuideDirection, int duration_ms) override {
+    void pulse_guide(int camera_id, vendor::svbony::SVBGuideDirection direction, int duration_ms) override {
         if (before_call) before_call("pulse_guide");
         {
             std::lock_guard lock(mutex_);
             record_locked("pulse_guide");
+            pulses_.push_back(Pulse{direction, duration_ms, std::this_thread::get_id()});
             maybe_fail_locked("pulse_guide");
             require_open_locked(camera_id);
         }
@@ -560,6 +561,16 @@ public:
         std::lock_guard lock(mutex_);
         return events_;
     }
+    // One pulse_guide() call as the driver made it (#2735): what it asked for and the thread that sent it.
+    struct Pulse {
+        vendor::svbony::SVBGuideDirection direction;
+        int duration_ms;
+        std::thread::id thread;
+    };
+    std::vector<Pulse> pulses() const {
+        std::lock_guard lock(mutex_);
+        return pulses_;
+    }
     int open_count() const {
         std::lock_guard lock(mutex_);
         return open_count_;
@@ -602,6 +613,7 @@ private:
     int held_read_failure_code_{alpacacore::AlpacaError::DriverException};
     std::set<std::string> persistent_failures_;
     std::vector<std::string> events_;
+    std::vector<Pulse> pulses_;
     std::size_t last_buffer_capacity_{0};
     int last_video_wait_ms_{0};
     int max_read_wait_ms_{250};

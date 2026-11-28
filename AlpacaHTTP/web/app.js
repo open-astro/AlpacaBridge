@@ -3553,6 +3553,8 @@ function updateRemoteAlpacaConfigFields() {
         switch: document.getElementById('remotealpaca-switch-fields'),
         telescope: document.getElementById('remotealpaca-telescope-fields'),
         focuser: document.getElementById('remotealpaca-focuser-fields'),
+        covercalibrator: document.getElementById('remotealpaca-covercalibrator-fields'),
+        dome: document.getElementById('remotealpaca-dome-fields'),
         camera: document.getElementById('remotealpaca-camera-fields')
     };
     const deviceTypeSelect = document.getElementById('device-type');
@@ -5163,7 +5165,8 @@ document.getElementById('device-form').addEventListener('submit', async function
     } else if (deviceData.vendor === 'remotealpaca') {
         // The fields of the shown sub-section: remoteAlpaca* (ObservingConditions), remoteAlpacaSafety* (SafetyMonitor),
         // remoteAlpacaRotator* (Rotator), remoteAlpacaFilterWheel* (FilterWheel), remoteAlpacaSwitch* (Switch),
-        // remoteAlpacaTelescope* (Telescope), remoteAlpacaFocuser* (Focuser) or
+        // remoteAlpacaTelescope* (Telescope), remoteAlpacaFocuser* (Focuser),
+        // remoteAlpacaCover* (CoverCalibrator), remoteAlpacaDome* (Dome) or
         // remoteAlpacaCamera* (Camera).
         const remoteAlpacaPrefixes = {
             safetymonitor: 'remoteAlpacaSafety',
@@ -5172,6 +5175,8 @@ document.getElementById('device-form').addEventListener('submit', async function
             switch: 'remoteAlpacaSwitch',
             telescope: 'remoteAlpacaTelescope',
             focuser: 'remoteAlpacaFocuser',
+            covercalibrator: 'remoteAlpacaCover',
+            dome: 'remoteAlpacaDome',
             camera: 'remoteAlpacaCamera'
         };
         const prefix = remoteAlpacaPrefixes[normalizeDeviceType(deviceData.deviceType)] || 'remoteAlpaca';
