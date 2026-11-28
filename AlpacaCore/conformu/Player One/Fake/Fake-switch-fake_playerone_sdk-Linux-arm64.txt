@@ -1,0 +1,269 @@
+FAKE REPORT: ConformU against FakePlayerOneSDK (a simulated Player One camera with a dew heater and fan, in process), not hardware. Not hardware validation.
+19:37:01.789 ASCOM Universal Device Conformance Checker Version 4.6.0.56430, Build time: Mon 26 October 2026 14:09:42          
+19:37:01.789                                              
+19:37:01.789 Operating system is Armbian 26.8.3 trixie, Processor is ARM 64bit, Application is 64bit.          
+19:37:01.789                                              
+19:37:01.790 Alpaca device:  (127.0.0.1:54555 Switch/0)          
+19:37:01.790                                              
+19:37:01.790 CreateDevice                        INFO     Creating Alpaca device: IP address: 127.0.0.1, IP Port: 54555, Alpaca device number: 0
+19:37:01.809 CreateDevice                        INFO     Alpaca device created OK
+19:37:01.809 CreateDevice                        INFO     Successfully created driver
+19:37:02.911 CreateDevice                        OK       Found a valid interface version: 3
+19:37:02.911 CreateDevice                        OK       Driver instance created successfully
+19:37:02.911                                              
+19:37:02.911 Connect to device                            
+19:37:02.998 Connected                           OK       Connected to device successfully using Connected = True
+19:37:03.552 Connected                           OK       Disconnected from device successfully using Connected = False
+19:37:03.557 Connect                             OK       Connected to device successfully using Connect()
+19:37:03.557                                              
+19:37:03.558 Common Driver Methods                        
+19:37:03.558 InterfaceVersion                    OK       3
+19:37:03.559 Connected                           OK       True
+19:37:03.562 Description                         OK       Player One camera dew heater and fan switch
+19:37:03.563 DriverInfo                          OK       AlpacaCore Player One Thermal Switch
+19:37:03.564 DriverVersion                       OK       5.0.2
+19:37:03.565 Name                                OK       Player One Fake Player One Camera Thermal Switch
+19:37:03.565                                              
+19:37:03.569 SupportedActions                    OK       Driver returned an empty action list
+19:37:03.569 Action                              INFO     Conform cannot test the Action method
+19:37:03.569                                              
+19:37:03.575 DeviceState                         OK       Received 7 operational state properties.
+19:37:03.575 DeviceState                         INFO     MaxSwitch: 2
+19:37:03.576 DeviceState                         OK         GetSwitch0 = False
+19:37:03.576 DeviceState                         OK         GetSwitchValue0 = 0
+19:37:03.576 DeviceState                         OK         StateChangeComplete0 = True
+19:37:03.576 DeviceState                         OK         GetSwitch1 = False
+19:37:03.576 DeviceState                         OK         GetSwitchValue1 = 0
+19:37:03.576 DeviceState                         OK         StateChangeComplete1 = True
+19:37:03.576 DeviceState                         OK         TimeStamp = 11/27/2026 7:37:03 PM
+19:37:03.579 DeviceState                         OK       Found all expected operational properties
+19:37:03.579                                              
+19:37:03.579 Properties                                   
+19:37:03.581 MaxSwitch                           OK       2
+19:37:03.581                                              
+19:37:03.581 Methods                                      
+19:37:03.608 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: CanWrite
+19:37:03.609 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: CanWrite
+19:37:03.610 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: GetSwitch
+19:37:03.611 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: GetSwitch
+19:37:03.618 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: GetSwitchDescription
+19:37:03.621 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: GetSwitchDescription
+19:37:03.622 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: GetSwitchName
+19:37:03.623 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: GetSwitchName
+19:37:03.624 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: GetSwitchValue
+19:37:03.625 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: GetSwitchValue
+19:37:03.626 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: MaxSwitchValue
+19:37:03.627 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: MaxSwitchValue
+19:37:03.628 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: MinSwitchValue
+19:37:03.629 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: MinSwitchValue
+19:37:03.630 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: SetSwitch
+19:37:03.631 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: SetSwitch
+19:37:03.632 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: SetSwitchValue
+19:37:03.633 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: SetSwitchValue
+19:37:03.634 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: SwitchStep
+19:37:03.635 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: SwitchStep
+19:37:03.636 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: CanAsync
+19:37:03.637 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: CanAsync
+19:37:03.637 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: CancelAsync
+19:37:03.639 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: CancelAsync
+19:37:03.639 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: SetAsync
+19:37:03.640 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: SetAsync
+19:37:03.641 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: SetAsyncValue
+19:37:03.642 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: SetAsyncValue
+19:37:03.643 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID below 0 was used in method: StateChangeComplete
+19:37:03.644 SwitchNumber                        OK       Switch device threw an InvalidValueException when a switch ID above MaxSwitch was used in method: StateChangeComplete
+19:37:03.729 GetSwitchName                       OK       Found switch 0
+19:37:03.729 GetSwitchName                       OK         Name: DewHeater
+19:37:03.730 GetSwitchDescription                OK         Description: Player One camera anti-dew lens heater power, percent (Fake Player One Camera)
+19:37:03.732 MinSwitchValue                      OK         Minimum: 0
+19:37:03.733 MaxSwitchValue                      OK         Maximum: 100
+19:37:03.734 SwitchStep                          OK         Step size: 1
+19:37:03.734 SwitchStep                          OK         Step size is greater than zero
+19:37:03.734 SwitchStep                          OK         Step size is less than the range of possible values
+19:37:03.734 SwitchStep                          OK         The switch range is an integer multiple of the step size.
+19:37:03.735 CanWrite                            OK         CanWrite: True
+19:37:03.736 CanAsync                            OK         CanAsync: False
+19:37:04.238 GetSwitch                           OK         False
+19:37:04.741 GetSwitchValue                      OK         0
+19:37:04.745 SetSwitchName                       OK         Successfully set switch 0 name to its current value: DewHeater.
+19:37:07.751 SetSwitch                           OK         GetSwitch returned False after SetSwitch(False)
+19:37:08.755 SetSwitch                           OK         GetSwitchValue returned a value within 1% of MINIMUM_VALUE after SetSwitch(False)
+19:37:11.759 SetSwitch                           OK         GetSwitch read True after SetSwitch(True)
+19:37:12.763 SetSwitch                           OK         GetSwitchValue returned MAXIMUM_VALUE after SetSwitch(True)
+19:37:18.779 SetSwitchValue                      OK         GetSwitch returned False after SetSwitchValue(MINIMUM_VALUE)
+19:37:19.791 SetSwitchValue                      OK         GetSwitchValue returned a value within 1% of MINIMUM_VALUE after SetSwitchValue(MINIMUM_VALUE)
+19:37:19.794 SetSwitchValue                      OK         Switch threw an InvalidOperationException when a value below SwitchMinimum was set: -1
+19:37:22.802 SetSwitchValue                      OK         GetSwitch returned True after SetSwitchValue(MAXIMUM_VALUE)
+19:37:23.806 SetSwitchValue                      OK         GetSwitchValue returned MAXIMUM_VALUE after SetSwitchValue(MAXIMUM_VALUE)
+19:37:23.808 SetSwitchValue                      OK         Switch threw an InvalidOperationException when a value above SwitchMaximum was set: 1001
+19:37:23.809 SetSwitchValue                      INFO       Testing with steps that are 0% offset from integer SwitchStep values
+19:37:27.314 SetSwitchValue Offset:   0%         OK         Set and read match: 0
+19:37:30.819 SetSwitchValue Offset:   0%         OK         Set and read match: 10
+19:37:34.324 SetSwitchValue Offset:   0%         OK         Set and read match: 20
+19:37:37.830 SetSwitchValue Offset:   0%         OK         Set and read match: 30
+19:37:41.335 SetSwitchValue Offset:   0%         OK         Set and read match: 40
+19:37:44.840 SetSwitchValue Offset:   0%         OK         Set and read match: 50
+19:37:48.345 SetSwitchValue Offset:   0%         OK         Set and read match: 60
+19:37:51.850 SetSwitchValue Offset:   0%         OK         Set and read match: 70
+19:37:55.356 SetSwitchValue Offset:   0%         OK         Set and read match: 80
+19:37:58.861 SetSwitchValue Offset:   0%         OK         Set and read match: 90
+19:38:02.368 SetSwitchValue Offset:   0%         OK         Set and read match: 100
+19:38:02.368 SetSwitchValue                      INFO       Testing with steps that are 25% offset from integer SwitchStep values
+19:38:05.881 SetSwitchValue Offset:  25%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 0.25, Read: 0
+19:38:09.387 SetSwitchValue Offset:  25%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 10.25, Read: 10
+19:38:12.891 SetSwitchValue Offset:  25%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 20.25, Read: 20
+19:38:16.402 SetSwitchValue Offset:  25%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 30.25, Read: 30
+19:38:19.906 SetSwitchValue Offset:  25%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 40.25, Read: 40
+19:38:23.410 SetSwitchValue Offset:  25%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 50.25, Read: 50
+19:38:26.914 SetSwitchValue Offset:  25%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 60.25, Read: 60
+19:38:30.420 SetSwitchValue Offset:  25%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 70.25, Read: 70
+19:38:33.931 SetSwitchValue Offset:  25%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 80.25, Read: 80
+19:38:37.435 SetSwitchValue Offset:  25%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 90.25, Read: 90
+19:38:37.435 SetSwitchValue                      INFO       Testing with steps that are 50% offset from integer SwitchStep values
+19:38:40.939 SetSwitchValue Offset:  50%         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 0.5, Read: 1
+19:38:44.443 SetSwitchValue Offset:  50%         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 10.5, Read: 11
+19:38:47.947 SetSwitchValue Offset:  50%         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 20.5, Read: 21
+19:38:51.459 SetSwitchValue Offset:  50%         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 30.5, Read: 31
+19:38:54.966 SetSwitchValue Offset:  50%         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 40.5, Read: 41
+19:38:58.474 SetSwitchValue Offset:  50%         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 50.5, Read: 51
+19:39:01.978 SetSwitchValue Offset:  50%         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 60.5, Read: 61
+19:39:05.483 SetSwitchValue Offset:  50%         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 70.5, Read: 71
+19:39:08.987 SetSwitchValue Offset:  50%         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 80.5, Read: 81
+19:39:12.492 SetSwitchValue Offset:  50%         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 90.5, Read: 91
+19:39:12.492 SetSwitchValue                      INFO       Testing with steps that are 75% offset from integer SwitchStep values
+19:39:15.997 SetSwitchValue Offset:  75%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 0.75, Read: 1
+19:39:19.502 SetSwitchValue Offset:  75%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 10.75, Read: 11
+19:39:23.007 SetSwitchValue Offset:  75%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 20.75, Read: 21
+19:39:26.511 SetSwitchValue Offset:  75%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 30.75, Read: 31
+19:39:30.023 SetSwitchValue Offset:  75%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 40.75, Read: 41
+19:39:33.531 SetSwitchValue Offset:  75%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 50.75, Read: 51
+19:39:37.035 SetSwitchValue Offset:  75%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 60.75, Read: 61
+19:39:40.540 SetSwitchValue Offset:  75%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 70.75, Read: 71
+19:39:44.049 SetSwitchValue Offset:  75%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 80.75, Read: 81
+19:39:47.553 SetSwitchValue Offset:  75%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 90.75, Read: 91
+19:39:47.554 SetSwitchValue                      OK         Switch has been reset to its original state
+19:39:50.555 SetAsync/SetAsyncValue              INFO     Skipping asynchronous method tests because the switch cannot write or doesn't support asynchronous operation.
+19:39:50.555                                              
+19:39:50.558 GetSwitchName                       OK       Found switch 1
+19:39:50.558 GetSwitchName                       OK         Name: Fan
+19:39:50.558 GetSwitchDescription                OK         Description: Player One camera radiator fan power, percent (Fake Player One Camera)
+19:39:50.559 MinSwitchValue                      OK         Minimum: 0
+19:39:50.559 MaxSwitchValue                      OK         Maximum: 100
+19:39:50.560 SwitchStep                          OK         Step size: 1
+19:39:50.560 SwitchStep                          OK         Step size is greater than zero
+19:39:50.560 SwitchStep                          OK         Step size is less than the range of possible values
+19:39:50.560 SwitchStep                          OK         The switch range is an integer multiple of the step size.
+19:39:50.561 CanWrite                            OK         CanWrite: True
+19:39:50.561 CanAsync                            OK         CanAsync: False
+19:39:51.063 GetSwitch                           OK         False
+19:39:51.569 GetSwitchValue                      OK         0
+19:39:51.571 SetSwitchName                       OK         Successfully set switch 1 name to its current value: Fan.
+19:39:54.577 SetSwitch                           OK         GetSwitch returned False after SetSwitch(False)
+19:39:55.580 SetSwitch                           OK         GetSwitchValue returned a value within 1% of MINIMUM_VALUE after SetSwitch(False)
+19:39:58.588 SetSwitch                           OK         GetSwitch read True after SetSwitch(True)
+19:39:59.591 SetSwitch                           OK         GetSwitchValue returned MAXIMUM_VALUE after SetSwitch(True)
+19:40:05.596 SetSwitchValue                      OK         GetSwitch returned False after SetSwitchValue(MINIMUM_VALUE)
+19:40:06.599 SetSwitchValue                      OK         GetSwitchValue returned a value within 1% of MINIMUM_VALUE after SetSwitchValue(MINIMUM_VALUE)
+19:40:06.600 SetSwitchValue                      OK         Switch threw an InvalidOperationException when a value below SwitchMinimum was set: -1
+19:40:09.603 SetSwitchValue                      OK         GetSwitch returned True after SetSwitchValue(MAXIMUM_VALUE)
+19:40:10.606 SetSwitchValue                      OK         GetSwitchValue returned MAXIMUM_VALUE after SetSwitchValue(MAXIMUM_VALUE)
+19:40:10.608 SetSwitchValue                      OK         Switch threw an InvalidOperationException when a value above SwitchMaximum was set: 1001
+19:40:10.608 SetSwitchValue                      INFO       Testing with steps that are 0% offset from integer SwitchStep values
+19:40:14.116 SetSwitchValue Offset:   0%         OK         Set and read match: 0
+19:40:17.621 SetSwitchValue Offset:   0%         OK         Set and read match: 10
+19:40:21.125 SetSwitchValue Offset:   0%         OK         Set and read match: 20
+19:40:24.630 SetSwitchValue Offset:   0%         OK         Set and read match: 30
+19:40:28.134 SetSwitchValue Offset:   0%         OK         Set and read match: 40
+19:40:31.638 SetSwitchValue Offset:   0%         OK         Set and read match: 50
+19:40:35.143 SetSwitchValue Offset:   0%         OK         Set and read match: 60
+19:40:38.647 SetSwitchValue Offset:   0%         OK         Set and read match: 70
+19:40:42.154 SetSwitchValue Offset:   0%         OK         Set and read match: 80
+19:40:45.663 SetSwitchValue Offset:   0%         OK         Set and read match: 90
+19:40:49.175 SetSwitchValue Offset:   0%         OK         Set and read match: 100
+19:40:49.175 SetSwitchValue                      INFO       Testing with steps that are 25% offset from integer SwitchStep values
+19:40:52.686 SetSwitchValue Offset:  25%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 0.25, Read: 0
+19:40:56.190 SetSwitchValue Offset:  25%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 10.25, Read: 10
+19:40:59.695 SetSwitchValue Offset:  25%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 20.25, Read: 20
+19:41:03.201 SetSwitchValue Offset:  25%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 30.25, Read: 30
+19:41:06.707 SetSwitchValue Offset:  25%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 40.25, Read: 40
+19:41:10.211 SetSwitchValue Offset:  25%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 50.25, Read: 50
+19:41:13.716 SetSwitchValue Offset:  25%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 60.25, Read: 60
+19:41:17.220 SetSwitchValue Offset:  25%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 70.25, Read: 70
+19:41:20.724 SetSwitchValue Offset:  25%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 80.25, Read: 80
+19:41:24.232 SetSwitchValue Offset:  25%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 90.25, Read: 90
+19:41:24.232 SetSwitchValue                      INFO       Testing with steps that are 50% offset from integer SwitchStep values
+19:41:27.737 SetSwitchValue Offset:  50%         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 0.5, Read: 1
+19:41:31.242 SetSwitchValue Offset:  50%         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 10.5, Read: 11
+19:41:34.746 SetSwitchValue Offset:  50%         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 20.5, Read: 21
+19:41:38.250 SetSwitchValue Offset:  50%         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 30.5, Read: 31
+19:41:41.755 SetSwitchValue Offset:  50%         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 40.5, Read: 41
+19:41:45.259 SetSwitchValue Offset:  50%         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 50.5, Read: 51
+19:41:48.764 SetSwitchValue Offset:  50%         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 60.5, Read: 61
+19:41:52.274 SetSwitchValue Offset:  50%         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 70.5, Read: 71
+19:41:55.778 SetSwitchValue Offset:  50%         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 80.5, Read: 81
+19:41:59.282 SetSwitchValue Offset:  50%         INFO       Set/Read differ by 40-50% of SwitchStep. Set: 90.5, Read: 91
+19:41:59.282 SetSwitchValue                      INFO       Testing with steps that are 75% offset from integer SwitchStep values
+19:42:02.786 SetSwitchValue Offset:  75%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 0.75, Read: 1
+19:42:06.292 SetSwitchValue Offset:  75%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 10.75, Read: 11
+19:42:09.797 SetSwitchValue Offset:  75%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 20.75, Read: 21
+19:42:13.301 SetSwitchValue Offset:  75%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 30.75, Read: 31
+19:42:16.806 SetSwitchValue Offset:  75%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 40.75, Read: 41
+19:42:20.317 SetSwitchValue Offset:  75%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 50.75, Read: 51
+19:42:23.821 SetSwitchValue Offset:  75%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 60.75, Read: 61
+19:42:27.325 SetSwitchValue Offset:  75%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 70.75, Read: 71
+19:42:30.829 SetSwitchValue Offset:  75%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 80.75, Read: 81
+19:42:34.333 SetSwitchValue Offset:  75%         INFO       Set/Read differ by 20-30% of SwitchStep. Set: 90.75, Read: 91
+19:42:34.334 SetSwitchValue                      OK         Switch has been reset to its original state
+19:42:37.335 SetAsync/SetAsyncValue              INFO     Skipping asynchronous method tests because the switch cannot write or doesn't support asynchronous operation.
+19:42:37.335                                              
+19:42:37.395                                              
+19:42:37.395 Disconnect from device                       
+19:42:37.399 Disconnect                          OK       Disconnected from device successfully using Disconnect()
+19:42:37.399                                              
+19:42:37.399 Conformance test has finished                
+19:42:37.399                                              
+19:42:37.399 Congratulations, no errors, warnings or issues found: your driver passes ASCOM validation!!          
+19:42:37.399                                     
+19:42:37.399 Timing Summary                               See Help for further information.
+19:42:37.399 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+19:42:37.399 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+19:42:37.399 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+19:42:37.399 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+19:42:37.399                                              
+19:42:37.399 Connect                                      At 19:37:03.554 Connect                   0.001 seconds. ✓ (STANDARD)
+19:42:37.399 InterfaceVersion                             At 19:37:03.558 InterfaceVersion          0.000 seconds. ✓ (FAST)
+19:42:37.399 Connected                                    At 19:37:03.559 Connected                 0.001 seconds. ✓ (FAST)
+19:42:37.399 Description                                  At 19:37:03.562 Description               0.003 seconds. ✓ (FAST)
+19:42:37.399 DriverInfo                                   At 19:37:03.563 DriverInfo                0.001 seconds. ✓ (FAST)
+19:42:37.399 DriverVersion                                At 19:37:03.564 DriverVersion             0.001 seconds. ✓ (FAST)
+19:42:37.399 Name                                         At 19:37:03.565 Name                      0.001 seconds. ✓ (FAST)
+19:42:37.399 SupportedActions                             At 19:37:03.569 SupportedActions          0.004 seconds. ✓ (FAST)
+19:42:37.399 DeviceState                                  At 19:37:03.575 DeviceState               0.006 seconds. ✓ (FAST)
+19:42:37.399 MaxSwitch                                    At 19:37:03.581 MaxSwitch                 0.001 seconds. ✓ (FAST)
+19:42:37.399 SwitchName (0)                               At 19:37:03.729 SwitchName (0)            0.002 seconds. ✓ (FAST)
+19:42:37.399 GetSwitchDescription (0)                     At 19:37:03.730 GetSwitchDescription (0)  0.001 seconds. ✓ (FAST)
+19:42:37.399 MinSwitchValue (0)                           At 19:37:03.732 MinSwitchValue (0)        0.002 seconds. ✓ (FAST)
+19:42:37.399 MinSwitchValue (0)                           At 19:37:03.733 MinSwitchValue (0)        0.001 seconds. ✓ (FAST)
+19:42:37.399 SwitchStep (0)                               At 19:37:03.734 SwitchStep (0)            0.001 seconds. ✓ (FAST)
+19:42:37.399 CanWrite (0)                                 At 19:37:03.735 CanWrite (0)              0.001 seconds. ✓ (FAST)
+19:42:37.399 CanAsync (0)                                 At 19:37:03.736 CanAsync (0)              0.001 seconds. ✓ (FAST)
+19:42:37.399 GetSwitch (0)                                At 19:37:03.737 GetSwitch (0)             0.001 seconds. ✓ (FAST)
+19:42:37.399 MinSwitchValue (0)                           At 19:37:04.239 MinSwitchValue (0)        0.002 seconds. ✓ (FAST)
+19:42:37.400 SetSwitchName (0)                            At 19:37:04.745 SetSwitchName (0)         0.004 seconds. ✓ (STANDARD)
+19:42:37.400 SetSwitch (0)                                At 19:37:04.746 SetSwitch (0)             0.001 seconds. ✓ (STANDARD)
+19:42:37.400 SetSwitchValue (0)                           At 19:37:15.768 SetSwitchValue (0)        0.002 seconds. ✓ (STANDARD)
+19:42:37.400 SwitchName (1)                               At 19:39:50.558 SwitchName (1)            0.002 seconds. ✓ (FAST)
+19:42:37.400 GetSwitchDescription (1)                     At 19:39:50.558 GetSwitchDescription (1)  0.000 seconds. ✓ (FAST)
+19:42:37.400 MinSwitchValue (1)                           At 19:39:50.559 MinSwitchValue (1)        0.000 seconds. ✓ (FAST)
+19:42:37.400 MinSwitchValue (1)                           At 19:39:50.559 MinSwitchValue (1)        0.000 seconds. ✓ (FAST)
+19:42:37.400 SwitchStep (1)                               At 19:39:50.559 SwitchStep (1)            0.000 seconds. ✓ (FAST)
+19:42:37.400 CanWrite (1)                                 At 19:39:50.561 CanWrite (1)              0.001 seconds. ✓ (FAST)
+19:42:37.400 CanAsync (1)                                 At 19:39:50.561 CanAsync (1)              0.000 seconds. ✓ (FAST)
+19:42:37.400 GetSwitch (1)                                At 19:39:50.561 GetSwitch (1)             0.000 seconds. ✓ (FAST)
+19:42:37.400 MinSwitchValue (1)                           At 19:39:51.068 MinSwitchValue (1)        0.004 seconds. ✓ (FAST)
+19:42:37.400 SetSwitchName (1)                            At 19:39:51.571 SetSwitchName (1)         0.002 seconds. ✓ (STANDARD)
+19:42:37.400 SetSwitch (1)                                At 19:39:51.572 SetSwitch (1)             0.001 seconds. ✓ (STANDARD)
+19:42:37.400 SetSwitchValue (1)                           At 19:40:02.594 SetSwitchValue (1)        0.001 seconds. ✓ (STANDARD)
+19:42:37.400 Disconnect                                   At 19:42:37.398 Disconnect                0.001 seconds. ✓ (STANDARD)
+19:42:37.400                                              
+19:42:37.400 Congratulations, all members returned within their target response times!!          

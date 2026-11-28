@@ -52,12 +52,12 @@ zwo	switch	fake_zwo_sdk.h	run	6	AlpacaCore/conformu/ZWO/Fake/Fake-switch-fake_zw
 zwo	switch	fake_zwo_asiair_gpiod.h	run	6	AlpacaCore/conformu/ZWO/Fake/Fake-switch-fake_zwo_asiair_gpiod-Linux-arm64.txt	-
 zwo	switch	fake_zwo_asiair_plus_ioctl.h	run	6	AlpacaCore/conformu/ZWO/Fake/Fake-switch-fake_zwo_asiair_plus_ioctl-Linux-arm64.txt	-
 wandererastro	rotator	-	no-fake	6	-	no fake exists yet
-touptek	switch	-thermal	no-fake	6	-	no fake exists yet
-touptek	filterwheel	-	no-fake	6	-	no fake exists yet
-touptek	focuser	-	no-fake	6	-	no fake exists yet
+touptek	switch	fake_touptek_sdk.h	run	6	AlpacaCore/conformu/ToupTek/Fake/Fake-switch-fake_touptek_sdk-Linux-arm64.txt	-
+touptek	filterwheel	fake_touptek_sdk.h	run	6	AlpacaCore/conformu/ToupTek/Fake/Fake-filterwheel-fake_touptek_sdk-Linux-arm64.txt	-
+touptek	focuser	fake_touptek_sdk.h	run	6	AlpacaCore/conformu/ToupTek/Fake/Fake-focuser-fake_touptek_sdk-Linux-arm64.txt	-
 ioptron	filterwheel	-	no-fake	6	-	no fake exists yet
 ioptron	camera	-	no-fake	6	-	no fake exists yet
-playerone	switch	-	no-fake	6	-	no fake exists yet
+playerone	switch	fake_playerone_sdk.h	run	6	AlpacaCore/conformu/Player One/Fake/Fake-switch-fake_playerone_sdk-Linux-arm64.txt	-
 qhy	filterwheel	-usb	no-fake	6	-	no fake exists yet
 gemini	covercalibrator	-v1	no-fake	6	-	no fake exists yet
 gemini	covercalibrator	-v2	no-fake	6	-	no fake exists yet

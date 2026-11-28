@@ -35,7 +35,7 @@ namespace alpacacore::test {
 
 // KNOWN PARITY GAPS: one fully modelled camera. add_listed_camera() adds more
 // that enumerate, open (ref-counted per id, like the wrapper's usage_ count),
-// probe their own caps and answer heater/fan reads, but cannot expose; no
+// probe their own caps and keep their own heater/fan values, but cannot expose; no
 // hot-plug enumeration; image-ready is immediate unless set_timing_clock() times the
 // exposure (#2693); set_image_size/start/bin
 // model the state changes but not additional model-specific SDK alignment.
@@ -379,23 +379,38 @@ public:
         }
         return egain_;
     }
+    // POA_HEATER_POWER and POA_FAN_POWER keep the value written, per camera, from the control's default. As
+    // POAGetConfig/POASetConfig do, a camera without the control fails POA_ERROR_INVALID_CONFIG, a read-only one
+    // refuses the write (POA_ERROR_CONF_CANNOT_WRITE) and a value outside [min, max] fails POA_ERROR_OUT_OF_LIMIT; the
+    // wrapper's map_poa_error() codes for each.
     int get_heater_power_percent(int camera_id) override {
         std::lock_guard<std::mutex> lock(mutex_);
         require_open_locked("get_heater_power_percent", camera_id);
-        return 0;
+        const auto& caps = caps_locked(camera_id);
+        require_control("POAGetConfig(int)", caps.has_heater_power);
+        return thermal_locked(camera_id).heater;
     }
-    void set_heater_power_percent(int camera_id, int) override {
+    void set_heater_power_percent(int camera_id, int percent) override {
         std::lock_guard<std::mutex> lock(mutex_);
         require_open_locked("set_heater_power_percent", camera_id);
+        const auto& caps = caps_locked(camera_id);
+        require_writable(caps.has_heater_power, caps.heater_power_writable, percent, caps.heater_power_min,
+                         caps.heater_power_max);
+        thermal_locked(camera_id).heater = percent;
     }
     int get_fan_power_percent(int camera_id) override {
         std::lock_guard<std::mutex> lock(mutex_);
         require_open_locked("get_fan_power_percent", camera_id);
-        return 0;
+        const auto& caps = caps_locked(camera_id);
+        require_control("POAGetConfig(int)", caps.has_fan_power);
+        return thermal_locked(camera_id).fan;
     }
-    void set_fan_power_percent(int camera_id, int) override {
+    void set_fan_power_percent(int camera_id, int percent) override {
         std::lock_guard<std::mutex> lock(mutex_);
         require_open_locked("set_fan_power_percent", camera_id);
+        const auto& caps = caps_locked(camera_id);
+        require_writable(caps.has_fan_power, caps.fan_power_writable, percent, caps.fan_power_min, caps.fan_power_max);
+        thermal_locked(camera_id).fan = percent;
     }
 
     void set_returned_size(int width, int height) {
@@ -438,12 +453,14 @@ public:
         caps_.has_fan_power = fan;
         caps_.fan_power_writable = fan;
         caps_.fan_power_max = fan ? 100 : 0;
+        thermal_ = {static_cast<int>(caps_.heater_power_default), static_cast<int>(caps_.fan_power_default)};
     }
     // A further camera, enumerated after the default one. Its camera_id must
     // differ from the default camera's (17).
     void add_listed_camera(CameraInfo info, ConfigCaps caps) {
         std::lock_guard<std::mutex> lock(mutex_);
-        listed_.push_back({std::move(info), caps, 0});
+        const ThermalPower power{static_cast<int>(caps.heater_power_default), static_cast<int>(caps.fan_power_default)};
+        listed_.push_back({std::move(info), caps, 0, power});
     }
     // Opens not yet balanced by a close, for the camera with this id.
     int open_refs(int camera_id) const {
@@ -544,11 +561,42 @@ public:
     }
 
 private:
+    struct ThermalPower {
+        int heater{0};
+        int fan{0};
+    };
     struct ListedCamera {
         CameraInfo info;
         ConfigCaps caps;
         int open_refs{0};
+        ThermalPower thermal{};
     };
+
+    const ConfigCaps& caps_locked(int camera_id) {
+        if (const auto* listed = find_listed_locked(camera_id)) return listed->caps;
+        return caps_;
+    }
+    ThermalPower& thermal_locked(int camera_id) {
+        if (auto* listed = find_listed_locked(camera_id)) return listed->thermal;
+        return thermal_;
+    }
+    static void require_control(const char* call, bool present) {
+        if (!present) {
+            throw alpacacore::AlpacaException(std::string(call) + ": invalid config",
+                                              alpacacore::AlpacaError::InvalidValue);
+        }
+    }
+    static void require_writable(bool present, bool writable, int value, long min, long max) {
+        require_control("POASetConfig(int)", present);
+        if (!writable) {
+            throw alpacacore::AlpacaException("POASetConfig(int): config cannot write",
+                                              alpacacore::AlpacaError::NotImplemented);
+        }
+        if (value < min || value > max) {
+            throw alpacacore::AlpacaException("POASetConfig(int): the value out of limit",
+                                              alpacacore::AlpacaError::InvalidValue);
+        }
+    }
 
     ListedCamera* find_listed_locked(int camera_id) {
         for (auto& listed : listed_) {
@@ -580,6 +628,7 @@ private:
     std::condition_variable start_readback_cv_;
     CameraInfo camera_{};
     ConfigCaps caps_{};
+    ThermalPower thermal_{};  // the default camera's heater and fan
     std::condition_variable download_cv_;
     int open_refs_{0};
     std::vector<ListedCamera> listed_;

@@ -51,6 +51,14 @@ namespace alpacacore::test {
  *   stay 0 in a correct driver).
  * - Scripted wheel positions: `wheel_position_script` is consumed one read at
  *   a time (last value repeats), so homing/bounce sequences are testable.
+ * - Moves that take time (`aaf_moving_reads`, `wheel_moving_reads`, both 0 =
+ *   settle at once by default): the AAF and AFW report a move in progress for a
+ *   number of reads after it starts. The ConformU factories set them (#2697).
+ *
+ * KNOWN PARITY GAPS: a move lasts a count of reads, not a time, and the AAF
+ * position does not sweep: it reads the start position until the move ends,
+ * and a HALT stops the focuser there. The AFW home (reset_filter_wheel) settles
+ * at once unless `wheel_position_script` scripts it.
  *
  * Not thread-hardened beyond a coarse recursive story: driver code already
  * serializes SDK access; tests drive one connect path at a time. Like the
@@ -73,6 +81,16 @@ public:
 
     // --- scripting knobs ---------------------------------------------------
     std::set<std::string> throw_from;
+    // throw_from for a case that changes it while a driver may call the fake (a tier-3 fault mid-move): the same
+    // injected failure, under the call-count lock.
+    void fail_from(const std::string& fn) {
+        std::lock_guard<std::mutex> lock(sync_->calls_mutex);
+        sync_->failing.insert(fn);
+    }
+    void clear_fail(const std::string& fn) {
+        std::lock_guard<std::mutex> lock(sync_->calls_mutex);
+        sync_->failing.erase(fn);
+    }
     // Persistent, not a one-shot: runs before every call until it is cleared (after the call is counted, before
     // throw_from), so a case can make one named call block. Null in every ordinary test; the contract sweep
     // sets it on the connect call to hold a connect open.
@@ -139,6 +157,12 @@ public:
     std::vector<ToupFilterWheelInfo> wheels;
     std::deque<int> wheel_position_script;  // consumed by get_filter_wheel_position
     int wheel_slot_count = 5;
+    // After set_filter_wheel_position, this many position reads answer -1 (moving), as the AFW does while it turns;
+    // then the target. 0 lands at once.
+    int wheel_moving_reads = 0;
+    // After an AAF SETPOSITION, this many ISMOVING reads answer 1 and GETPOSITION answers the start position; the next
+    // ISMOVING read lands the focuser on the target. A HALT ends the move at the start position. 0 lands at once.
+    int aaf_moving_reads = 0;
     // Per-(range_action, target_action) results for aaf_range; unlisted pairs
     // return 100000 so range validation is testable per action.
     std::map<std::pair<int, int>, int> aaf_range_script;
@@ -589,12 +613,31 @@ public:
             aaf_values_[vendor::touptek::ToupAAF::GetPosition] = value;
             return;
         }
+        if (action == vendor::touptek::ToupAAF::Halt) {
+            aaf_target_.reset();  // stops where it is: the move never left the start position
+            aaf_moving_left_ = 0;
+        }
+        if (action == vendor::touptek::ToupAAF::SetPosition && aaf_moving_reads > 0) {
+            aaf_target_ = value;
+            aaf_moving_left_ = aaf_moving_reads;
+            return;
+        }
         aaf_values_[canonical_aaf_key(action)] = value;
     }
     int aaf_get(HToupcam h, int action, const char*) override {
         hit("aaf_get");
         require_open(h);
         require_aaf_direction(action, /*write=*/false);
+        // The move lands on the ISMOVING read that ends it, so the GETPOSITION after a "moving" answer still reads
+        // the start: the two reads of one status frame agree.
+        if (action == vendor::touptek::ToupAAF::IsMoving && aaf_target_) {
+            if (aaf_moving_left_ > 0) {
+                --aaf_moving_left_;
+                return 1;
+            }
+            aaf_values_[vendor::touptek::ToupAAF::GetPosition] = *aaf_target_;
+            aaf_target_.reset();
+        }
         return aaf_values_[canonical_aaf_key(action)];
     }
     int aaf_range(HToupcam h, int range_action, int target_action, const char*) override {
@@ -635,6 +678,14 @@ public:
     int get_filter_wheel_position(HToupcam h) override {
         hit("get_filter_wheel_position");
         require_open(h);
+        if (wheel_moving_left_ > 0) {
+            --wheel_moving_left_;
+            return -1;
+        }
+        if (wheel_target_) {
+            wheel_position_ = *wheel_target_;
+            wheel_target_.reset();
+        }
         if (wheel_position_script.empty()) {
             return wheel_position_;
         }
@@ -647,8 +698,14 @@ public:
     void set_filter_wheel_position(HToupcam h, int position) override {
         hit("set_filter_wheel_position");
         require_open(h);
-        wheel_position_ = position;
         wheel_position_script.clear();
+        if (wheel_moving_reads > 0) {
+            wheel_target_ = position;
+            wheel_moving_left_ = wheel_moving_reads;
+            wheel_position_ = -1;
+            return;
+        }
+        wheel_position_ = position;
     }
 
 private:
@@ -656,6 +713,7 @@ private:
     // (tests build it in a helper and return it by value).
     struct Sync {
         std::mutex calls_mutex;
+        std::set<std::string> failing;  // fail_from(), under calls_mutex
         // The wrapper's SDK mutex (toupcam_family_sdk.h), modelled for enumerate_cameras and
         // open_camera_by_id only: an open held on before_call holds it, as Api::Open does.
         std::mutex sdk_mutex;
@@ -713,12 +771,14 @@ private:
     }
 
     void hit(const char* fn) {
+        bool failing = false;
         {
             std::lock_guard<std::mutex> lock(sync_->calls_mutex);
             ++calls[fn];
+            failing = sync_->failing.count(fn) != 0;
         }
         if (before_call) before_call(fn);
-        if (throw_from.count(fn) != 0) {
+        if (failing || throw_from.count(fn) != 0) {
             throw AlpacaException(std::string("fake: injected failure in ") + fn, AlpacaError::DriverException);
         }
     }
@@ -876,7 +936,11 @@ private:
     // driver's most common first action.
     int taillight_ = 1;
     std::map<int, int> aaf_values_;
+    std::optional<int> aaf_target_;  // a SETPOSITION still moving (aaf_moving_reads)
+    int aaf_moving_left_ = 0;
     int wheel_position_ = 0;
+    std::optional<int> wheel_target_;  // a move still turning (wheel_moving_reads)
+    int wheel_moving_left_ = 0;
 };
 
 }  // namespace alpacacore::test

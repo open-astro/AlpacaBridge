@@ -260,6 +260,26 @@ const std::vector<ConformuHost> kHosts = {
      "FakeTouptekPowerboxSDK (simulated StellaVita GPIO ports, in process)", [] { return true; },
      driver_of(cu::make_touptek_switch)},
 #endif
+#ifdef FAKE_CONFORMU_PLAYERONE
+    {"playerone", "switch", "fake_playerone_sdk.h", alpacacore::DeviceType::Switch, "playerone-fake",
+     "Player One thermal switch (fake SDK, test only)", "ALPACACORE_ENABLE_PLAYERONE",
+     "FakePlayerOneSDK (a simulated Player One camera with a dew heater and fan, in process)", [] { return true; },
+     driver_of(cu::make_playerone_switch)},
+#endif
+#ifdef FAKE_CONFORMU_TOUPTEK
+    {"touptek", "switch", "fake_touptek_sdk.h", alpacacore::DeviceType::Switch, "touptek-fake",
+     "ToupTek camera thermal switch (fake SDK, test only)", "ALPACACORE_ENABLE_TOUPTEK",
+     "FakeToupTekSDK (a simulated cooled ToupTek camera's dew heater, fan and tail light, in process)",
+     [] { return true; }, driver_of(cu::make_touptek_thermal_switch)},
+    {"touptek", "filterwheel", "fake_touptek_sdk.h", alpacacore::DeviceType::FilterWheel, "touptek-fake",
+     "ToupTek AFW (fake SDK, test only)", "ALPACACORE_ENABLE_TOUPTEK",
+     "FakeToupTekSDK (a simulated ToupTek AFW filter wheel, in process)", [] { return true; },
+     driver_of(cu::make_touptek_filterwheel)},
+    {"touptek", "focuser", "fake_touptek_sdk.h", alpacacore::DeviceType::Focuser, "touptek-fake",
+     "ToupTek AAF (fake SDK, test only)", "ALPACACORE_ENABLE_TOUPTEK",
+     "FakeToupTekSDK (a simulated ToupTek AAF focuser, in process)", [] { return true; },
+     driver_of(cu::make_touptek_focuser)},
+#endif
 #ifdef FAKE_CONFORMU_ZWO
     {"zwo", "switch", "fake_zwo_sdk.h", alpacacore::DeviceType::Switch, "zwo-fake",
      "ZWO Dew Heater (fake SDK, test only)", "ALPACACORE_ENABLE_ZWO",
