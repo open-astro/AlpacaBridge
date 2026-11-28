@@ -240,6 +240,9 @@ TEST_CASE("SynScan MoveAxis - a dispatch on a reset connection loses the link at
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    // A status poll that meets the reset first latches the lost link, and MoveAxis then refuses with NotConnected
+    // before it dispatches (#2795). Paused here, well before the drop, so the dispatch is what meets the reset.
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
 
     st->reject_goto.store(true);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
