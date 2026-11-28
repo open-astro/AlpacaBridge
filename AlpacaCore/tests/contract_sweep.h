@@ -90,8 +90,8 @@
 #include <alpacacore/vendor/weewx/weewx_observingconditions_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_REMOTEALPACA
-#include <alpacacore/vendor/remotealpaca/remotealpaca_dome_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_covercalibrator_driver.h>
+#include <alpacacore/vendor/remotealpaca/remotealpaca_dome_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_filterwheel_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_focuser_driver.h>
 #include <alpacacore/vendor/remotealpaca/remotealpaca_observingconditions_driver.h>
@@ -1084,8 +1084,8 @@ inline ContractEntry contract_entry_astroasis_focuser() {
     X(remotealpaca_safetymonitor)       \
     X(remotealpaca_rotator)             \
     X(remotealpaca_filterwheel)         \
-    X(remotealpaca_switch) X(remotealpaca_telescope) X(remotealpaca_focuser) X(remotealpaca_covercalibrator) \
-    X(remotealpaca_dome)
+    X(remotealpaca_switch)              \
+    X(remotealpaca_telescope) X(remotealpaca_focuser) X(remotealpaca_covercalibrator) X(remotealpaca_dome)
 #else
 #define CS_REMOTEALPACA(X)
 #endif
