@@ -4055,6 +4055,8 @@ private:
     // open-astro#2763: remembers where the mount points before a GOTO is sent ({RA hours, Dec degrees}, or {azimuth,
     // altitude} for an alt/az GOTO), from the polled frame: no exchange. Unknown, stale or unreadable leaves it empty,
     // and an empty origin never allows the far-miss repeat.
+    // Every GOTO start records it, a landing re-GOTO included, so after a re-GOTO near the target a far landing is
+    // never repeated (fail closed).
     void record_goto_origin_locked(bool altaz) {
         goto_origin_.reset();
         // read(), not served(): serving a frame past the staleness bound latches the link lost, and a GOTO's start
